@@ -4,13 +4,13 @@
   "description": "Allium language support for VS Code: diagnostics, refactors, hover, definitions, formatting, and more.",
   "version": "0.1.0",
   "license": "MIT",
-  "publisher": "cwchriswilliams",
+  "publisher": "juxt",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cwchriswilliams/allium-vscode-plugin.git"
+    "url": "https://github.com/juxt/allium-tools.git"
   },
   "bugs": {
-    "url": "https://github.com/cwchriswilliams/allium-vscode-plugin/issues"
+    "url": "https://github.com/juxt/allium-tools/issues"
   },
   "keywords": [
     "allium",

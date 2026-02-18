@@ -1,7 +1,7 @@
 ;;; allium-mode.el --- Major mode for Allium specifications  -*- lexical-binding: t; -*-
 
 ;; Version: 0.1.0
-;; Author: Chris Williams
+;; Author: JUXT
 ;; Keywords: languages, allium
 ;; Package-Requires: ((emacs "28.1"))
 

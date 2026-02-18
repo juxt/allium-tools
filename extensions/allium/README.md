@@ -43,9 +43,9 @@ The extension can be customized to fit your workflow:
 ## Documentation
 
 - [Full Allium Documentation](https://juxt.github.io/allium/language)
-- [Architecture Overview](https://github.com/cwchriswilliams/allium-vscode-plugin/blob/main/docs/project/architecture.md)
-- [Editor Setup Guides](https://github.com/cwchriswilliams/allium-vscode-plugin/tree/main/docs/editors)
+- [Architecture Overview](https://github.com/juxt/allium-tools/blob/main/docs/project/architecture.md)
+- [Editor Setup Guides](https://github.com/juxt/allium-tools/tree/main/docs/editors)
 
 ---
 
-**Allium Tools** is part of the Allium multi-editor platform. Join us on [GitHub](https://github.com/cwchriswilliams/allium-vscode-plugin).
+**Allium Tools** is part of the Allium multi-editor platform. Join us on [GitHub](https://github.com/juxt/allium-tools).

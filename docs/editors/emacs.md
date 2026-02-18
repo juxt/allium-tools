@@ -13,7 +13,7 @@ The LSP server must be available in your system path as `allium-lsp`.
 
 ### From Release Artifacts
 
-1. Download the `allium-lsp-<version>.tar.gz` for your platform from [GitHub Releases](https://github.com/cwchriswilliams/allium-vscode-plugin/releases).
+1. Download the `allium-lsp-<version>.tar.gz` for your platform from [GitHub Releases](https://github.com/juxt/allium-tools/releases).
 2. Extract the archive and move the `allium-lsp` binary to a directory in your `$PATH`.
 
 ### From Source
@@ -34,7 +34,7 @@ ln -s $(pwd)/dist/bin.js /usr/local/bin/allium-lsp
 
 ```elisp
 (use-package allium-mode
-  :straight (:host github :repo "cwchriswilliams/allium-vscode-plugin" 
+  :straight (:host github :repo "juxt/allium-tools"
              :files ("packages/allium-mode/*.el"))
   :mode "\.allium'")
 ```

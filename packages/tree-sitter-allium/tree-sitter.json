@@ -8,7 +8,7 @@
     "license": "MIT",
     "description": "Tree-sitter grammar for the Allium language.",
     "links": {
-      "repository": "https://github.com/cwchriswilliams/allium-vscode-plugin"
+      "repository": "https://github.com/juxt/allium-tools"
     }
   },
   "bindings": {

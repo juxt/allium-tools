@@ -15,7 +15,7 @@ The LSP server must be available in your system path as `allium-lsp`.
 
 ### From Release Artifacts
 
-1. Download the `allium-lsp-<version>.tar.gz` for your platform from [GitHub Releases](https://github.com/cwchriswilliams/allium-vscode-plugin/releases).
+1. Download the `allium-lsp-<version>.tar.gz` for your platform from [GitHub Releases](https://github.com/juxt/allium-tools/releases).
 2. Extract the archive and move the `allium-lsp` binary to a directory in your `$PATH` (e.g., `/usr/local/bin`).
 
 ### From Source
@@ -38,7 +38,7 @@ Add `nvim-allium` to your Neovim configuration. Below is an example using `lazy.
 -- Example init.lua configuration
 require("lazy").setup({
   {
-    "cwchriswilliams/allium-vscode-plugin",
+    "juxt/allium-tools",
     -- Note: During pre-release, you may need to point to the specific subdirectory
     -- or install from a local checkout.
     config = function()
