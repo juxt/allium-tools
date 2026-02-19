@@ -4,6 +4,9 @@ const cp = require("node:child_process");
 
 class LspHarness {
   constructor(modulePath, options = {}) {
+    // Use Node IPC transport for deterministic integration tests. In some
+    // non-interactive runners stdin can close early, and vscode-languageserver
+    // exits with code 1 before initialize when running over --stdio.
     this.process = cp.fork(modulePath, ["--node-ipc"], {
       cwd: options.cwd,
       silent: true,
