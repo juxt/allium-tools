@@ -65,3 +65,32 @@ test("rejects rename when target file already defines new name", () => {
   );
   assert.match(result.error ?? "", /collide/);
 });
+
+test("plans edits for dotted imported usages across workspace", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "allium-rename-"));
+  const shared = writeFile(
+    root,
+    "shared.allium",
+    `rule Ping {\n  when: Trigger()\n  ensures: Done()\n}\n`,
+  );
+  writeFile(
+    root,
+    "consumer.allium",
+    `use "./shared.allium" as shared\nrule A {\n  when: shared.Ping()\n  ensures: Done()\n}\n`,
+  );
+
+  const index = buildWorkspaceIndex(root);
+  const definition = buildDefinitionLookup(
+    fs.readFileSync(shared, "utf8"),
+  ).symbols.find((item) => item.name === "Ping" && item.kind === "rule");
+  assert.ok(definition);
+
+  const result = planWorkspaceImportedRename(
+    index,
+    shared,
+    definition!,
+    "PingRenamed",
+  );
+  assert.equal(result.error, undefined);
+  assert.equal(result.edits.length >= 2, true);
+});

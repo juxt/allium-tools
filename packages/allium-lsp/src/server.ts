@@ -156,6 +156,29 @@ export function positionToOffset(text: string, position: Position): number {
   return offset;
 }
 
+function tokenBoundsAtOffset(
+  text: string,
+  offset: number,
+): { startOffset: number; endOffset: number } | null {
+  if (offset < 0 || offset >= text.length) {
+    return null;
+  }
+  const isIdent = (char: string | undefined): boolean =>
+    !!char && /[A-Za-z0-9_]/.test(char);
+  let start = offset;
+  while (start > 0 && isIdent(text[start - 1])) {
+    start -= 1;
+  }
+  let end = offset;
+  while (end < text.length && isIdent(text[end])) {
+    end += 1;
+  }
+  if (start === end) {
+    return null;
+  }
+  return { startOffset: start, endOffset: end };
+}
+
 function uriToPath(uri: string): string {
   try {
     return fileURLToPath(uri);
@@ -166,6 +189,17 @@ function uriToPath(uri: string): string {
 
 function pathToUri(filePath: string): string {
   return pathToFileURL(filePath).toString();
+}
+
+function resolveImportPath(currentFilePath: string, sourcePath: string): string {
+  if (path.extname(sourcePath) !== ".allium") {
+    return path.resolve(path.dirname(currentFilePath), `${sourcePath}.allium`);
+  }
+  return path.resolve(path.dirname(currentFilePath), sourcePath);
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // ---------------------------------------------------------------------------
@@ -399,29 +433,93 @@ connection.onReferences((params): Location[] => {
   if (!doc) return [];
 
   const text = doc.getText();
+  const filePath = uriToPath(params.textDocument.uri);
   const offset = positionToOffset(text, params.position);
   const defs = findDefinitionsAtOffset(text, offset);
-  if (defs.length === 0) return [];
-
-  const definition = defs[0];
-  const refs = findReferencesInText(text, definition);
-
-  const locations: Location[] = refs.map((ref) => ({
-    uri: params.textDocument.uri,
-    range: Range.create(
-      offsetToPosition(text, ref.startOffset),
-      offsetToPosition(text, ref.endOffset),
-    ),
-  }));
-
-  if (params.context.includeDeclaration) {
-    locations.unshift({
-      uri: params.textDocument.uri,
+  const locations: Location[] = [];
+  const seen = new Set<string>();
+  const addLocation = (
+    uri: string,
+    sourceText: string,
+    startOffset: number,
+    endOffset: number,
+  ): void => {
+    const key = `${uri}:${startOffset}:${endOffset}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    locations.push({
+      uri,
       range: Range.create(
-        offsetToPosition(text, definition.startOffset),
-        offsetToPosition(text, definition.endOffset),
+        offsetToPosition(sourceText, startOffset),
+        offsetToPosition(sourceText, endOffset),
       ),
     });
+  };
+
+  if (defs.length > 0) {
+    const definition = defs[0];
+    const refs = findReferencesInText(text, definition);
+    for (const ref of refs) {
+      addLocation(params.textDocument.uri, text, ref.startOffset, ref.endOffset);
+    }
+
+    if (params.context.includeDeclaration) {
+      addLocation(
+        params.textDocument.uri,
+        text,
+        definition.startOffset,
+        definition.endOffset,
+      );
+    }
+    return locations;
+  }
+
+  // Imported symbol fallback: collect references in definition file and aliased uses.
+  const imported = resolveImportedDefinition(filePath, text, offset, workspaceIndex);
+  if (imported.length !== 1) {
+    return [];
+  }
+
+  const { filePath: targetPath, definition } = imported[0];
+  const targetDoc = workspaceIndex.documents.find(
+    (d) => path.resolve(d.filePath) === path.resolve(targetPath),
+  );
+  if (!targetDoc) {
+    return [];
+  }
+
+  const targetUri = pathToUri(targetDoc.filePath);
+  for (const ref of findReferencesInText(targetDoc.text, definition)) {
+    addLocation(targetUri, targetDoc.text, ref.startOffset, ref.endOffset);
+  }
+
+  for (const candidateDoc of workspaceIndex.documents) {
+    const aliases = parseUseAliases(candidateDoc.text);
+    for (const alias of aliases) {
+      const resolved = resolveImportPath(candidateDoc.filePath, alias.sourcePath);
+      if (path.resolve(resolved) !== path.resolve(targetDoc.filePath)) {
+        continue;
+      }
+      const pattern = new RegExp(
+        `\\b${escapeRegex(alias.alias)}[\\/.](${escapeRegex(definition.name)})\\b`,
+        "g",
+      );
+      for (
+        let match = pattern.exec(candidateDoc.text);
+        match;
+        match = pattern.exec(candidateDoc.text)
+      ) {
+        const startOffset = match.index + alias.alias.length + 1;
+        addLocation(
+          pathToUri(candidateDoc.filePath),
+          candidateDoc.text,
+          startOffset,
+          startOffset + definition.name.length,
+        );
+      }
+    }
   }
 
   return locations;
@@ -633,18 +731,31 @@ connection.onPrepareRename((params) => {
   if (!doc) return null;
 
   const text = doc.getText();
+  const filePath = uriToPath(params.textDocument.uri);
   const offset = positionToOffset(text, params.position);
   const target = prepareRenameTarget(text, offset);
-  if (!target) {
-    throw new ResponseError(
-      ErrorCodes.InvalidRequest,
-      "No renameable symbol at cursor.",
+  if (target) {
+    return Range.create(
+      offsetToPosition(text, target.startOffset),
+      offsetToPosition(text, target.endOffset),
     );
   }
 
-  return Range.create(
-    offsetToPosition(text, target.startOffset),
-    offsetToPosition(text, target.endOffset),
+  // Imported symbol fallback (e.g. alias.Symbol) for cross-file rename.
+  const imported = resolveImportedDefinition(filePath, text, offset, workspaceIndex);
+  if (imported.length === 1) {
+    const bounds = tokenBoundsAtOffset(text, offset);
+    if (bounds) {
+      return Range.create(
+        offsetToPosition(text, bounds.startOffset),
+        offsetToPosition(text, bounds.endOffset),
+      );
+    }
+  }
+
+  throw new ResponseError(
+    ErrorCodes.InvalidRequest,
+    "No renameable symbol at cursor.",
   );
 });
 
@@ -658,10 +769,41 @@ connection.onRenameRequest((params): WorkspaceEdit | null => {
   const { plan, error } = planRename(text, offset, params.newName);
 
   if (error || !plan) {
-    throw new ResponseError(
-      ErrorCodes.InvalidRequest,
-      error ?? "Rename failed.",
-    );
+    const imported = resolveImportedDefinition(filePath, text, offset, workspaceIndex);
+    if (imported.length === 1) {
+      const { filePath: targetFilePath, definition } = imported[0];
+      const { edits, error: importedError } = planWorkspaceImportedRename(
+        workspaceIndex,
+        targetFilePath,
+        definition,
+        params.newName,
+      );
+      if (importedError) {
+        throw new ResponseError(ErrorCodes.InvalidRequest, importedError);
+      }
+
+      const changes: Record<string, TextEdit[]> = {};
+      for (const edit of edits) {
+        const targetUri = pathToUri(edit.filePath);
+        const targetDoc = workspaceIndex.documents.find(
+          (d) => path.resolve(d.filePath) === path.resolve(edit.filePath),
+        );
+        const targetText = targetDoc?.text ?? "";
+        if (!changes[targetUri]) changes[targetUri] = [];
+        changes[targetUri].push(
+          offsetsToTextEdit(
+            targetText,
+            edit.startOffset,
+            edit.endOffset,
+            params.newName,
+          ),
+        );
+      }
+
+      return { changes };
+    }
+
+    throw new ResponseError(ErrorCodes.InvalidRequest, error ?? "Rename failed.");
   }
 
   const changes: Record<string, TextEdit[]> = {};

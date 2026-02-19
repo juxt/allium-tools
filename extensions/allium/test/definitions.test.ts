@@ -134,3 +134,10 @@ test("extracts imported symbol token at offset", () => {
   const imported = importedSymbolAtOffset(text, offset);
   assert.deepEqual(imported, { alias: "shared", symbol: "Ping" });
 });
+
+test("extracts dotted imported symbol token at offset", () => {
+  const text = `rule A {\n  when: shared.Ping()\n  ensures: Done()\n}\n`;
+  const offset = text.indexOf("shared.Ping") + "shared.Pi".length;
+  const imported = importedSymbolAtOffset(text, offset);
+  assert.deepEqual(imported, { alias: "shared", symbol: "Ping" });
+});

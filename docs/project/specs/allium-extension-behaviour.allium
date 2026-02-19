@@ -829,6 +829,13 @@ rule VariantDeclarationRequiresVariantKeyword {
         ensures: DefinitionLocationReturned()
     }
 
+    rule ParseImportedAliasSymbolWithDotOrSlash {
+        when: ImportedSymbolReferenceParsed(reference)
+        requires: reference.qualified_with_alias_separator in [".", "/"]
+
+        ensures: ImportedAliasAndSymbolResolved()
+    }
+
     rule ProvideDocumentLinksForUseImports {
         when: DocumentLinksRequested(document)
         requires: document.language_id = "allium"

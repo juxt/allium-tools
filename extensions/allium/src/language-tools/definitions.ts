@@ -198,12 +198,16 @@ export function importedSymbolAtOffset(
     return null;
   }
   const symbol = text.slice(start, end);
-  const slashIndex = start - 1;
-  if (slashIndex < 1 || text[slashIndex] !== "/") {
+  const separatorIndex = start - 1;
+  if (separatorIndex < 1) {
+    return null;
+  }
+  const separator = text[separatorIndex];
+  if (separator !== "/" && separator !== ".") {
     return null;
   }
 
-  const aliasEnd = slashIndex;
+  const aliasEnd = separatorIndex;
   let aliasStart = aliasEnd;
   while (aliasStart > 0 && isIdent(text[aliasStart - 1])) {
     aliasStart -= 1;

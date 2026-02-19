@@ -56,7 +56,7 @@ export function planWorkspaceImportedRename(
         continue;
       }
       const pattern = new RegExp(
-        `\\b${escapeRegex(alias.alias)}\\/(${escapeRegex(definition.name)})\\b`,
+        `\\b${escapeRegex(alias.alias)}[\\/.](${escapeRegex(definition.name)})\\b`,
         "g",
       );
       for (
