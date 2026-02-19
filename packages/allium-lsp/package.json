@@ -10,7 +10,7 @@
   "scripts": {
     "build": "esbuild src/bin.ts --bundle --platform=node --target=node20 --outfile=dist/bin.js --define:require.main=undefined && chmod +x dist/bin.js",
     "lint": "tsc --noEmit -p ./tsconfig.json",
-    "test": "echo \"No tests yet\" && exit 0"
+    "test": "npm run build && node ../../scripts/run-node-tests.mjs ./test"
   },
   "dependencies": {
     "vscode-languageserver": "^9.0.1",
