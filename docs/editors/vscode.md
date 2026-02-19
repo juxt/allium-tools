@@ -10,7 +10,7 @@ Search for "Allium" in the VS Code Extensions view and click **Install**.
 
 ### From Release Artifacts
 
-1. Download the `allium-vscode-<version>.vsix` file from the [GitHub Releases](https://github.com/cwchriswilliams/allium-vscode-plugin/releases) page.
+1. Download the `allium-vscode-<version>.vsix` file from the [GitHub Releases](https://github.com/juxt/allium-tools/releases) page.
 2. In VS Code, open the Extensions view (`Ctrl+Shift+X`).
 3. Click the **...** (Views and More Actions) menu in the top-right corner.
 4. Select **Install from VSIX...**.

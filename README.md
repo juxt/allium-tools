@@ -56,7 +56,7 @@ rule PlaceOrder {
 
 ### VS Code
 
-1. Download the latest `allium-vscode-<version>.vsix` from [GitHub Releases](https://github.com/cwchriswilliams/allium-vscode-plugin/releases).
+1. Download the latest `allium-vscode-<version>.vsix` from [GitHub Releases](https://github.com/juxt/allium-tools/releases).
 2. Install via Command Palette: `Extensions: Install from VSIX...`.
 3. See the [VS Code Setup Guide](docs/editors/vscode.md) for details.
 

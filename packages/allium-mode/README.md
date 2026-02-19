@@ -8,7 +8,7 @@ Emacs major mode for the Allium specification language.
 
 ```elisp
 (use-package allium-mode
-  :straight (:host github :repo "cwchriswilliams/allium-vscode-plugin" 
+  :straight (:host github :repo "juxt/allium-tools"
              :files ("packages/allium-mode/*.el"))
   :mode "\.allium'")
 ```
@@ -19,7 +19,7 @@ In `packages.el`:
 
 ```elisp
 (package! allium-mode
-  :recipe (:host github :repo "cwchriswilliams/allium-vscode-plugin"
+  :recipe (:host github :repo "juxt/allium-tools"
            :files ("packages/allium-mode/*.el")))
 ```
 

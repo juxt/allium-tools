@@ -8,8 +8,8 @@ Neovim integration for the Allium language, providing LSP and Tree-sitter suppor
 
 ```lua
 {
-  "cwchriswilliams/allium-vscode-plugin", -- Replace with actual repo when split
-  dir = "~/path/to/allium-vscode-plugin/packages/nvim-allium", -- Local development path
+  "juxt/allium-tools",
+  dir = "~/path/to/allium-tools/packages/nvim-allium", -- Local development path
   dependencies = {
     "neovim/nvim-lspconfig",
     "nvim-treesitter/nvim-treesitter",
