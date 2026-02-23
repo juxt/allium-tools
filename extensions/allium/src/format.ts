@@ -394,7 +394,7 @@ function clampInteger(value: number, min: number, max: number): number {
 }
 
 function isTopLevelDeclarationLine(line: string): boolean {
-  return /^(entity|external\s+entity|value|variant|rule|surface|actor|config|enum|default|module|context|deferred|open_question)\b/.test(
+  return /^(entity|external\s+entity|value|variant|rule|surface|actor|config|enum|default|module|given|deferred|open\s+question)\b/.test(
     line,
   );
 }
@@ -404,7 +404,7 @@ function normalizeDeclarationHeaderSpacing(line: string): string {
     return line;
   }
   return line.replace(
-    /^((?:entity|external\s+entity|value|variant|rule|surface|actor|config|enum|default|module|context|deferred|open_question)\b[^{]*?)\s*\{$/,
+    /^((?:entity|external\s+entity|value|variant|rule|surface|actor|config|enum|default|module|given|deferred|open\s+question)\b[^{]*?)\s*\{$/,
     "$1 {",
   );
 }

@@ -2,7 +2,7 @@
  * Tree-sitter grammar for the Allium language.
  *
  * Allium is a specification language with block-based declarations (rule,
- * entity, enum, config, context, surface, actor, value) and clause-driven
+ * entity, enum, config, given, surface, actor, value) and clause-driven
  * rule bodies (when:, requires:, ensures:).
  */
 
@@ -11,17 +11,19 @@
 
 const PREC = {
   COMMA: 1,
-  OR: 2,
-  AND: 3,
-  NOT: 4,
-  COMPARE: 5,
-  ADD: 6,
-  MULTIPLY: 7,
-  INFIX: 8,
-  PIPE: 9,
-  CALL: 10,
-  MEMBER: 11,
-  PRIMARY: 12,
+  LAMBDA: 2,
+  OR: 3,
+  NULLISH_COALESCE: 4,
+  AND: 5,
+  NOT: 6,
+  COMPARE: 7,
+  ADD: 8,
+  MULTIPLY: 9,
+  INFIX: 10,
+  PIPE: 11,
+  CALL: 12,
+  MEMBER: 13,
+  PRIMARY: 14,
 };
 
 module.exports = grammar({
@@ -72,7 +74,7 @@ module.exports = grammar({
 
     // duration must be tried before plain number (longer match wins)
     duration_literal: (_) =>
-      token(/\d+(\.\d+)?\.(seconds|minutes|hours|days)/),
+      token(/\d+(\.\d+)?\.(seconds?|minutes?|hours?|days?|weeks?|months?|years?)/),
 
     number_literal: (_) => /\d+(\.\d+)?/,
 
@@ -98,12 +100,13 @@ module.exports = grammar({
         $.external_entity_declaration,
         $.value_declaration,
         $.enum_declaration,
-        $.context_block,
+        $.given_block,
         $.config_block,
         $.surface_declaration,
         $.actor_declaration,
         $.default_declaration,
         $.variant_declaration,
+        $.deferred_declaration,
       ),
 
     use_declaration: ($) =>
@@ -133,7 +136,7 @@ module.exports = grammar({
     enum_declaration: ($) =>
       seq("enum", field("name", $.identifier), field("body", $.block_body)),
 
-    context_block: ($) => seq("context", field("body", $.block_body)),
+    given_block: ($) => seq("given", field("body", $.block_body)),
 
     config_block: ($) => seq("config", field("body", $.block_body)),
 
@@ -161,6 +164,10 @@ module.exports = grammar({
         ":",
         field("type", $._expression),
       ),
+
+    // "deferred path.expression"
+    deferred_declaration: ($) =>
+      seq("deferred", field("path", $._expression)),
 
     // -----------------------------------------------------------------------
     // Block body
@@ -195,7 +202,11 @@ module.exports = grammar({
         "related",
         "exposes",
         "identified_by",
-        "for",
+        "facing",
+        "transitions_to",
+        "guarantee",
+        "timeout",
+        "within",
       ),
 
     // Field assignment: plain identifier followed by colon and an expression
@@ -215,9 +226,9 @@ module.exports = grammar({
         field("value", $._expression),
       ),
 
-    // open_question: "open_question: ..." marker
-    open_question: (_) =>
-      seq("open_question", ":", token(/[^\n]*/)),
+    // open_question: 'open question "..."' marker
+    open_question: ($) =>
+      seq("open", "question", field("text", $.string_literal)),
 
     // -----------------------------------------------------------------------
     // Expressions
@@ -225,7 +236,9 @@ module.exports = grammar({
 
     _expression: ($) =>
       choice(
+        $.lambda_expression,
         $.or_expression,
+        $.null_coalescing_expression,
         $.and_expression,
         $.not_expression,
         $.comparison_expression,
@@ -235,6 +248,7 @@ module.exports = grammar({
         $.pipe_expression,
         $.call_expression,
         $.member_expression,
+        $.optional_member_expression,
         $.string_literal,
         $.duration_literal,
         $.number_literal,
@@ -282,13 +296,13 @@ module.exports = grammar({
     not_expression: ($) =>
       prec(PREC.NOT, seq("not", field("operand", $._expression))),
 
-    // Comparisons: = == != < > <= >= =>
+    // Comparisons: = == != < > <= >=
     comparison_expression: ($) =>
       prec.left(
         PREC.COMPARE,
         seq(
           field("left", $._expression),
-          field("operator", choice("=", "==", "!=", "<", ">", "<=", ">=", "=>")),
+          field("operator", choice("=", "==", "!=", "<", ">", "<=", ">=")),
           field("right", $._expression),
         ),
       ),
@@ -374,6 +388,39 @@ module.exports = grammar({
           field("object", $._expression),
           ".",
           field("property", $.identifier),
+        ),
+      ),
+
+    // Optional member / dot access: "a?.b"
+    optional_member_expression: ($) =>
+      prec(
+        PREC.MEMBER,
+        seq(
+          field("object", $._expression),
+          "?.",
+          field("property", $.identifier),
+        ),
+      ),
+
+    // Null coalescing: "a ?? b"
+    null_coalescing_expression: ($) =>
+      prec.left(
+        PREC.NULLISH_COALESCE,
+        seq(
+          field("left", $._expression),
+          "??",
+          field("right", $._expression),
+        ),
+      ),
+
+    // Lambda: "params => body"
+    lambda_expression: ($) =>
+      prec.right(
+        PREC.LAMBDA,
+        seq(
+          field("parameters", $._expression),
+          "=>",
+          field("body", $._expression),
         ),
       ),
   },

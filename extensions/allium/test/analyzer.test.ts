@@ -154,8 +154,8 @@ test("reports undefined config reference", () => {
   );
 });
 
-test("reports open_question as warning finding", () => {
-  const findings = analyzeAllium(`open_question "Needs decision?"`);
+test("reports open question as warning finding", () => {
+  const findings = analyzeAllium(`open question "Needs decision?"`);
   const finding = findings.find(
     (f) => f.code === "allium.openQuestion.present",
   );
@@ -188,7 +188,7 @@ test("relaxed mode downgrades undefined config severity", () => {
 
 test("reports missing actor referenced by surface", () => {
   const findings = analyzeAllium(
-    `surface ChildView {\n  for parent: Parent\n}\n`,
+    `surface ChildView {\n  facing parent: Parent\n}\n`,
   );
   assert.ok(findings.some((f) => f.code === "allium.surface.missingActor"));
 });
@@ -253,19 +253,19 @@ test("reports empty enum declarations", () => {
 
 test("reports duplicate context binding names", () => {
   const findings = analyzeAllium(
-    `entity Pipeline {\n  status: String\n}\n\ncontext {\n  pipeline: Pipeline\n  pipeline: Pipeline\n}\n`,
+    `entity Pipeline {\n  status: String\n}\n\ngiven {\n  pipeline: Pipeline\n  pipeline: Pipeline\n}\n`,
   );
   assert.ok(findings.some((f) => f.code === "allium.context.duplicateBinding"));
 });
 
 test("reports undefined context binding type", () => {
-  const findings = analyzeAllium(`context {\n  pipeline: MissingType\n}\n`);
+  const findings = analyzeAllium(`given {\n  pipeline: MissingType\n}\n`);
   assert.ok(findings.some((f) => f.code === "allium.context.undefinedType"));
 });
 
 test("does not report context type for imported alias reference", () => {
   const findings = analyzeAllium(
-    `use "./shared.allium" as scheduling\n\ncontext {\n  calendar: scheduling/calendar\n}\n`,
+    `use "./shared.allium" as scheduling\n\ngiven {\n  calendar: scheduling/calendar\n}\n`,
   );
   assert.equal(
     findings.some((f) => f.code === "allium.context.undefinedType"),
@@ -275,14 +275,14 @@ test("does not report context type for imported alias reference", () => {
 
 test("reports undefined related surface reference", () => {
   const findings = analyzeAllium(
-    `surface Dashboard {\n  for user: User\n  related:\n    MissingSurface\n}\n`,
+    `surface Dashboard {\n  facing user: User\n  related:\n    MissingSurface\n}\n`,
   );
   assert.ok(findings.some((f) => f.code === "allium.surface.relatedUndefined"));
 });
 
 test("does not report related surface when declared", () => {
   const findings = analyzeAllium(
-    `surface Dashboard {\n  for user: User\n  related:\n    DetailView\n}\n\nsurface DetailView {\n  for user: User\n}\n`,
+    `surface Dashboard {\n  facing user: User\n  related:\n    DetailView\n}\n\nsurface DetailView {\n  facing user: User\n}\n`,
   );
   assert.equal(
     findings.some((f) => f.code === "allium.surface.relatedUndefined"),
@@ -290,16 +290,16 @@ test("does not report related surface when declared", () => {
   );
 });
 
-test("reports unused surface for-binding", () => {
+test("reports unused surface facing-binding", () => {
   const findings = analyzeAllium(
-    `surface Dashboard {\n  for viewer: User\n  exposes:\n    System.status\n}\n`,
+    `surface Dashboard {\n  facing viewer: User\n  exposes:\n    System.status\n}\n`,
   );
   assert.ok(findings.some((f) => f.code === "allium.surface.unusedBinding"));
 });
 
 test("does not report used surface bindings", () => {
   const findings = analyzeAllium(
-    `surface Dashboard {\n  for viewer: User\n  context assignment: SlotConfirmation\n  exposes:\n    assignment.status\n  provides:\n    DashboardViewed(viewer: viewer)\n}\n`,
+    `surface Dashboard {\n  facing viewer: User\n  context assignment: SlotConfirmation\n  exposes:\n    assignment.status\n  provides:\n    DashboardViewed(viewer: viewer)\n}\n`,
   );
   assert.equal(
     findings.some((f) => f.code === "allium.surface.unusedBinding"),
@@ -309,14 +309,14 @@ test("does not report used surface bindings", () => {
 
 test("reports undefined field path in surface clauses", () => {
   const findings = analyzeAllium(
-    `entity SlotConfirmation {\n  status: String\n}\n\nsurface Dashboard {\n  for viewer: User\n  context assignment: SlotConfirmation\n  exposes:\n    assignment.missing_field\n}\n`,
+    `entity SlotConfirmation {\n  status: String\n}\n\nsurface Dashboard {\n  facing viewer: User\n  context assignment: SlotConfirmation\n  exposes:\n    assignment.missing_field\n}\n`,
   );
   assert.ok(findings.some((f) => f.code === "allium.surface.undefinedPath"));
 });
 
 test("does not report valid field path in surface clauses", () => {
   const findings = analyzeAllium(
-    `entity SlotConfirmation {\n  status: String\n}\n\nsurface Dashboard {\n  for viewer: User\n  context assignment: SlotConfirmation\n  exposes:\n    assignment.status\n}\n`,
+    `entity SlotConfirmation {\n  status: String\n}\n\nsurface Dashboard {\n  facing viewer: User\n  context assignment: SlotConfirmation\n  exposes:\n    assignment.status\n}\n`,
   );
   assert.equal(
     findings.some((f) => f.code === "allium.surface.undefinedPath"),
@@ -326,7 +326,7 @@ test("does not report valid field path in surface clauses", () => {
 
 test("reports surface iteration over non-collection expression", () => {
   const findings = analyzeAllium(
-    `entity SlotConfirmation {\n  status: String\n}\n\nsurface Dashboard {\n  for viewer: User\n  context assignment: SlotConfirmation\n  exposes:\n    for item in assignment.status:\n      item\n}\n`,
+    `entity SlotConfirmation {\n  status: String\n}\n\nsurface Dashboard {\n  facing viewer: User\n  context assignment: SlotConfirmation\n  exposes:\n    for item in assignment.status:\n      item\n}\n`,
   );
   assert.ok(
     findings.some((f) => f.code === "allium.surface.nonCollectionIteration"),
@@ -335,7 +335,7 @@ test("reports surface iteration over non-collection expression", () => {
 
 test("does not report surface iteration over collection expression", () => {
   const findings = analyzeAllium(
-    `entity SlotConfirmation {\n  statuses: List<String>\n}\n\nsurface Dashboard {\n  for viewer: User\n  context assignment: SlotConfirmation\n  exposes:\n    for item in assignment.statuses:\n      item\n}\n`,
+    `entity SlotConfirmation {\n  statuses: List<String>\n}\n\nsurface Dashboard {\n  facing viewer: User\n  context assignment: SlotConfirmation\n  exposes:\n    for item in assignment.statuses:\n      item\n}\n`,
   );
   assert.equal(
     findings.some((f) => f.code === "allium.surface.nonCollectionIteration"),
@@ -345,14 +345,14 @@ test("does not report surface iteration over collection expression", () => {
 
 test("reports surface path not observed in rule references", () => {
   const findings = analyzeAllium(
-    `entity SlotConfirmation {\n  status: String\n  score: Integer\n}\n\nrule KeepStatus {\n  when: assignment: SlotConfirmation.created\n  ensures: assignment.status = active\n}\n\nsurface Dashboard {\n  for viewer: User\n  context assignment: SlotConfirmation\n  exposes:\n    assignment.score\n}\n`,
+    `entity SlotConfirmation {\n  status: String\n  score: Integer\n}\n\nrule KeepStatus {\n  when: assignment: SlotConfirmation.created\n  ensures: assignment.status = active\n}\n\nsurface Dashboard {\n  facing viewer: User\n  context assignment: SlotConfirmation\n  exposes:\n    assignment.score\n}\n`,
   );
   assert.ok(findings.some((f) => f.code === "allium.surface.unusedPath"));
 });
 
 test("warns on contradictory surface when condition", () => {
   const findings = analyzeAllium(
-    `surface Dashboard {\n  for viewer: User\n  provides:\n    Opened()\n      when viewer.status = active and viewer.status = suspended\n}\n`,
+    `surface Dashboard {\n  facing viewer: User\n  provides:\n    Opened()\n      when viewer.status = active and viewer.status = suspended\n}\n`,
   );
   assert.ok(findings.some((f) => f.code === "allium.surface.impossibleWhen"));
 });
@@ -504,7 +504,7 @@ test("does not report valid singular relationship target", () => {
 
 test("reports duplicate named requires blocks in surface", () => {
   const findings = analyzeAllium(
-    `surface Dashboard {\n  for viewer: User\n  requires Visibility:\n    viewer.id != null\n  requires Visibility:\n    viewer.active = true\n}\n`,
+    `surface Dashboard {\n  facing viewer: User\n  requires Visibility:\n    viewer.id != null\n  requires Visibility:\n    viewer.active = true\n}\n`,
   );
   assert.ok(
     findings.some((f) => f.code === "allium.surface.duplicateRequiresBlock"),
@@ -513,7 +513,7 @@ test("reports duplicate named requires blocks in surface", () => {
 
 test("warns for named requires block without deferred hint", () => {
   const findings = analyzeAllium(
-    `surface Dashboard {\n  for viewer: User\n  requires ApprovalFlow:\n    viewer.id != null\n}\n`,
+    `surface Dashboard {\n  facing viewer: User\n  requires ApprovalFlow:\n    viewer.id != null\n}\n`,
   );
   const finding = findings.find(
     (f) => f.code === "allium.surface.requiresWithoutDeferred",
@@ -524,7 +524,7 @@ test("warns for named requires block without deferred hint", () => {
 
 test("does not warn when named requires block has deferred hint", () => {
   const findings = analyzeAllium(
-    `deferred Dashboard.ApprovalFlow\n\nsurface Dashboard {\n  for viewer: User\n  requires ApprovalFlow:\n    viewer.id != null\n}\n`,
+    `deferred Dashboard.ApprovalFlow\n\nsurface Dashboard {\n  facing viewer: User\n  requires ApprovalFlow:\n    viewer.id != null\n}\n`,
   );
   assert.equal(
     findings.some((f) => f.code === "allium.surface.requiresWithoutDeferred"),
@@ -534,7 +534,7 @@ test("does not warn when named requires block has deferred hint", () => {
 
 test("reports duplicate named provides blocks in surface", () => {
   const findings = analyzeAllium(
-    `surface Dashboard {\n  for viewer: User\n  provides Navigate:\n    Opened()\n  provides Navigate:\n    Refreshed()\n}\n`,
+    `surface Dashboard {\n  facing viewer: User\n  provides Navigate:\n    Opened()\n  provides Navigate:\n    Refreshed()\n}\n`,
   );
   assert.ok(
     findings.some((f) => f.code === "allium.surface.duplicateProvidesBlock"),
@@ -588,7 +588,7 @@ test("does not report binding defined by trigger parameter", () => {
 
 test("does not report binding defined in context block", () => {
   const findings = analyzeAllium(
-    `entity User {\n  status: String\n}\n\ncontext {\n  user: User\n}\n\nrule Notify {\n  when: Ping()\n  requires: user.status = active\n  ensures: Done()\n}\n`,
+    `entity User {\n  status: String\n}\n\ngiven {\n  user: User\n}\n\nrule Notify {\n  when: Ping()\n  requires: user.status = active\n  ensures: Done()\n}\n`,
   );
   assert.equal(
     findings.some((f) => f.code === "allium.rule.undefinedBinding"),
@@ -653,7 +653,7 @@ test("unreachable trigger diagnostic range is anchored to trigger call in when c
 
 test("does not warn when rule trigger is provided by a surface", () => {
   const findings = analyzeAllium(
-    `surface Dashboard {\n  for user: User\n  provides:\n    InvitationExpired(invitation)\n}\n\nrule A {\n  when: InvitationExpired(invitation)\n  ensures: Done()\n}\n`,
+    `surface Dashboard {\n  facing user: User\n  provides:\n    InvitationExpired(invitation)\n}\n\nrule A {\n  when: InvitationExpired(invitation)\n  ensures: Done()\n}\n`,
   );
   assert.equal(
     findings.some((f) => f.code === "allium.rule.unreachableTrigger"),
@@ -768,7 +768,7 @@ test("warns when non-terminal status has no observed exit transition", () => {
 
 test("reports provides trigger missing external stimulus definition", () => {
   const findings = analyzeAllium(
-    `rule TriggerA {\n  when: UserRequested()\n  ensures: Done()\n}\n\nsurface Dashboard {\n  for viewer: User\n  provides:\n    MissingTrigger(viewer: viewer)\n}\n`,
+    `rule TriggerA {\n  when: UserRequested()\n  ensures: Done()\n}\n\nsurface Dashboard {\n  facing viewer: User\n  provides:\n    MissingTrigger(viewer: viewer)\n}\n`,
   );
   assert.ok(
     findings.some((f) => f.code === "allium.surface.undefinedProvidesTrigger"),
@@ -777,10 +777,17 @@ test("reports provides trigger missing external stimulus definition", () => {
 
 test("does not report provides trigger when defined by external stimulus rule", () => {
   const findings = analyzeAllium(
-    `rule TriggerA {\n  when: TriggerA(viewer)\n  ensures: Done()\n}\n\nsurface Dashboard {\n  for viewer: User\n  provides:\n    TriggerA(viewer: viewer)\n}\n`,
+    `rule TriggerA {\n  when: TriggerA(viewer)\n  ensures: Done()\n}\n\nsurface Dashboard {\n  facing viewer: User\n  provides:\n    TriggerA(viewer: viewer)\n}\n`,
   );
   assert.equal(
     findings.some((f) => f.code === "allium.surface.undefinedProvidesTrigger"),
     false,
   );
+});
+
+test("accepts transitions_to trigger shape", () => {
+  const findings = analyzeAllium(
+    `entity Order {\n  status: String\n}\n\nrule NotifyOnChange {\n  when: order: Order.status transitions_to shipped\n  ensures: Done()\n}\n`,
+  );
+  assert.equal(findings.filter((f) => f.code === "allium.rule.unknownTrigger").length, 0);
 });

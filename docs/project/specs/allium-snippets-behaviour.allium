@@ -18,7 +18,7 @@ rule SnippetCatalogIncludesCoreDeclarations {
     ensures: SnippetAvailable(prefix: config)
     ensures: SnippetAvailable(prefix: surface)
     ensures: SnippetAvailable(prefix: actor)
-    ensures: SnippetAvailable(prefix: context)
+    ensures: SnippetAvailable(prefix: given)
     ensures: SnippetAvailable(prefix: default)
     ensures: SnippetAvailable(prefix: module)
     ensures: SnippetAvailable(prefix: use)

@@ -9,7 +9,7 @@ test("returns keyword completions in generic context", () => {
   assert.ok(labels.includes("rule"));
   assert.ok(labels.includes("ensures"));
   assert.ok(labels.includes("enum"));
-  assert.ok(labels.includes("context"));
+  assert.ok(labels.includes("given"));
   assert.ok(labels.includes("module"));
   assert.ok(labels.includes("with"));
   assert.ok(labels.includes("exists"));

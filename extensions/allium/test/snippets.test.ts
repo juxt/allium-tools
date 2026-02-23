@@ -13,7 +13,7 @@ test("snippet catalog includes key official language constructs", () => {
   >;
 
   assert.equal(snippets.Enum?.prefix, "enum");
-  assert.equal(snippets.Context?.prefix, "context");
+  assert.equal(snippets.Given?.prefix, "given");
   assert.equal(snippets.Default?.prefix, "default");
   assert.equal(snippets.Module?.prefix, "module");
   assert.ok(snippets.Enum.body.some((line) => line.includes("EnumName")));

@@ -72,9 +72,9 @@
     "prefix": "surface",
     "body": [
       "surface ${1:SurfaceName} {",
-      "    for ${2:viewer}: ${3:Actor}",
+      "    facing ${2:viewer}: ${3:Actor}",
       "",
-      "    context ${4:item}: ${5:Entity}",
+      "    given ${4:item}: ${5:Entity}",
       "",
       "    exposes:",
       "        ${4:item}.${6:field}",
@@ -96,7 +96,7 @@
   },
   "Open Question": {
     "prefix": "open-question",
-    "body": ["open_question \"${1:question}\""],
+    "body": ["open question \"${1:question}\""],
     "description": "Allium open question"
   },
   "Deferred": {
@@ -104,12 +104,12 @@
     "body": ["deferred ${1:Spec}.${2:function}"],
     "description": "Allium deferred declaration"
   },
-  "Context": {
-    "prefix": "context",
+  "Given": {
+    "prefix": "given",
     "body": [
-      "context ${1:item}: ${2:Entity}"
+      "given ${1:item}: ${2:Entity}"
     ],
-    "description": "Allium context declaration"
+    "description": "Allium given declaration"
   },
   "Default": {
     "prefix": "default",

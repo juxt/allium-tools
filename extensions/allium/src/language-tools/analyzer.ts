@@ -169,7 +169,7 @@ function applyDiagnosticsMode(
 
 function findOpenQuestions(text: string, lineStarts: number[]): Finding[] {
   const findings: Finding[] = [];
-  const pattern = /^\s*open_question\s+"[^"]*"/gm;
+  const pattern = /^\s*open\s+question\s+"[^"]*"/gm;
   for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
     findings.push(
       rangeFinding(
@@ -1186,7 +1186,7 @@ function findContextBindingIssues(
       .filter((block) => block.kind === "use")
       .map((block) => block.alias ?? block.name),
   );
-  const contextBlocks = blocks.filter((block) => block.kind === "context");
+  const contextBlocks = blocks.filter((block) => block.kind === "given");
   const bindingPattern =
     /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*(?:\/[A-Za-z_][A-Za-z0-9_]*)?)\s*$/gm;
 
@@ -1259,7 +1259,7 @@ function collectContextBindingNames(
   blocks: ReturnType<typeof parseAlliumBlocks>,
 ): Set<string> {
   const names = new Set<string>();
-  const contextBlocks = blocks.filter((block) => block.kind === "context");
+  const contextBlocks = blocks.filter((block) => block.kind === "given");
   const bindingPattern = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/gm;
   for (const block of contextBlocks) {
     for (
@@ -1277,7 +1277,7 @@ function collectContextBindingTypes(
   blocks: ReturnType<typeof parseAlliumBlocks>,
 ): Map<string, string> {
   const types = new Map<string, string>();
-  const contextBlocks = blocks.filter((block) => block.kind === "context");
+  const contextBlocks = blocks.filter((block) => block.kind === "given");
   const pattern =
     /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*(?:\/[A-Za-z_][A-Za-z0-9_]*)?)\s*$/gm;
   for (const block of contextBlocks) {
@@ -1558,7 +1558,7 @@ function findSurfaceActorLinkIssues(
   const surfaceBlocks = blocks.filter((block) => block.kind === "surface");
   const referencedActors = new Set<string>();
   const forPattern =
-    /^\s*for\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/m;
+    /^\s*facing\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/m;
 
   for (const surface of surfaceBlocks) {
     const match = surface.body.match(forPattern);
@@ -1645,14 +1645,14 @@ function findSurfaceBindingUsageIssues(
   for (const surface of surfaceBlocks) {
     const body = surface.body;
     const forMatch = body.match(
-      /^\s*for\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*[A-Za-z_][A-Za-z0-9_]*(?:\s+with\s+.+)?\s*$/m,
+      /^\s*facing\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*[A-Za-z_][A-Za-z0-9_]*(?:\s+with\s+.+)?\s*$/m,
     );
     const contextMatch = body.match(
       /^\s*context\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*[A-Za-z_][A-Za-z0-9_]*(?:\s+with\s+.+)?\s*$/m,
     );
     const bindings = [
       ...(forMatch
-        ? [{ name: forMatch[1], source: "for", line: forMatch[0] }]
+        ? [{ name: forMatch[1], source: "facing", line: forMatch[0] }]
         : []),
       ...(contextMatch
         ? [{ name: contextMatch[1], source: "context", line: contextMatch[0] }]
@@ -2504,6 +2504,9 @@ function isValidTriggerShape(trigger: string): boolean {
   if (/\bbecomes\b/.test(tail)) {
     return true;
   }
+  if (/\btransitions_to\b/.test(tail)) {
+    return true;
+  }
   if (/(<=|>=|<|>)\s*now\b/.test(tail) || /\bnow\s*[-+]\s*\d/.test(tail)) {
     return true;
   }
@@ -3029,7 +3032,7 @@ function collectRulePathSuffixes(
 function collectSurfaceBindingTypes(body: string): Map<string, string> {
   const bindings = new Map<string, string>();
   const patterns = [
-    /^\s*for\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)/m,
+    /^\s*facing\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)/m,
     /^\s*context\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)/m,
   ];
   for (const pattern of patterns) {

@@ -232,16 +232,16 @@ export function buildDiagramResult(text: string): DiagramBuildResult {
     );
     const body = surface[2];
 
-    const forMatch = body.match(
-      /^\s*for\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/m,
+    const facingMatch = body.match(
+      /^\s*facing\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/m,
     );
-    if (forMatch) {
-      const actor = ensureNode("actor", forMatch[1], "actor");
+    if (facingMatch) {
+      const actor = ensureNode("actor", facingMatch[1], "actor");
       addEdge(
         actor,
         surfaceNode,
-        "for",
-        surface.index + surface[0].indexOf(forMatch[0]),
+        "facing",
+        surface.index + surface[0].indexOf(facingMatch[0]),
       );
     }
 
@@ -471,7 +471,7 @@ function collectSkippedDeclarationIssues(
 ): DiagramIssue[] {
   const issues: DiagramIssue[] = [];
   const pattern =
-    /^\s*(default|deferred|open_question|context|config|use)\b[^\n]*$/gm;
+    /^\s*(default|deferred|open\s+question|given|config|use)\b[^\n]*$/gm;
   for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
     if (isCommentLineAtIndex(text, match.index)) {
       continue;

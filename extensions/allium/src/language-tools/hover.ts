@@ -9,9 +9,16 @@ const HOVER_DOCS: Record<string, string> = {
   surface:
     "Defines an actor-facing projection with context, exposed fields, and capabilities.",
   actor: "Defines a principal interacting with one or more surfaces.",
-  open_question:
+  open:
     "Marks unresolved product or domain questions inside the specification.",
   deferred: "Declares behavior that is intentionally deferred to another spec.",
+  given: "Declares module-level entity bindings available to all rules.",
+  facing: "Binds an actor to a surface.",
+  transitions_to:
+    "Trigger clause: fires when a field transitions to a specific value.",
+  guarantee: "Declares a guarantee constraint on a surface.",
+  timeout: "Declares a timeout constraint on a surface.",
+  within: "Declares a containment relationship for an actor.",
 };
 
 export function hoverTextAtOffset(text: string, offset: number): string | null {

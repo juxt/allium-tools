@@ -32,7 +32,7 @@ const HELP_BY_CODE: Record<string, Omit<FindingHelp, "url">> = {
   },
   "allium.openQuestion.present": {
     title: "Open question present",
-    summary: "The spec contains an open_question marker.",
+    summary: "The spec contains an open question marker.",
     why: "Open questions indicate incomplete or unresolved behavior.",
     howToFix:
       "Resolve the question and replace it with concrete specification language.",

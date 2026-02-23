@@ -97,7 +97,7 @@ function nextEnumName(text: string, preferred: string): string {
 
 function findEnumInsertionOffset(text: string): number {
   const firstDeclaration =
-    /^\s*(module|use|context|external\s+entity|entity|value|variant|enum|config|default|rule|surface|actor|deferred|open_question)\b/m.exec(
+    /^\s*(module|use|given|external\s+entity|entity|value|variant|enum|config|default|rule|surface|actor|deferred|open\s+question)\b/m.exec(
       text,
     );
   if (firstDeclaration) {

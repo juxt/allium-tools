@@ -49,7 +49,7 @@ default Role viewer = {
 }
 
 surface ChildView {
-  for parent: Parent
+  facing parent: Parent
 }
 
 actor Parent {

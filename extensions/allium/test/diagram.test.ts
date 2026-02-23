@@ -8,7 +8,7 @@ import {
 
 test("builds diagram model with entities, rules, and surfaces", () => {
   const model = buildDiagramResult(
-    `entity Invitation {\n  status: pending | accepted\n}\n\nrule AcceptInvitation {\n  when: invitation: Invitation.status becomes pending\n  ensures: Invitation.created(status: accepted)\n}\n\nsurface InvitationPortal {\n  for user: User\n  context invitation: Invitation\n  provides:\n    AcceptInvitation(invitation)\n}\n`,
+    `entity Invitation {\n  status: pending | accepted\n}\n\nrule AcceptInvitation {\n  when: invitation: Invitation.status becomes pending\n  ensures: Invitation.created(status: accepted)\n}\n\nsurface InvitationPortal {\n  facing user: User\n  context invitation: Invitation\n  provides:\n    AcceptInvitation(invitation)\n}\n`,
   ).model;
 
   assert.ok(model.nodes.some((n) => n.key === "entity:Invitation"));

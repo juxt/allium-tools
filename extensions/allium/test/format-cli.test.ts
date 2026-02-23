@@ -62,11 +62,11 @@ test("formatAlliumText normalizes pipe spacing in enum literals", () => {
 
 test("formatAlliumText normalizes declaration header brace spacing", () => {
   const input =
-    'enum Recommendation{\nstrong_yes|yes\n}\nrule A{\nwhen: Ping()\n}\nopen_question SpecGap{\nwhy: "x"\n}\n';
+    'enum Recommendation{\nstrong_yes|yes\n}\nrule A{\nwhen: Ping()\n}\nopen question SpecGap{\nwhy: "x"\n}\n';
   const output = formatAlliumText(input);
   assert.equal(
     output,
-    'enum Recommendation {\n    strong_yes | yes\n}\n\nrule A {\n    when: Ping()\n}\n\nopen_question SpecGap {\n    why: "x"\n}\n',
+    'enum Recommendation {\n    strong_yes | yes\n}\n\nrule A {\n    when: Ping()\n}\n\nopen question SpecGap {\n    why: "x"\n}\n',
   );
 });
 

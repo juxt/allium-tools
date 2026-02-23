@@ -40,11 +40,11 @@
       "patterns": [
         {
           "name": "keyword.declaration.allium",
-          "match": "\\b(use|context|external|entity|value|variant|enum|config|default|rule|surface|actor|deferred|open_question|module)\\b"
+          "match": "\\b(use|given|external|entity|value|variant|enum|config|default|rule|surface|actor|deferred|open\\s+question|module)\\b"
         },
         {
           "name": "keyword.control.allium",
-          "match": "\\b(when|requires|ensures|let|for|with|if|else|in|as|identified_by|exposes|provides|related|guidance|invariant|becomes|not|exists|and|or)\\b"
+          "match": "\\b(when|requires|ensures|let|facing|with|if|else|in|as|identified_by|exposes|provides|related|guidance|invariant|becomes|not|exists|and|or|where|within|guarantee|timeout|transitions_to|trigger|tags)\\b"
         }
       ]
     },
@@ -52,7 +52,7 @@
       "patterns": [
         {
           "name": "support.type.builtin.allium",
-          "match": "\\b(String|Integer|Decimal|Boolean|Timestamp|Duration|Email|URL|Set|List)\\b"
+          "match": "\\b(String|Integer|Decimal|Boolean|Timestamp|Duration|Set|List)\\b"
         },
         {
           "name": "support.type.reference.allium",
@@ -68,7 +68,7 @@
         },
         {
           "name": "constant.other.duration.allium",
-          "match": "\\b\\d+(?:\\.\\d+)?\\.(seconds|minutes|hours|days)\\b"
+          "match": "\\b\\d+(?:\\.\\d+)?\\.(seconds?|minutes?|hours?|days?|weeks?|months?|years?)\\b"
         }
       ]
     },
@@ -92,7 +92,7 @@
       "patterns": [
         {
           "name": "keyword.operator.allium",
-          "match": "(<=|>=|!=|=|<|>|=>|\\+|-|\\*|\\/)"
+          "match": "(<=|>=|!=|=|<|>|\\+|-|\\*|\\/|\\?\\?|\\?\\.|=>)"
         }
       ]
     }

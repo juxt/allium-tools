@@ -541,7 +541,7 @@ rule VariantDeclarationRequiresVariantKeyword {
     }
 
     rule DuplicateContextBindingIsError {
-        when: ContextBlockParsed(context_block)
+        when: GivenBlockParsed(context_block)
         requires: context_block.contains_duplicate_binding_name = true
 
         ensures: Finding.created(
@@ -551,7 +551,7 @@ rule VariantDeclarationRequiresVariantKeyword {
     }
 
     rule UndefinedContextBindingTypeIsError {
-        when: ContextBlockParsed(context_block)
+        when: GivenBlockParsed(context_block)
         requires: context_block.binding_type_not_declared_locally_or_imported = true
 
         ensures: Finding.created(
@@ -563,7 +563,7 @@ rule VariantDeclarationRequiresVariantKeyword {
     rule UndefinedRuleBindingIsError {
         when: RuleClauseParsed(clause)
         requires: clause.references_unqualified_binding_or_exists_for_source = true
-        requires: referenced_binding not resolved_from [context, trigger_parameters, default_instances, let_bindings, for_bindings]
+        requires: referenced_binding not resolved_from [given, trigger_parameters, default_instances, let_bindings, for_bindings]
 
         ensures: Finding.created(
         code: "allium.rule.undefinedBinding",
@@ -603,7 +603,7 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule UnusedSurfaceBindingIsWarning {
         when: SurfaceBlockParsed(surface)
-        requires: surface.for_or_context_binding_unused = true
+        requires: surface.facing_or_context_binding_unused = true
 
         ensures: Finding.created(
         code: "allium.surface.unusedBinding",
@@ -873,7 +873,7 @@ rule VariantDeclarationRequiresVariantKeyword {
     rule ProvideKeywordHoverDocumentation {
         when: HoverRequested(document, token_at_cursor)
         requires: document.language_id = "allium"
-        requires: token_at_cursor in [entity, rule, when, requires, ensures, config, surface, actor, open_question, deferred]
+        requires: token_at_cursor in [entity, rule, when, requires, ensures, config, surface, actor, open_question, deferred, given, facing]
 
         ensures: HoverDocumentationReturned()
         ensures: HoverIncludesDeclarationContextWhenAvailable()
@@ -909,7 +909,7 @@ rule VariantDeclarationRequiresVariantKeyword {
 
         ensures: CompletionItemAvailable(kind: keyword)
         ensures: CompletionItemAvailable(label: enum)
-        ensures: CompletionItemAvailable(label: context)
+        ensures: CompletionItemAvailable(label: given)
         ensures: CompletionItemAvailable(label: module)
         ensures: CompletionItemAvailable(label: with)
         ensures: CompletionItemAvailable(label: exists)
