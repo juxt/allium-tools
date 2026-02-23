@@ -14,7 +14,7 @@ rule AllClauses {
   related: other_entity
   exposes: internal_val
   identified_by: id_field
-  for: actor_name
+  facing: actor_name
 }
 
 ---

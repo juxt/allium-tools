@@ -96,9 +96,9 @@ enum Status {
         value: (string_literal)))))
 
 ==================
-Context and Config
+Given and Config
 ==================
-context {
+given {
   user: current_user
 }
 
@@ -109,7 +109,7 @@ config {
 ---
 
 (source_file
-  (context_block
+  (given_block
     body: (block_body
       (field_assignment
         key: (identifier)

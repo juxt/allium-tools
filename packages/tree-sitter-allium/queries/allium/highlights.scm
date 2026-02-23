@@ -8,7 +8,7 @@
   "external"
   "value"
   "enum"
-  "context"
+  "given"
   "config"
   "surface"
   "actor"
@@ -67,12 +67,14 @@
   ">"
   "<="
   ">="
-  "=>"
   "+"
   "-"
   "*"
   "/"
   "|"
+  "=>"
+  "??"
+  "?."
 ] @operator
 
 [
