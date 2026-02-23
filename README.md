@@ -102,3 +102,7 @@ npm install -g @allium/cli
 ## Development
 
 See [AGENTS.md](AGENTS.md) for development rules and the [Project Roadmap](docs/project/plan.md) for build instructions and priorities.
+
+## Licence
+
+[MIT](LICENSE)
