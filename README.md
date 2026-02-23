@@ -10,7 +10,7 @@ Allium is a domain-specific language for specifying system behavior, rules, and 
 
 ### Key Concepts
 
-- **Blocks**: Top-level declarations like `rule`, `entity`, `enum`, `config`, `context`, `surface`, and `actor`.
+- **Blocks**: Top-level declarations like `rule`, `entity`, `enum`, `config`, `given`, `surface`, and `actor`.
 - **Clauses**: Express requirements and effects using `when:`, `requires:`, and `ensures:`.
 - **Traceability**: Built-in support for linking specifications to implementation and tests.
 
@@ -20,9 +20,7 @@ Allium is a domain-specific language for specifying system behavior, rules, and 
 module ordering
 
 enum OrderStatus {
-    pending
-    confirmed
-    dispatched
+    pending | confirmed | dispatched
 }
 
 entity Order {
@@ -33,7 +31,13 @@ entity Order {
 rule PlaceOrder {
     when: OrderSubmitted(basket)
     requires: basket.items.count > 0
-    ensures: Order.created(status: OrderStatus.pending)
+    ensures: Order.created(status: pending, total: basket.total)
+}
+
+rule DispatchOrder {
+    when: order: Order.status becomes confirmed
+    requires: order.total > 0
+    ensures: order.status = dispatched
 }
 ```
 
