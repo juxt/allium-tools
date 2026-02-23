@@ -1,34 +1,43 @@
 import { parseDeclarationAst } from "./typed-ast";
+import type { ScaffoldFramework } from "./test-scaffold-frameworks";
 
 export function buildRuleTestScaffold(
   specText: string,
   moduleName: string,
+  framework: ScaffoldFramework,
 ): string {
   const declarations = parseDeclarationAst(specText).filter(
     (entry) => entry.kind === "rule",
   );
+  if (declarations.length === 0) {
+    return "";
+  }
   const lines: string[] = [];
-  lines.push(`import test from "node:test";`);
-  lines.push(`import assert from "node:assert/strict";`);
-  lines.push("");
+  for (const line of framework.header) {
+    lines.push(line);
+  }
+  if (framework.header.length > 0) {
+    lines.push("");
+  }
   for (const declaration of declarations) {
-    if (declaration.kind !== "rule") {
-      continue;
+    for (const line of framework.testOpen(`${moduleName} / ${declaration.name}`).split("\n")) {
+      lines.push(line);
     }
-    lines.push(`test("${moduleName} / ${declaration.name}", () => {`);
     if (declaration.when) {
       lines.push(
-        `  // trigger: ${declaration.when.replace(/\s+/g, " ").trim()}`,
+        `${framework.indent}${framework.comment(`trigger: ${declaration.when.replace(/\s+/g, " ").trim()}`)}`,
       );
     }
     for (const req of declaration.requires) {
-      lines.push(`  // requires: ${req}`);
+      lines.push(`${framework.indent}${framework.comment(`requires: ${req}`)}`);
     }
     for (const ens of declaration.ensures) {
-      lines.push(`  // ensures: ${ens}`);
+      lines.push(`${framework.indent}${framework.comment(`ensures: ${ens}`)}`);
     }
-    lines.push(`  assert.ok(true);`);
-    lines.push(`});`);
+    lines.push(`${framework.indent}${framework.placeholder}`);
+    if (framework.testClose) {
+      lines.push(framework.testClose);
+    }
     lines.push("");
   }
   return lines.join("\n");

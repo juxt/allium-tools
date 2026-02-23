@@ -96,6 +96,7 @@ import {
   planRename,
 } from "../../../extensions/allium/src/language-tools/rename";
 import { planWorkspaceImportedRename } from "../../../extensions/allium/src/language-tools/cross-file-rename";
+import { getFramework, frameworkIds } from "../../../extensions/allium/src/language-tools/test-scaffold-frameworks";
 import { formatAlliumText } from "../../../extensions/allium/src/format";
 import { collectTopLevelFoldingBlocks } from "../../../extensions/allium/src/language-tools/folding";
 import {
@@ -1021,7 +1022,21 @@ connection.onRequest("allium/generateScaffold", (params: { uri: string }) => {
   if (!doc) return null;
   const text = doc.getText();
   const moduleName = path.basename(uriToPath(params.uri), ".allium");
-  return { scaffold: buildRuleTestScaffold(text, moduleName) };
+  const config = workspaceRoot
+    ? readWorkspaceAlliumConfig(workspaceRoot)
+    : undefined;
+  const frameworkId = config?.scaffold?.framework;
+  if (!frameworkId) {
+    return { scaffold: null, noFramework: true };
+  }
+  const framework = getFramework(frameworkId);
+  if (!framework) {
+    return { scaffold: null, unknownFramework: frameworkId, supportedFrameworks: frameworkIds() };
+  }
+  return {
+    scaffold: buildRuleTestScaffold(text, moduleName, framework),
+    languageId: framework.languageId,
+  };
 });
 
 connection.onRequest(

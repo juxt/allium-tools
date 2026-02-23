@@ -22,6 +22,9 @@ export interface WorkspaceAlliumConfig {
     commandsFrom?: string;
     skipCommands?: boolean;
   };
+  scaffold?: {
+    framework?: string;
+  };
 }
 
 export function readWorkspaceAlliumConfig(

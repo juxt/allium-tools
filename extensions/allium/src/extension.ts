@@ -439,11 +439,33 @@ async function generateRuleTestScaffold(): Promise<void> {
     void vscode.window.showInformationMessage("Open an .allium file first.");
     return;
   }
-  const result = await client.sendRequest<{ scaffold: string } | null>(
-    "allium/generateScaffold",
-    { uri: editor.document.uri.toString() },
-  );
-  if (!result || !result.scaffold) {
+  const result = await client.sendRequest<{
+    scaffold: string | null;
+    languageId?: string;
+    noFramework?: boolean;
+    unknownFramework?: string;
+    supportedFrameworks?: string[];
+  }>("allium/generateScaffold", { uri: editor.document.uri.toString() });
+  if (!result) {
+    void vscode.window.showInformationMessage(
+      "No rules found in current spec.",
+    );
+    return;
+  }
+  if (result.noFramework) {
+    void vscode.window.showInformationMessage(
+      `Set "scaffold": { "framework": "..." } in allium.config.json to generate test scaffolds.`,
+    );
+    return;
+  }
+  if (result.unknownFramework) {
+    const supported = result.supportedFrameworks?.join(", ") ?? "(unknown)";
+    void vscode.window.showInformationMessage(
+      `Unknown scaffold framework "${result.unknownFramework}". Supported: ${supported}`,
+    );
+    return;
+  }
+  if (!result.scaffold) {
     void vscode.window.showInformationMessage(
       "No rules found in current spec.",
     );
@@ -451,7 +473,7 @@ async function generateRuleTestScaffold(): Promise<void> {
   }
   const doc = await vscode.workspace.openTextDocument({
     content: result.scaffold,
-    language: "typescript",
+    language: result.languageId ?? "plaintext",
   });
   await vscode.window.showTextDocument(doc);
 }

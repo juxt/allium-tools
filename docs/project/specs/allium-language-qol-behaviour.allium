@@ -159,9 +159,11 @@ rule SpecDriftCheckReportsCodeAndCommandCoverageDiffs {
 rule RuleTestScaffoldCommandGeneratesTestTemplateFromRuleDeclarations {
     when: CommandInvoked(name: "allium.generateRuleTestScaffold")
     requires: ActiveSpecContainsRuleDeclarations()
+    requires: ScaffoldFrameworkConfigured()
 
     ensures: TestTemplateDocumentOpened()
     ensures: RuleNamesAndClauseHintsIncluded()
+    ensures: FrameworkSpecificSyntaxUsed()
 }
 
 rule BaselineManagementCommandCanPreviewOrWriteFingerprintSet {

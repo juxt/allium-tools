@@ -23,6 +23,9 @@
     "testExtensions": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
     "testNamePatterns": ["\\\\.test\\\\.", "\\\\.spec\\."]
   },
+  "scaffold": {
+    "framework": "node:test"
+  },
   "drift": {
     "sources": ["extensions/allium/src/language-tools"],
     "sourceExtensions": [".ts"],

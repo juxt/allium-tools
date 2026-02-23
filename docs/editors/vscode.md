@@ -51,7 +51,7 @@ The extension identifies common errors and provides automated fixes:
 
 - **Diagram Preview**: Generate visual representations of your specifications. Run `Allium: Generate Diagram`.
 - **Rule Simulation**: Test rule logic with sample data. Run `Allium: Preview Rule Simulation`.
-- **Test Scaffold**: Automatically generate boilerplate for rule tests. Run `Allium: Generate Rule Test Scaffold`.
+- **Test Scaffold**: Generate test boilerplate from rule declarations. Requires a `scaffold.framework` key in `allium.config.json` (see [adding scaffold frameworks](../project/scaffold-frameworks.md)). Run `Allium: Generate Rule Test Scaffold`.
 
 ## Configuration
 
