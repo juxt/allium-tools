@@ -91,6 +91,25 @@ export function buildDiagramResult(text: string): DiagramBuildResult {
     edges.push({ from: from.id, to: to.id, label, sourceOffset });
   };
 
+  const resolveDeclaredTypeNode = (rawTypeName: string): DiagramNode | null => {
+    const typeName = rawTypeName.includes("/")
+      ? rawTypeName.split("/")[1]
+      : rawTypeName;
+    const candidateKinds: DiagramNodeKind[] = [
+      "entity",
+      "value",
+      "variant",
+      "enum",
+    ];
+    for (const kind of candidateKinds) {
+      const node = nodeByKey.get(`${kind}:${typeName}`);
+      if (node) {
+        return node;
+      }
+    }
+    return null;
+  };
+
   const blocks = parseAlliumBlocks(text);
   for (const block of blocks) {
     if (block.kind === "rule") {
@@ -154,6 +173,44 @@ export function buildDiagramResult(text: string): DiagramBuildResult {
       const targetType = rel[1].includes("/") ? rel[1].split("/")[1] : rel[1];
       const target = ensureNode("entity", targetType, "entity");
       addEdge(source, target, "rel");
+    }
+    for (const typeRef of parseFieldTypeReferences(body)) {
+      const target = resolveDeclaredTypeNode(typeRef);
+      if (target) {
+        addEdge(source, target, "type");
+      }
+    }
+  }
+
+  const valueBlockPattern =
+    /^\s*value\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([\s\S]*?)^\s*\}/gm;
+  for (
+    let value = valueBlockPattern.exec(text);
+    value;
+    value = valueBlockPattern.exec(text)
+  ) {
+    const source = ensureNode("value", value[1], "value");
+    for (const typeRef of parseFieldTypeReferences(value[2])) {
+      const target = resolveDeclaredTypeNode(typeRef);
+      if (target) {
+        addEdge(source, target, "type");
+      }
+    }
+  }
+
+  const variantBlockPattern =
+    /^\s*variant\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*[A-Za-z_][A-Za-z0-9_]*)?\s*\{([\s\S]*?)^\s*\}/gm;
+  for (
+    let variant = variantBlockPattern.exec(text);
+    variant;
+    variant = variantBlockPattern.exec(text)
+  ) {
+    const source = ensureNode("variant", variant[1], "variant");
+    for (const typeRef of parseFieldTypeReferences(variant[2])) {
+      const target = resolveDeclaredTypeNode(typeRef);
+      if (target) {
+        addEdge(source, target, "type");
+      }
     }
   }
 
@@ -557,4 +614,39 @@ function parseSurfaceProvidesCalls(body: string): string[] {
     }
   }
   return calls;
+}
+
+function parseFieldTypeReferences(body: string): string[] {
+  const refs: string[] = [];
+  const seen = new Set<string>();
+  const fieldPattern = /^\s*[A-Za-z_][A-Za-z0-9_]*\s*:\s*(.+)$/gm;
+  for (
+    let field = fieldPattern.exec(body);
+    field;
+    field = fieldPattern.exec(body)
+  ) {
+    const annotation = field[1].trim();
+    if (/\bfor\s+this\b/.test(annotation)) {
+      continue;
+    }
+    const tokenPattern = /[A-Za-z_][A-Za-z0-9_]*(?:\/[A-Za-z_][A-Za-z0-9_]*)?/g;
+    for (
+      let token = tokenPattern.exec(annotation);
+      token;
+      token = tokenPattern.exec(annotation)
+    ) {
+      const candidate = token[0];
+      const localName = candidate.includes("/")
+        ? candidate.split("/")[1]
+        : candidate;
+      if (!/^[A-Z]/.test(localName)) {
+        continue;
+      }
+      if (!seen.has(candidate)) {
+        seen.add(candidate);
+        refs.push(candidate);
+      }
+    }
+  }
+  return refs;
 }
