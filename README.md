@@ -55,6 +55,7 @@ rule PlaceOrder {
 | Completions | ✅ | ✅ | ✅ | - |
 | Diagram Preview | ✅ | - | - | ✅ |
 | Rule Simulation | ✅ | - | - | - |
+| Test Scaffold | ✅ | - | - | - |
 
 ## Quick Install
 
