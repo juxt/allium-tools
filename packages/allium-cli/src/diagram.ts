@@ -652,6 +652,7 @@ function renderDiagram(model: DiagramModel, format: DiagramFormat): string {
 function renderD2(model: DiagramModel): string {
   const lines: string[] = ["direction: right", ""];
   const nodesByKind = groupNodesByKind(model.nodes);
+  const nodeKindById = new Map(model.nodes.map((node) => [node.id, node.kind]));
   for (const [kind, nodes] of nodesByKind) {
     lines.push(`${kind}_group: {`);
     lines.push(`  label: "${escapeD2(kindLabel(kind))}"`);
@@ -667,7 +668,11 @@ function renderD2(model: DiagramModel): string {
   }
 
   for (const edge of model.edges) {
-    lines.push(`${edge.from} -> ${edge.to}: "${escapeD2(edge.label)}"`);
+    const fromKind = nodeKindById.get(edge.from);
+    const toKind = nodeKindById.get(edge.to);
+    const fromRef = fromKind ? `${fromKind}_group.${edge.from}` : edge.from;
+    const toRef = toKind ? `${toKind}_group.${edge.to}` : edge.to;
+    lines.push(`${fromRef} -> ${toRef}: "${escapeD2(edge.label)}"`);
   }
   return `${lines.join("\n").replace(/\n+$/g, "")}\n`;
 }
