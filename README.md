@@ -19,17 +19,21 @@ Allium is a domain-specific language for specifying system behavior, rules, and 
 ```allium
 module ordering
 
-use "std/orders" as orders
+enum OrderStatus {
+    pending
+    confirmed
+    dispatched
+}
 
 entity Order {
-    id: string
-    status: orders.Status
+    status: OrderStatus
+    total: Decimal
 }
 
 rule PlaceOrder {
-    trigger: User.Click("Place Order")
-    requires: basket.is_not_empty
-    ensures: Order.created(status: orders.Status.Pending)
+    when: OrderSubmitted(basket)
+    requires: basket.items.count > 0
+    ensures: Order.created(status: OrderStatus.pending)
 }
 ```
 
