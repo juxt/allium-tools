@@ -38,5 +38,25 @@
             (should (equal (alist-get 'allium-ts-mode lsp-language-id-configuration) "allium")))
         (allium-test-reset-environment)))))
 
+(ert-deftest allium-mode-lsp-registration-honors-custom-server-command-at-load-time ()
+  "Custom `allium-lsp-server-command` should be used by lsp-mode registration."
+  (allium-test-reset-environment)
+  (let (registered-client)
+    (cl-letf (((symbol-function 'lsp-register-client)
+               (lambda (client) (setq registered-client client)))
+              ((symbol-function 'make-lsp-client)
+               (lambda (&rest plist) plist))
+              ((symbol-function 'lsp-stdio-connection)
+               (lambda (command-fn) (funcall command-fn))))
+      (provide 'lsp-mode)
+      (unwind-protect
+          (progn
+            (setq allium-lsp-server-command '("node" "/tmp/allium-lsp.js" "--stdio"))
+            (allium-test-load-mode t)
+            (should registered-client)
+            (should (equal (plist-get registered-client :new-connection)
+                           '("node" "/tmp/allium-lsp.js" "--stdio"))))
+        (allium-test-reset-environment)))))
+
 (provide 'allium-mode-lsp-mode-test)
 ;;; allium-mode-lsp-mode-test.el ends here

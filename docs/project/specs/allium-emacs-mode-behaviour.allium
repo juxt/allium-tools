@@ -22,6 +22,13 @@ rule AlliumModeConfiguresCoreBufferDefaults {
     )
 }
 
+rule AlliumModeRespectsCustomIndentOffset {
+    when: AlliumModeActivated(buffer)
+    requires: AlliumIndentOffsetConfigured(spaces: 2)
+
+    ensures: BlockContentIndentedBy(spaces: 2)
+}
+
 rule AlliumModeRegistersEglotServerProgram {
     when: FeatureLoaded(feature: eglot)
     requires: AlliumModeLoaded()
@@ -55,6 +62,18 @@ rule AlliumModeRegistersLspModeClient {
     )
 }
 
+rule AlliumModeLspModeRegistrationHonorsCustomServerCommand {
+    when: FeatureLoaded(feature: lsp_mode)
+    requires: AlliumModeLoaded()
+    requires: AlliumLspServerCommandConfigured(command: ["node", "allium-lsp.js", "--stdio"])
+
+    ensures: EmacsLspRegistration.created(
+    client: lsp_mode,
+    mode: allium_mode,
+    command: ["node", "allium-lsp.js", "--stdio"]
+    )
+}
+
 rule AlliumModesMapToAlliumLanguageIdForLspMode {
     when: FeatureLoaded(feature: lsp_mode)
     requires: AlliumModeLoaded()
@@ -76,10 +95,16 @@ rule EmacsModeIntegrationTestsExerciseRealServer {
     ensures: EmacsBatchRun(startup: "-Q")
     ensures: AlliumLspBinaryBuilt(path: "packages/allium-lsp/dist/bin.js")
     ensures: LspSessionEstablished(client: eglot, transport: stdio)
+    ensures: LspSessionEstablished(client: lsp_mode, transport: stdio)
+    ensures: LspSessionEstablished(client: eglot, mode: allium_ts_mode, transport: stdio)
     ensures: HoverRequestRoundTrip(client: eglot)
+    ensures: HoverRequestRoundTrip(client: lsp_mode)
+    ensures: ReferencesRequestRoundTrip(client: eglot)
     ensures: DefinitionRequestRoundTrip(client: eglot)
+    ensures: CrossFileDefinitionRequestRoundTrip(client: eglot)
     ensures: RenameRequestRoundTrip(client: eglot)
     ensures: FormatRequestRoundTrip(client: eglot)
+    ensures: CodeActionsRequested(client: eglot)
 }
 
 rule EmacsModeTestDependenciesCanBeInstalledLocally {
@@ -96,4 +121,13 @@ rule AlliumTsModeUsesTreeSitterGrammarWhenAvailable {
     requires: TreeSitterGrammarInstalled(language: allium)
 
     ensures: TreeSitterParserCreated(language: allium)
+    ensures: TreeSitterGrammarLoadedFrom(path: ".emacs-test/tree-sitter")
+}
+
+rule AlliumTsModeFallsBackGracefullyWhenParserUnavailable {
+    when: AlliumTsModeActivated(buffer)
+    requires: TreeSitterParserCreateFails(language: allium)
+
+    ensures: EmacsModeBuffer.created(major_mode: allium_ts_mode)
+    ensures: TreeSitterSetupNotApplied()
 }
