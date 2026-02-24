@@ -57,9 +57,40 @@ test("applies focus and kind filters", () => {
   );
 });
 
+test("links declared field type references for entities and values", () => {
+  const model = buildDiagramResult(
+    `entity Ticket {\n  status: Status\n}\n\nenum Status {\n  open\n  closed\n}\n\nvalue TicketView {\n  ticket: Ticket\n  status: Status\n}\n\nentity DashboardState {\n  selected: TicketView\n}\n`,
+  ).model;
+
+  assert.ok(
+    model.edges.some(
+      (e) =>
+        e.label === "type" &&
+        e.from === "value_TicketView" &&
+        e.to === "entity_Ticket",
+    ),
+  );
+  assert.ok(
+    model.edges.some(
+      (e) =>
+        e.label === "type" &&
+        e.from === "value_TicketView" &&
+        e.to === "enum_Status",
+    ),
+  );
+  assert.ok(
+    model.edges.some(
+      (e) =>
+        e.label === "type" &&
+        e.from === "entity_DashboardState" &&
+        e.to === "value_TicketView",
+    ),
+  );
+});
+
 test("renders grouped d2 and mermaid output", () => {
   const model = buildDiagramResult(
-    `entity Ticket {\n  status: open | closed\n}\nrule Close {\n  when: CloseTicket(ticket)\n  ensures: Ticket.created(status: closed)\n}\n`,
+    `entity Ticket {\n  status: open | closed\n}\nrule Close {\n  when: CloseTicket(ticket)\n  ensures: Ticket.created(status: closed)\n}\nsurface Console {\n  for user: User\n  provides:\n    CloseTicket(ticket)\n}\n`,
   ).model;
 
   const d2 = renderDiagram(model, "d2");
@@ -67,6 +98,10 @@ test("renders grouped d2 and mermaid output", () => {
 
   assert.match(d2, /entity_group: \{/);
   assert.match(d2, /rule_group: \{/);
+  assert.match(
+    d2,
+    /surface_group\.surface_Console -> trigger_group\.trigger_CloseTicket: "provides"/,
+  );
   assert.match(mermaid, /subgraph entity_group/);
   assert.match(mermaid, /subgraph rule_group/);
 });

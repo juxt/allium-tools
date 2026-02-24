@@ -73,6 +73,13 @@ rule RendererGroupsNodesByKind {
     ensures: GroupContainerRendered(kind: trigger)
 }
 
+rule DeclaredFieldTypeReferencesAreLinked {
+    when: DiagramRendered(format)
+    requires: DiagramContainsDeclaredEntityOrValueFieldTypeReference()
+
+    ensures: EdgeRendered(label: "type")
+}
+
 rule ReverseLinksOptionAddsInverseEdges {
     when: DiagramCommandInvoked(args)
     requires: args includes "--reverse-links"
