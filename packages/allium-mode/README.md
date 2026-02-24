@@ -64,6 +64,8 @@ npm run test:emacs:install
 
 This installs packages into `.emacs-test/elpa` (gitignored), so batch runs
 with `-Q` can still load required packages deterministically.
+It also builds the repository's `tree-sitter-allium` grammar into
+`.emacs-test/tree-sitter` for real `allium-ts-mode` grammar tests.
 
 Run live integration tests (real `allium-lsp` process):
 

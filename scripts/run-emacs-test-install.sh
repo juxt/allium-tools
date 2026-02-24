@@ -13,3 +13,5 @@ cd "$ROOT_DIR"
 emacs -Q --batch \
   -L scripts \
   -l scripts/emacs-test-install.el
+
+"$ROOT_DIR/scripts/build-emacs-treesit-grammar.sh"

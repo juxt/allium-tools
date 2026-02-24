@@ -77,6 +77,21 @@
         (should (equal treesit-simple-imenu-settings allium--treesit-imenu-settings))
         (should setup-called)))))
 
+(ert-deftest allium-ts-mode-uses-real-tree-sitter-grammar-when-installed ()
+  "When grammar artifacts exist, Emacs should create an allium parser from them."
+  (allium-test-load-mode)
+  (unless (file-directory-p allium-test--treesit-lib-dir)
+    (ert-skip "local tree-sitter grammar directory is unavailable"))
+  (unless (fboundp 'treesit-parser-create)
+    (ert-skip "tree-sitter parser APIs are unavailable in this Emacs build"))
+  (with-temp-buffer
+    (insert "rule A {\n  when: Trigger()\n  ensures: Done()\n}\n")
+    (allium-mode)
+    (should-not (condition-case nil
+                    (progn (treesit-parser-create 'allium) nil)
+                  (error t)))
+    (should (> (length (treesit-parser-list)) 0))))
+
 (ert-deftest allium-treesit-defun-name-supports-context-and-config-nodes ()
   "allium--treesit-defun-name should map anonymous block node types to labels."
   (allium-test-load-mode)

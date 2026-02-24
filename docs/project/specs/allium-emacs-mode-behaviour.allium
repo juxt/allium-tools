@@ -77,6 +77,9 @@ rule EmacsModeIntegrationTestsExerciseRealServer {
     ensures: AlliumLspBinaryBuilt(path: "packages/allium-lsp/dist/bin.js")
     ensures: LspSessionEstablished(client: eglot, transport: stdio)
     ensures: HoverRequestRoundTrip(client: eglot)
+    ensures: DefinitionRequestRoundTrip(client: eglot)
+    ensures: RenameRequestRoundTrip(client: eglot)
+    ensures: FormatRequestRoundTrip(client: eglot)
 }
 
 rule EmacsModeTestDependenciesCanBeInstalledLocally {
@@ -84,5 +87,13 @@ rule EmacsModeTestDependenciesCanBeInstalledLocally {
 
     ensures: PackageElInitialized()
     ensures: TestPackagesInstalled(path: ".emacs-test/elpa")
+    ensures: TreeSitterGrammarLibraryBuilt(path: ".emacs-test/tree-sitter/libtree-sitter-allium")
     ensures: RepositoryFileNotTracked(path: ".emacs-test")
+}
+
+rule AlliumTsModeUsesTreeSitterGrammarWhenAvailable {
+    when: AlliumTsModeActivated(buffer)
+    requires: TreeSitterGrammarInstalled(language: allium)
+
+    ensures: TreeSitterParserCreated(language: allium)
 }
