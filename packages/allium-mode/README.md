@@ -43,6 +43,38 @@ In `config.el`:
 - LSP integration via `eglot` or `lsp-mode`.
 - Tree-sitter support for Emacs 29+.
 
+## Testing
+
+Run the allium-mode ERT suite from the monorepo root:
+
+```bash
+npm run test:emacs
+```
+
+This runs Emacs in `-Q --batch` mode against deterministic unit tests for:
+- core major mode behavior
+- `eglot` registration
+- `lsp-mode` client registration
+
+Install integration-test dependencies into a repo-local Emacs test home:
+
+```bash
+npm run test:emacs:install
+```
+
+This installs packages into `.emacs-test/elpa` (gitignored), so batch runs
+with `-Q` can still load required packages deterministically.
+
+Run live integration tests (real `allium-lsp` process):
+
+```bash
+npm run test:emacs:integration
+```
+
+Integration tests run against:
+- `eglot` (required for that test)
+- `lsp-mode` (executed when installed; skipped otherwise)
+
 ## LSP Configuration
 
 ### eglot

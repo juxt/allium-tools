@@ -3,10 +3,18 @@
   "private": true,
   "version": "0.1.0",
   "license": "MIT",
-  "workspaces": ["extensions/allium", "packages/allium-cli", "packages/allium-lsp", "packages/tree-sitter-allium"],
+  "workspaces": [
+    "extensions/allium",
+    "packages/allium-cli",
+    "packages/allium-lsp",
+    "packages/tree-sitter-allium"
+  ],
   "scripts": {
     "build": "npm run --workspaces build",
     "test": "npm run --workspaces test",
+    "test:emacs:install": "./scripts/run-emacs-test-install.sh",
+    "test:emacs": "./scripts/run-emacs-tests.sh",
+    "test:emacs:integration": "./scripts/run-emacs-integration-tests.sh",
     "lint": "eslint . && npm run --workspaces lint",
     "lint:fix": "eslint . --fix",
     "format": "biome format --write .",

@@ -1,0 +1,88 @@
+module allium_emacs_mode_behaviour
+
+entity EmacsModeBuffer {
+    major_mode: allium_mode | allium_ts_mode
+    comment_start: String
+    comment_end: String
+}
+
+entity EmacsLspRegistration {
+    client: eglot | lsp_mode
+    mode: allium_mode | allium_ts_mode
+    command: List<String>
+}
+
+rule AlliumModeConfiguresCoreBufferDefaults {
+    when: AlliumModeActivated(buffer)
+
+    ensures: EmacsModeBuffer.created(
+    major_mode: allium_mode,
+    comment_start: "-- ",
+    comment_end: ""
+    )
+}
+
+rule AlliumModeRegistersEglotServerProgram {
+    when: FeatureLoaded(feature: eglot)
+    requires: AlliumModeLoaded()
+
+    ensures: EmacsLspRegistration.created(
+    client: eglot,
+    mode: allium_mode,
+    command: ["allium-lsp", "--stdio"]
+    )
+}
+
+rule AlliumTsModeRegistersEglotServerProgram {
+    when: FeatureLoaded(feature: eglot)
+    requires: AlliumModeLoaded()
+
+    ensures: EmacsLspRegistration.created(
+    client: eglot,
+    mode: allium_ts_mode,
+    command: ["allium-lsp", "--stdio"]
+    )
+}
+
+rule AlliumModeRegistersLspModeClient {
+    when: FeatureLoaded(feature: lsp_mode)
+    requires: AlliumModeLoaded()
+
+    ensures: EmacsLspRegistration.created(
+    client: lsp_mode,
+    mode: allium_mode,
+    command: ["allium-lsp", "--stdio"]
+    )
+}
+
+rule AlliumModesMapToAlliumLanguageIdForLspMode {
+    when: FeatureLoaded(feature: lsp_mode)
+    requires: AlliumModeLoaded()
+
+    ensures: LspLanguageIdConfigured(mode: allium_mode, language_id: "allium")
+    ensures: LspLanguageIdConfigured(mode: allium_ts_mode, language_id: "allium")
+}
+
+rule EmacsModeBatchTestsRunInCiStyleEnvironment {
+    when: CommandInvoked(command: "npm run test:emacs")
+
+    ensures: EmacsBatchRun(startup: "-Q")
+    ensures: ErtSuitesExecuted(package: "allium-mode")
+}
+
+rule EmacsModeIntegrationTestsExerciseRealServer {
+    when: CommandInvoked(command: "npm run test:emacs:integration")
+
+    ensures: EmacsBatchRun(startup: "-Q")
+    ensures: AlliumLspBinaryBuilt(path: "packages/allium-lsp/dist/bin.js")
+    ensures: LspSessionEstablished(client: eglot, transport: stdio)
+    ensures: HoverRequestRoundTrip(client: eglot)
+}
+
+rule EmacsModeTestDependenciesCanBeInstalledLocally {
+    when: CommandInvoked(command: "npm run test:emacs:install")
+
+    ensures: PackageElInitialized()
+    ensures: TestPackagesInstalled(path: ".emacs-test/elpa")
+    ensures: RepositoryFileNotTracked(path: ".emacs-test")
+}
