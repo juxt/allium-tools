@@ -11,5 +11,6 @@ require("config_spec")
 require("treesitter_spec")
 require("init_spec")
 require("health_spec")
+require("plugin_spec")
 
 harness.run()

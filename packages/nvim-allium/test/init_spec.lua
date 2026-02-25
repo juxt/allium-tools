@@ -54,6 +54,9 @@ harness.test("setup registers allium lsp server and attaches keymaps", function(
 
     assert(type(configs.allium) == "table", "expected allium lspconfig entry")
     assert(configs.allium.default_config.cmd[1] == "node", "expected configured cmd in server defaults")
+    assert(configs.allium.default_config.filetypes[1] == "allium", "expected default allium filetype")
+    assert(type(configs.allium.default_config.root_dir) == "function", "expected root_dir function")
+    assert(type(configs.allium.default_config.settings) == "table", "expected settings table")
     assert(type(captured_setup_opts) == "table", "expected lsp setup call")
     assert(type(captured_setup_opts.on_attach) == "function", "expected on_attach callback")
     assert(treesitter_called, "expected treesitter setup call")
@@ -61,11 +64,60 @@ harness.test("setup registers allium lsp server and attaches keymaps", function(
     captured_setup_opts.on_attach({}, 17)
     assert(#keymaps == 9, "expected default LSP keymaps to be registered")
     assert(#buf_options == 2, "expected omnifunc and formatexpr to be set")
+    assert(buf_options[1].bufnr == 17, "expected on_attach buffer for first option write")
+    assert(buf_options[1].option == "omnifunc", "expected omnifunc option set")
+    assert(buf_options[1].value == "v:lua.vim.lsp.omnifunc", "expected omnifunc value")
+    assert(buf_options[2].bufnr == 17, "expected on_attach buffer for second option write")
+    assert(buf_options[2].option == "formatexpr", "expected formatexpr option set")
+    assert(buf_options[2].value == "v:lua.vim.lsp.formatexpr()", "expected formatexpr value")
   end)
 
   require("allium.treesitter").setup = original_treesitter_setup
   vim.keymap.set = original_keymap_set
   vim.api.nvim_buf_set_option = original_set_option
+  assert(ok, err)
+end)
+
+harness.test("setup keeps existing allium lspconfig server definition", function()
+  clear_setup_modules()
+
+  local captured_setup_opts
+  local existing_config = {
+    default_config = {
+      cmd = { "custom-allium-lsp" },
+      filetypes = { "allium" },
+    },
+  }
+  local configs = {
+    allium = existing_config,
+  }
+
+  package.preload["lspconfig.configs"] = function()
+    return configs
+  end
+
+  package.preload["lspconfig"] = function()
+    return {
+      allium = {
+        setup = function(opts)
+          captured_setup_opts = opts
+        end,
+      },
+    }
+  end
+
+  local original_treesitter_setup = require("allium.treesitter").setup
+  require("allium.treesitter").setup = function()
+  end
+
+  local ok, err = pcall(function()
+    require("allium").setup({})
+    assert(configs.allium == existing_config, "expected existing allium config to be preserved")
+    assert(configs.allium.default_config.cmd[1] == "custom-allium-lsp", "expected existing cmd to remain unchanged")
+    assert(type(captured_setup_opts) == "table", "expected lsp setup to still run")
+  end)
+
+  require("allium.treesitter").setup = original_treesitter_setup
   assert(ok, err)
 end)
 

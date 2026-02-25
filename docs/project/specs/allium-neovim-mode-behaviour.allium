@@ -38,9 +38,13 @@ rule NeovimPluginIntegrationTestsRunWithRealDependencies {
     ensures: LspSessionEstablished(client: nvim_lsp, transport: stdio)
     ensures: HoverRequestSupported()
     ensures: DefinitionRequestSupported()
+    ensures: CrossFileDefinitionRequestSupported()
     ensures: ReferencesRequestSupported()
+    ensures: CrossFileReferencesRequestSupported()
     ensures: RenameRequestSupported()
+    ensures: CrossFileRenameWorkspaceEditSupported()
     ensures: FormattingRequestSupported()
     ensures: CodeActionRequestSupported()
     ensures: DiagnosticsPublishedForInvalidSpec()
+    ensures: HealthCheckReportAvailable()
 }

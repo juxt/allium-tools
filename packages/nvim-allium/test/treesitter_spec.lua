@@ -1,6 +1,7 @@
 local harness = require("harness")
 
 local function clear_treesitter_modules()
+  package.loaded["allium.treesitter"] = nil
   package.loaded["nvim-treesitter.parsers"] = nil
   package.preload["nvim-treesitter.parsers"] = nil
 end
@@ -56,4 +57,30 @@ harness.test("treesitter.setup supports new parser table API", function()
 
   require("allium.treesitter").setup()
   assert(type(parser_module.allium) == "table", "expected parser config on parser module table")
+end)
+
+harness.test("treesitter.setup returns cleanly when nvim-treesitter.parsers is unavailable", function()
+  clear_treesitter_modules()
+  local ok, err = pcall(function()
+    require("allium.treesitter").setup()
+  end)
+  assert(ok, err)
+end)
+
+harness.test("treesitter.setup returns cleanly when parser config container is invalid", function()
+  clear_treesitter_modules()
+  local parser_module = {
+    get_parser_configs = function()
+      return "invalid"
+    end,
+  }
+  package.preload["nvim-treesitter.parsers"] = function()
+    return parser_module
+  end
+
+  local ok, err = pcall(function()
+    require("allium.treesitter").setup()
+  end)
+  assert(ok, err)
+  assert(parser_module.allium == nil, "expected no parser config when container is invalid")
 end)

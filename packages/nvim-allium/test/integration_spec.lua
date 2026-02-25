@@ -63,6 +63,26 @@ local function write_sample_file()
   }, sample_file)
 end
 
+local function write_cross_file_project()
+  local defs_file = sample_dir .. "/defs.allium"
+  local main_file = sample_dir .. "/main.allium"
+  vim.fn.writefile({
+    "rule TriggerA {",
+    "  when: Trigger()",
+    "  ensures: Done()",
+    "}",
+  }, defs_file)
+  vim.fn.writefile({
+    "use \"./defs\" as defs",
+    "",
+    "rule Uses {",
+    "  when: defs.TriggerA()",
+    "  ensures: Done()",
+    "}",
+  }, main_file)
+  return defs_file, main_file
+end
+
 local function uri_for_current_buffer()
   return vim.uri_from_bufnr(0)
 end
@@ -100,6 +120,41 @@ local function get_allium_client()
     end
   end
   return nil
+end
+
+local function first_location(result)
+  if type(result) ~= "table" then
+    return nil
+  end
+  if result.uri then
+    return result
+  end
+  return result[1]
+end
+
+local function workspace_edit_uris(workspace_edit)
+  local uris = {}
+  if type(workspace_edit) ~= "table" then
+    return uris
+  end
+
+  if type(workspace_edit.changes) == "table" then
+    for uri, _ in pairs(workspace_edit.changes) do
+      uris[uri] = true
+    end
+  end
+
+  if type(workspace_edit.documentChanges) == "table" then
+    for _, change in ipairs(workspace_edit.documentChanges) do
+      local text_document = change and change.textDocument
+      local uri = text_document and text_document.uri or change and change.uri
+      if type(uri) == "string" then
+        uris[uri] = true
+      end
+    end
+  end
+
+  return uris
 end
 
 vim.opt.packpath:prepend(vim.fn.stdpath("data") .. "/nvim/site")
@@ -152,6 +207,13 @@ run_case("allium parser config points at local tree-sitter grammar", function()
   )
 end)
 
+run_case("allium health check runs with configured dependencies", function()
+  local ok, err = pcall(function()
+    require("allium.health").check()
+  end)
+  expect(ok, err or "expected health.check to run successfully")
+end)
+
 run_case("allium filetype is detected", function()
   vim.cmd("edit " .. vim.fn.fnameescape(sample_file))
   vim.bo.filetype = "allium"
@@ -163,6 +225,86 @@ run_case("allium lsp attaches to allium buffer", function()
     return get_allium_client() ~= nil
   end, 100)
   expect(lsp_attached, "allium LSP client did not attach within timeout")
+end)
+
+run_case_if("cross-file definition resolves from use alias", lsp_attached, "requires attached allium LSP", function()
+  local defs_file, main_file = write_cross_file_project()
+  vim.cmd("edit " .. vim.fn.fnameescape(main_file))
+  vim.bo.filetype = "allium"
+  vim.cmd("write")
+
+  vim.wait(1500, function()
+    return true
+  end, 50)
+
+  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+  local target_line = 3
+  local col = string.find(lines[target_line + 1], "TriggerA", 1, true)
+  expect(type(col) == "number", "expected TriggerA reference in main file")
+
+  local result = lsp_sync("textDocument/definition", {
+    textDocument = { uri = uri_for_current_buffer() },
+    position = { line = target_line, character = col - 1 },
+  }, 8000)
+
+  local location = first_location(result)
+  expect(type(location) == "table", "expected cross-file definition location")
+  expect(location.uri == vim.uri_from_fname(defs_file), "expected definition in defs.allium")
+end)
+
+run_case_if("cross-file references include definition and alias usage", lsp_attached, "requires attached allium LSP", function()
+  local defs_file, main_file = write_cross_file_project()
+  vim.cmd("edit " .. vim.fn.fnameescape(defs_file))
+  vim.bo.filetype = "allium"
+  vim.cmd("write")
+
+  vim.wait(1500, function()
+    return true
+  end, 50)
+
+  local result = lsp_sync("textDocument/references", {
+    textDocument = { uri = uri_for_current_buffer() },
+    position = { line = 0, character = 6 },
+    context = { includeDeclaration = true },
+  }, 8000)
+
+  expect(type(result) == "table", "references should return list")
+  local saw_defs = false
+  local saw_main = false
+  local defs_uri = vim.uri_from_fname(defs_file)
+  local main_uri = vim.uri_from_fname(main_file)
+  for _, location in ipairs(result) do
+    if location.uri == defs_uri then
+      saw_defs = true
+    end
+    if location.uri == main_uri then
+      saw_main = true
+    end
+  end
+  expect(saw_defs, "expected declaration reference in defs file")
+  expect(saw_main, "expected alias usage reference in main file")
+end)
+
+run_case_if("cross-file rename workspace edit touches both files", lsp_attached, "requires attached allium LSP", function()
+  local defs_file, main_file = write_cross_file_project()
+  vim.cmd("edit " .. vim.fn.fnameescape(defs_file))
+  vim.bo.filetype = "allium"
+  vim.cmd("write")
+
+  vim.wait(1500, function()
+    return true
+  end, 50)
+
+  local workspace_edit = lsp_sync("textDocument/rename", {
+    textDocument = { uri = uri_for_current_buffer() },
+    position = { line = 0, character = 6 },
+    newName = "TriggerCrossRenamed",
+  }, 8000)
+
+  expect(type(workspace_edit) == "table", "rename should return workspace edit")
+  local uris = workspace_edit_uris(workspace_edit)
+  expect(uris[vim.uri_from_fname(defs_file)] == true, "expected rename edit in defs file")
+  expect(uris[vim.uri_from_fname(main_file)] == true, "expected rename edit in main file")
 end)
 
 run_case_if("plugin keymaps are registered on attach", lsp_attached, "requires attached allium LSP", function()
