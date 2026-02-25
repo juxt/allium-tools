@@ -28,8 +28,20 @@ local function check_dependencies()
   if pcall(require, "nvim-treesitter") then
     vim.health.ok("nvim-treesitter available")
     local ok, parsers = pcall(require, "nvim-treesitter.parsers")
-    if ok and parsers.has_parser("allium") then
-      vim.health.ok("allium tree-sitter parser installed")
+    local has_parser = false
+    if ok and type(parsers) == "table" then
+      if type(parsers.has_parser) == "function" then
+        has_parser = parsers.has_parser("allium")
+      elseif type(parsers.get_parser_configs) == "function" then
+        local parser_configs = parsers.get_parser_configs()
+        has_parser = type(parser_configs) == "table" and parser_configs.allium ~= nil
+      else
+        has_parser = parsers.allium ~= nil
+      end
+    end
+
+    if has_parser then
+      vim.health.ok("allium tree-sitter parser installed/configured")
     else
       vim.health.warn("allium tree-sitter parser not installed", "Run :TSInstall allium")
     end

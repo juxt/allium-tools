@@ -64,15 +64,17 @@
                     (save-excursion
                       (back-to-indentation)
                       (if (bobp) 0
-                        (let ((cur-indent (progn (forward-line -1) (current-indentation))))
-                          (save-excursion
-                            (back-to-indentation)
-                            (cond
-                             ((looking-at ".*{\\s-*$")
-                              (+ cur-indent allium-indent-offset))
-                             ((looking-at "^\\s-*}")
-                              (max 0 (- cur-indent allium-indent-offset)))
-                             (t cur-indent))))))
+                        (let* ((closing-brace-line-p (looking-at "^\\s-*}"))
+                               (prev-indent (progn (forward-line -1) (current-indentation)))
+                               (prev-opens-block-p (save-excursion
+                                                     (end-of-line)
+                                                     (re-search-backward "{\\s-*$" (line-beginning-position) t))))
+                          (cond
+                           (closing-brace-line-p
+                            (max 0 (- prev-indent allium-indent-offset)))
+                           (prev-opens-block-p
+                            (+ prev-indent allium-indent-offset))
+                           (t prev-indent)))))
                   (error 0))))
     (indent-line-to indent)
     (when (< (point) savep)
@@ -199,9 +201,12 @@
 (define-derived-mode allium-ts-mode allium-mode "Allium[TS]"
   "Major mode for editing Allium specifications using tree-sitter."
   :syntax-table allium-mode-syntax-table
-  (when (and (fboundp 'treesit-ready-p)
-             (treesit-ready-p 'allium))
-    (treesit-parser-create 'allium)
+  (when (and (fboundp 'treesit-parser-create)
+             (condition-case nil
+                 (progn
+                   (treesit-parser-create 'allium)
+                   t)
+               (error nil)))
     (setq-local treesit-font-lock-settings allium--treesit-font-lock-rules)
     (setq-local treesit-font-lock-feature-list
                 '((comment definition)
@@ -211,16 +216,21 @@
     (setq-local treesit-defun-type-regexp allium--treesit-defun-type-regexp)
     (setq-local treesit-defun-name-function #'allium--treesit-defun-name)
     (setq-local treesit-simple-imenu-settings allium--treesit-imenu-settings)
-    (treesit-major-mode-setup)))
+    (when (fboundp 'treesit-major-mode-setup)
+      (treesit-major-mode-setup))))
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.allium\\'" . allium-mode))
 
 (with-eval-after-load 'eglot
   (add-to-list 'eglot-server-programs
-               `(allium-mode . ,allium-lsp-server-command)))
+               `(allium-mode . ,allium-lsp-server-command))
+  (add-to-list 'eglot-server-programs
+               `(allium-ts-mode . ,allium-lsp-server-command)))
 
 (with-eval-after-load 'lsp-mode
+  (add-to-list 'lsp-language-id-configuration '(allium-mode . "allium"))
+  (add-to-list 'lsp-language-id-configuration '(allium-ts-mode . "allium"))
   (lsp-register-client
    (make-lsp-client :new-connection (lsp-stdio-connection (lambda () allium-lsp-server-command))
                     :major-modes '(allium-mode allium-ts-mode)

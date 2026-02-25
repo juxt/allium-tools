@@ -85,6 +85,45 @@ Run the following command in Neovim to check the health of the Allium integratio
 
 This will verify that the `allium-lsp` binary is found and that the Tree-sitter parser is correctly installed.
 
+## Quick Isolated Demo
+
+From the monorepo root, you can launch a repo-local Neovim demo session that
+does not use your normal Neovim config/state:
+
+```bash
+npm run demo:nvim-allium
+```
+
+Tree-sitter variant:
+
+```bash
+npm run demo:nvim-allium:ts
+```
+
+The demo stores runtime data in `.nvim-demo/`.
+
+## Plugin Tests
+
+Run repo-local Neovim plugin tests in headless mode:
+
+```bash
+npm run test:nvim
+```
+
+The test suite uses `nvim -u NONE` and stubs external dependencies for fast, deterministic checks.
+
+Install repo-local integration test dependencies once:
+
+```bash
+npm run test:nvim:install
+```
+
+Run integration tests with real `nvim-lspconfig`, real `nvim-treesitter`, and real `allium-lsp`:
+
+```bash
+npm run test:nvim:integration
+```
+
 ## Feature Reference
 
 | Feature | Description | Standard Keymap |

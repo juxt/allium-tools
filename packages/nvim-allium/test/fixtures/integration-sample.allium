@@ -1,0 +1,10 @@
+module nvim_integration_sample
+
+entity Account {
+    id: String
+}
+
+rule AccountMustHaveId {
+    when: AccountCreated(account)
+    ensures: account.id != ""
+}

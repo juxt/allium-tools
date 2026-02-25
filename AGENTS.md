@@ -45,6 +45,7 @@ When modifying code or tests:
 * Preserve formatting and style.
 * Avoid refactoring unless explicitly asked.
 * Do not modify large unrelated regions of code.
+* Do not use `git commit --no-verify` unless the user gives explicit permission in the current conversation.
 * After completing any new feature, update the Allium specs in `docs/project/specs/` so they reflect the current system behaviour before finishing the work.
 
 ### Tests

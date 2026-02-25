@@ -1,0 +1,18 @@
+module allium_development_workflow_behaviour
+
+rule FullTestMatrixRunsInOrderedPipeline {
+    when: CommandInvoked(command: "npm run test:all")
+
+    ensures: TestSuiteExecuted(name: workspace_unit_tests)
+    ensures: TestSuiteExecuted(name: nvim_plugin_unit)
+    ensures: TestSuiteExecuted(name: emacs_mode_unit)
+    ensures: TestSuiteExecuted(name: nvim_plugin_integration)
+    ensures: TestSuiteExecuted(name: emacs_mode_integration)
+    ensures: TestSuitesExecutedInOrder(names: [workspace_unit_tests, nvim_plugin_unit, emacs_mode_unit, nvim_plugin_integration, emacs_mode_integration])
+}
+
+rule PrePushUsesFullTestMatrixCommand {
+    when: GitHookInvoked(type: pre_push)
+
+    ensures: CommandInvoked(command: "npm run test:all")
+}

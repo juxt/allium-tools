@@ -6,7 +6,18 @@ function M.setup()
     return
   end
 
-  local configs = parsers.get_parser_configs()
+  local configs
+  if type(parsers.get_parser_configs) == "function" then
+    configs = parsers.get_parser_configs()
+  elseif type(parsers) == "table" then
+    -- Newer nvim-treesitter exposes parser configs directly from this module.
+    configs = parsers
+  end
+
+  if type(configs) ~= "table" then
+    return
+  end
+
   if not configs.allium then
     configs.allium = {
       install_info = {

@@ -1,0 +1,150 @@
+module allium_emacs_mode_behaviour
+
+entity EmacsModeBuffer {
+    major_mode: allium_mode | allium_ts_mode
+    comment_start: String
+    comment_end: String
+}
+
+entity EmacsLspRegistration {
+    client: eglot | lsp_mode
+    mode: allium_mode | allium_ts_mode
+    command: List<String>
+}
+
+rule AlliumModeConfiguresCoreBufferDefaults {
+    when: AlliumModeActivated(buffer)
+
+    ensures: EmacsModeBuffer.created(
+    major_mode: allium_mode,
+    comment_start: "-- ",
+    comment_end: ""
+    )
+}
+
+rule AlliumModeRespectsCustomIndentOffset {
+    when: AlliumModeActivated(buffer)
+    requires: AlliumIndentOffsetConfigured(spaces: 2)
+
+    ensures: BlockContentIndentedBy(spaces: 2)
+}
+
+rule AlliumModeRegistersEglotServerProgram {
+    when: FeatureLoaded(feature: eglot)
+    requires: AlliumModeLoaded()
+
+    ensures: EmacsLspRegistration.created(
+    client: eglot,
+    mode: allium_mode,
+    command: ["allium-lsp", "--stdio"]
+    )
+}
+
+rule AlliumTsModeRegistersEglotServerProgram {
+    when: FeatureLoaded(feature: eglot)
+    requires: AlliumModeLoaded()
+
+    ensures: EmacsLspRegistration.created(
+    client: eglot,
+    mode: allium_ts_mode,
+    command: ["allium-lsp", "--stdio"]
+    )
+}
+
+rule AlliumModeRegistersLspModeClient {
+    when: FeatureLoaded(feature: lsp_mode)
+    requires: AlliumModeLoaded()
+
+    ensures: EmacsLspRegistration.created(
+    client: lsp_mode,
+    mode: allium_mode,
+    command: ["allium-lsp", "--stdio"]
+    )
+}
+
+rule AlliumModeLspModeRegistrationHonorsCustomServerCommand {
+    when: FeatureLoaded(feature: lsp_mode)
+    requires: AlliumModeLoaded()
+    requires: AlliumLspServerCommandConfigured(command: ["node", "allium-lsp.js", "--stdio"])
+
+    ensures: EmacsLspRegistration.created(
+    client: lsp_mode,
+    mode: allium_mode,
+    command: ["node", "allium-lsp.js", "--stdio"]
+    )
+}
+
+rule AlliumModesMapToAlliumLanguageIdForLspMode {
+    when: FeatureLoaded(feature: lsp_mode)
+    requires: AlliumModeLoaded()
+
+    ensures: LspLanguageIdConfigured(mode: allium_mode, language_id: "allium")
+    ensures: LspLanguageIdConfigured(mode: allium_ts_mode, language_id: "allium")
+}
+
+rule EmacsModeBatchTestsRunInCiStyleEnvironment {
+    when: CommandInvoked(command: "npm run test:emacs")
+
+    ensures: EmacsBatchRun(startup: "-Q")
+    ensures: ErtSuitesExecuted(package: "allium-mode")
+}
+
+rule EmacsModeIntegrationTestsExerciseRealServer {
+    when: CommandInvoked(command: "npm run test:emacs:integration")
+
+    ensures: EmacsBatchRun(startup: "-Q")
+    ensures: AlliumLspBinaryBuilt(path: "packages/allium-lsp/dist/bin.js")
+    ensures: LspSessionEstablished(client: eglot, transport: stdio)
+    ensures: LspSessionEstablished(client: lsp_mode, transport: stdio)
+    ensures: LspSessionEstablished(client: eglot, mode: allium_ts_mode, transport: stdio)
+    ensures: HoverRequestRoundTrip(client: eglot)
+    ensures: HoverRequestRoundTrip(client: lsp_mode)
+    ensures: ReferencesRequestRoundTrip(client: eglot)
+    ensures: DefinitionRequestRoundTrip(client: eglot)
+    ensures: CrossFileDefinitionRequestRoundTrip(client: eglot)
+    ensures: RenameRequestRoundTrip(client: eglot)
+    ensures: FormatRequestRoundTrip(client: eglot)
+    ensures: CodeActionsRequested(client: eglot)
+}
+
+rule EmacsModeTestDependenciesCanBeInstalledLocally {
+    when: CommandInvoked(command: "npm run test:emacs:install")
+
+    ensures: PackageElInitialized()
+    ensures: TestPackagesInstalled(path: ".emacs-test/elpa")
+    ensures: TreeSitterGrammarLibraryBuilt(path: ".emacs-test/tree-sitter/libtree-sitter-allium")
+    ensures: RepositoryFileNotTracked(path: ".emacs-test")
+}
+
+rule EmacsModeClassicDemoRunsInIsolatedSession {
+    when: CommandInvoked(command: "npm run demo:allium-mode")
+
+    ensures: EmacsBatchRun(startup: "-Q")
+    ensures: PackageElInitialized()
+    ensures: TestPackagesInstalled(path: ".emacs-test/elpa")
+    ensures: LspSessionEstablished(client: eglot, transport: stdio)
+}
+
+rule EmacsModeTreeSitterDemoRunsWithRepoGrammar {
+    when: CommandInvoked(command: "npm run demo:allium-mode:ts")
+
+    ensures: EmacsBatchRun(startup: "-Q")
+    ensures: TreeSitterGrammarLoadedFrom(path: ".emacs-test/tree-sitter")
+    ensures: EmacsModeBuffer.created(major_mode: allium_ts_mode)
+}
+
+rule AlliumTsModeUsesTreeSitterGrammarWhenAvailable {
+    when: AlliumTsModeActivated(buffer)
+    requires: TreeSitterGrammarInstalled(language: allium)
+
+    ensures: TreeSitterParserCreated(language: allium)
+    ensures: TreeSitterGrammarLoadedFrom(path: ".emacs-test/tree-sitter")
+}
+
+rule AlliumTsModeFallsBackGracefullyWhenParserUnavailable {
+    when: AlliumTsModeActivated(buffer)
+    requires: TreeSitterParserCreateFails(language: allium)
+
+    ensures: EmacsModeBuffer.created(major_mode: allium_ts_mode)
+    ensures: TreeSitterSetupNotApplied()
+}
