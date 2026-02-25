@@ -1,0 +1,21 @@
+module allium_neovim_mode_behaviour
+
+rule NeovimClassicDemoRunsInIsolatedSession {
+    when: CommandInvoked(command: "npm run demo:nvim-allium")
+
+    ensures: NeovimSessionStarted()
+    ensures: ConfigIsolatedUnder(path: ".nvim-demo/xdg/config")
+    ensures: DataIsolatedUnder(path: ".nvim-demo/xdg/data")
+    ensures: StateIsolatedUnder(path: ".nvim-demo/xdg/state")
+    ensures: CacheIsolatedUnder(path: ".nvim-demo/xdg/cache")
+    ensures: NvimPluginLoaded(path: "packages/nvim-allium")
+    ensures: LspSessionEstablished(client: nvim_lsp, transport: stdio)
+}
+
+rule NeovimTreeSitterDemoRunsWithLocalGrammar {
+    when: CommandInvoked(command: "npm run demo:nvim-allium:ts")
+
+    ensures: NeovimSessionStarted()
+    ensures: NvimTreeSitterConfigured(language: allium)
+    ensures: TreeSitterGrammarLoadedFrom(path: "packages/tree-sitter-allium")
+}
