@@ -117,7 +117,15 @@ Install hooks:
 npm install
 ```
 
-The `pre-push` hook runs the full test matrix (`npm run test`, `npm run test:emacs`, and `npm run test:emacs:integration`) before allowing a push.
+Run the full test matrix locally:
+
+```bash
+npm run test:all
+```
+
+`test:all` runs fastest-to-slowest: `test`, `test:nvim`, `test:emacs`, `test:nvim:integration`, `test:emacs:integration`.
+
+The `pre-push` hook runs `npm run test:all` before allowing a push.
 
 ## Licence
 

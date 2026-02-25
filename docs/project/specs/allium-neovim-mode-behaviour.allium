@@ -19,3 +19,28 @@ rule NeovimTreeSitterDemoRunsWithLocalGrammar {
     ensures: NvimTreeSitterConfigured(language: allium)
     ensures: TreeSitterGrammarLoadedFrom(path: "packages/tree-sitter-allium")
 }
+
+rule NeovimPluginUnitTestsRunHeadless {
+    when: CommandInvoked(command: "npm run test:nvim")
+
+    ensures: NeovimSessionStarted(mode: headless)
+    ensures: NvimPluginLoaded(path: "packages/nvim-allium")
+    ensures: TestSuiteExecuted(name: nvim_allium_unit)
+}
+
+rule NeovimPluginIntegrationTestsRunWithRealDependencies {
+    when: CommandInvoked(command: "npm run test:nvim:integration")
+
+    ensures: NeovimSessionStarted(mode: headless)
+    ensures: NvimPluginLoaded(path: "packages/nvim-allium")
+    ensures: NvimLspconfigLoaded()
+    ensures: NvimTreeSitterLoaded()
+    ensures: LspSessionEstablished(client: nvim_lsp, transport: stdio)
+    ensures: HoverRequestSupported()
+    ensures: DefinitionRequestSupported()
+    ensures: ReferencesRequestSupported()
+    ensures: RenameRequestSupported()
+    ensures: FormattingRequestSupported()
+    ensures: CodeActionRequestSupported()
+    ensures: DiagnosticsPublishedForInvalidSpec()
+}

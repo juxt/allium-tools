@@ -19,6 +19,7 @@ artifacts/
 .pre-commit-cache/
 .emacs-test/
 .nvim-demo/
+.nvim-test/
 
 # Logs
 npm-debug.log*
@@ -26,6 +27,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 *.log
+.nvimlog
 
 # OS/editor noise
 .DS_Store

@@ -51,3 +51,21 @@ npm run demo:nvim-allium:ts
 
 The demo script stores everything under `.nvim-demo/` (repo-local) and launches
 Neovim with repo-local config, data, state, and cache directories.
+
+## Tests
+
+Run plugin tests from the monorepo root:
+
+```bash
+npm run test:nvim
+```
+
+These tests run in a headless `-u NONE` Neovim instance and use local stubs for
+`nvim-lspconfig` and `nvim-treesitter` to keep test runtime fast.
+
+For isolated integration tests with real Neovim dependencies:
+
+```bash
+npm run test:nvim:install
+npm run test:nvim:integration
+```

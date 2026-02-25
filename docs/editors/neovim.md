@@ -102,6 +102,28 @@ npm run demo:nvim-allium:ts
 
 The demo stores runtime data in `.nvim-demo/`.
 
+## Plugin Tests
+
+Run repo-local Neovim plugin tests in headless mode:
+
+```bash
+npm run test:nvim
+```
+
+The test suite uses `nvim -u NONE` and stubs external dependencies for fast, deterministic checks.
+
+Install repo-local integration test dependencies once:
+
+```bash
+npm run test:nvim:install
+```
+
+Run integration tests with real `nvim-lspconfig`, real `nvim-treesitter`, and real `allium-lsp`:
+
+```bash
+npm run test:nvim:integration
+```
+
 ## Feature Reference
 
 | Feature | Description | Standard Keymap |
