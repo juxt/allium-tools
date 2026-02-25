@@ -43,6 +43,32 @@ In `config.el`:
 - LSP integration via `eglot` or `lsp-mode`.
 - Tree-sitter support for Emacs 29+.
 
+## Quick Demo (Isolated `-Q` Session)
+
+You can try allium-mode quickly in a clean Emacs session without touching your
+normal Emacs config.
+
+First-time setup (installs repo-local test/demo dependencies into `.emacs-test`):
+
+```bash
+npm run test:emacs:install
+```
+
+Launch classic mode demo:
+
+```bash
+npm run demo:allium-mode
+```
+
+Launch tree-sitter mode demo:
+
+```bash
+npm run demo:allium-mode:ts
+```
+
+These commands run Emacs with `-Q` and repository-local package state, so they
+do not modify your normal `~/.emacs.d` setup.
+
 ## Testing
 
 Run the allium-mode ERT suite from the monorepo root:

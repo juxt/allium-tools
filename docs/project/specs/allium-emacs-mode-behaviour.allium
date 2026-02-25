@@ -116,6 +116,23 @@ rule EmacsModeTestDependenciesCanBeInstalledLocally {
     ensures: RepositoryFileNotTracked(path: ".emacs-test")
 }
 
+rule EmacsModeClassicDemoRunsInIsolatedSession {
+    when: CommandInvoked(command: "npm run demo:allium-mode")
+
+    ensures: EmacsBatchRun(startup: "-Q")
+    ensures: PackageElInitialized()
+    ensures: TestPackagesInstalled(path: ".emacs-test/elpa")
+    ensures: LspSessionEstablished(client: eglot, transport: stdio)
+}
+
+rule EmacsModeTreeSitterDemoRunsWithRepoGrammar {
+    when: CommandInvoked(command: "npm run demo:allium-mode:ts")
+
+    ensures: EmacsBatchRun(startup: "-Q")
+    ensures: TreeSitterGrammarLoadedFrom(path: ".emacs-test/tree-sitter")
+    ensures: EmacsModeBuffer.created(major_mode: allium_ts_mode)
+}
+
 rule AlliumTsModeUsesTreeSitterGrammarWhenAvailable {
     when: AlliumTsModeActivated(buffer)
     requires: TreeSitterGrammarInstalled(language: allium)
