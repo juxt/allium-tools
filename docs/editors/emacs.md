@@ -93,13 +93,36 @@ Emacs 29+ includes built-in support for tree-sitter, providing faster and more a
 
 | Feature | Command / Interaction |
 | :--- | :--- |
-| **Hover** | Displayed in Echo Area / ElDoc |
+| **Hover** | `M-x eldoc` (or automatic via ElDoc) |
 | **Go to Definition** | `M-.` (`xref-find-definitions`) |
 | **Find References** | `M-?` (`xref-find-references`) |
 | **Rename** | `M-x eglot-rename` or `M-x lsp-rename` |
 | **Code Actions** | `M-x eglot-code-actions` or `s-l a` (lsp-mode) |
 | **Formatting** | `M-x eglot-format-buffer` or `M-x lsp-format-buffer` |
 | **Outline** | `M-x imenu` |
+
+## What Is Available Today
+
+`allium-mode` currently provides:
+
+- Major mode support for `*.allium` files (`allium-mode`).
+- Optional tree-sitter major mode (`allium-ts-mode`) on Emacs 29+ when the grammar is installed.
+- Syntax highlighting, indentation, and line comments (`-- ...`).
+- Imenu support in tree-sitter mode.
+- LSP wiring for both `eglot` and `lsp-mode` with language id `allium`.
+
+To access the language features in a buffer:
+
+1. Open an `.allium` file.
+2. Ensure your LSP client is active (`eglot-ensure` or `lsp-deferred`).
+3. Use standard Emacs/Xref/LSP commands:
+   - Definition: `M-.`
+   - References: `M-?`
+   - Rename: `M-x eglot-rename` or `M-x lsp-rename`
+   - Code actions: `M-x eglot-code-actions` or `M-x lsp-execute-code-action`
+   - Format: `M-x eglot-format-buffer` or `M-x lsp-format-buffer`
+
+There are no custom allium-specific interactive commands at the moment; features are accessed through standard `xref`, `eldoc`, and your chosen LSP client commands.
 
 ## Troubleshooting
 

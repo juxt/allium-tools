@@ -136,6 +136,31 @@ npm run test:nvim:integration
 | **Formatting** | Format current buffer | `<leader>f` |
 | **Diagnostics** | Show inline errors and warnings | `[d` / `]d` |
 
+## What Is Available Today
+
+`nvim-allium` currently provides:
+
+- Filetype + LSP client wiring for `allium` buffers.
+- Default LSP keymaps on attach.
+- Tree-sitter parser registration for `allium` (local grammar path in this repo).
+- Health checks via `:checkhealth allium`.
+
+To access functionality in a buffer:
+
+1. Open an `.allium` file.
+2. Confirm filetype: `:set filetype?` should show `filetype=allium`.
+3. Confirm LSP attached: `:LspInfo`.
+4. Use default keymaps or standard LSP commands:
+   - Hover: `K` or `:lua vim.lsp.buf.hover()`
+   - Definition: `gd` or `:lua vim.lsp.buf.definition()`
+   - References: `gr` or `:lua vim.lsp.buf.references()`
+   - Rename: `<leader>rn` or `:lua vim.lsp.buf.rename()`
+   - Code actions: `<leader>ca` or `:lua vim.lsp.buf.code_action()`
+   - Format: `<leader>f` or `:lua vim.lsp.buf.format({ async = true })`
+   - Diagnostics nav: `[d` / `]d`, list via `<leader>q`
+
+There are no extra user commands defined by `nvim-allium` at the moment; functionality is exposed through built-in Neovim LSP and diagnostic APIs plus configured keymaps.
+
 ## Troubleshooting
 
 - **LSP not starting**: Ensure `allium-lsp` is in your `$PATH`. You can test this by running `allium-lsp --version` in your terminal.
