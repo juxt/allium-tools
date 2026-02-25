@@ -43,6 +43,28 @@ In `config.el`:
 - LSP integration via `eglot` or `lsp-mode`.
 - Tree-sitter support for Emacs 29+.
 
+## Using Plugin Functionality
+
+`allium-mode` intentionally uses standard Emacs LSP/Xref commands rather than
+adding many custom commands.
+
+After opening an `.allium` file and connecting LSP (`eglot-ensure` or
+`lsp-deferred`), you can use:
+
+- Hover: `M-x eldoc` (or automatic ElDoc display)
+- Go to definition: `M-.` (`xref-find-definitions`)
+- Find references: `M-?` (`xref-find-references`)
+- Rename symbol: `M-x eglot-rename` or `M-x lsp-rename`
+- Code actions: `M-x eglot-code-actions` or `M-x lsp-execute-code-action`
+- Format buffer: `M-x eglot-format-buffer` or `M-x lsp-format-buffer`
+- Outline navigation: `M-x imenu` (with richer structure in `allium-ts-mode`)
+
+Built-in mode commands and variables:
+
+- Switch modes: `M-x allium-mode` / `M-x allium-ts-mode`
+- Indentation width: customize `allium-indent-offset`
+- LSP server command: customize `allium-lsp-server-command`
+
 ## Quick Demo (Isolated `-Q` Session)
 
 You can try allium-mode quickly in a clean Emacs session without touching your
