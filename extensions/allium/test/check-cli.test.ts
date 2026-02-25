@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const checkCliPath = path.resolve(__dirname, "../src/check.js");
 
@@ -50,6 +50,137 @@ function runCheck(
     stdout: result.stdout,
     stderr: result.stderr,
   };
+}
+
+function runCheckWatchOnce(
+  cwd: string,
+  requiredOutputPatterns: RegExp[],
+  maxWaitMs = 2000,
+): Promise<{ stdout: string; stderr: string }> {
+  if (!fs.existsSync(checkCliPath)) {
+    return Promise.reject(new Error(`check.js not found at ${checkCliPath}`));
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [checkCliPath, "--watch", "spec.allium"],
+      {
+        cwd,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(safetyTimer);
+      fn();
+    };
+
+    const maybeResolve = () => {
+      if (requiredOutputPatterns.every((pattern) => pattern.test(stdout))) {
+        child.kill("SIGTERM");
+        finish(() => resolve({ stdout, stderr }));
+      }
+    };
+
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+      maybeResolve();
+    });
+
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+
+    child.on("error", (error) => {
+      finish(() => reject(error));
+    });
+
+    child.on("exit", () => {
+      if (settled) return;
+      finish(() =>
+        reject(
+          new Error(
+            `watch process exited before expected output.\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+          ),
+        ),
+      );
+    });
+
+    const safetyTimer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(() =>
+        reject(
+          new Error(
+            `watch process did not produce expected output within ${maxWaitMs}ms.\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+          ),
+        ),
+      );
+    }, maxWaitMs);
+  });
+}
+
+function runCheckWithInput(
+  args: string[],
+  cwd: string,
+  input: string,
+  timeoutMs = 1500,
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  if (!fs.existsSync(checkCliPath)) {
+    return Promise.reject(new Error(`check.js not found at ${checkCliPath}`));
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [checkCliPath, ...args], {
+      cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+
+    child.on("error", (error) => finish(() => reject(error)));
+    child.on("exit", (code) => {
+      finish(() => resolve({ status: code, stdout, stderr }));
+    });
+
+    child.stdin.end(input);
+
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(() =>
+        reject(
+          new Error(
+            `check CLI timed out after ${timeoutMs}ms.\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+          ),
+        ),
+      );
+    }, timeoutMs);
+  });
 }
 
 test("fails with exit code 1 on strict warning", () => {
@@ -400,17 +531,14 @@ test("fix-code limits autofix to selected finding codes", () => {
   assert.doesNotMatch(updated, /requires: \/\* add temporal guard \*\//);
 });
 
-test("watch mode runs an initial cycle", () => {
+test("watch mode runs an initial cycle", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "allium-check-"));
   writeAllium(dir, "spec.allium", `rule A {\n  when: Ping()\n}\n`);
-  const result = runCheck(
-    ["--watch", "spec.allium"],
+  const result = await runCheckWatchOnce(
     dir,
-    2500,
-    undefined,
-    true,
+    [/allium-check watch/, /allium\.rule\.missingEnsures/],
+    2000,
   );
-  assert.equal(result.status, null);
   assert.match(result.stdout, /allium-check watch/);
   assert.match(result.stdout, /allium\.rule\.missingEnsures/);
 });
@@ -426,17 +554,16 @@ test("fix-code requires autofix", () => {
   assert.match(result.stderr, /--fix-code requires --autofix/);
 });
 
-test("fix-interactive applies selected fixes only", () => {
+test("fix-interactive applies selected fixes only", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "allium-check-"));
   const filePath = writeAllium(
     dir,
     "spec.allium",
     `entity Invitation {\n  expires_at: Timestamp\n  status: String\n}\n\nrule Expires {\n  when: invitation: Invitation.expires_at <= now\n}\n`,
   );
-  const result = runCheck(
+  const result = await runCheckWithInput(
     ["--autofix", "--fix-interactive", "spec.allium"],
     dir,
-    1500,
     "y\nn\nq\n",
   );
   assert.equal(result.status, 1);

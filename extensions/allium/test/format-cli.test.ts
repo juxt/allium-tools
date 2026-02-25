@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { formatAlliumText } from "../src/format";
 
 function runFormat(
@@ -21,6 +21,62 @@ function runFormat(
     stdout: result.stdout,
     stderr: result.stderr,
   };
+}
+
+function runFormatWithStdin(
+  args: string[],
+  cwd: string,
+  input: string,
+  timeoutMs = 2000,
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [path.resolve("dist/src/format.js"), ...args],
+      {
+        cwd,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+
+    child.on("error", (error) => finish(() => reject(error)));
+    child.on("exit", (code) => {
+      finish(() => resolve({ status: code, stdout, stderr }));
+    });
+
+    child.stdin.end(input);
+
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(() =>
+        reject(
+          new Error(
+            `format --stdin --stdout timed out after ${timeoutMs}ms.\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+          ),
+        ),
+      );
+    }, timeoutMs);
+  });
 }
 
 test("formatAlliumText normalizes line endings and trims trailing whitespace", () => {
@@ -166,10 +222,10 @@ test("format CLI dryrun previews changes without writing file", () => {
   assert.equal(fs.readFileSync(target, "utf8"), original);
 });
 
-test("format CLI supports stdin stdout mode", () => {
+test("format CLI supports stdin stdout mode", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "allium-format-"));
   const input = "rule A {\nwhen: Ping()\n}\n";
-  const result = runFormat(["--stdin", "--stdout"], dir, input);
+  const result = await runFormatWithStdin(["--stdin", "--stdout"], dir, input);
   assert.equal(result.status, 0);
   assert.match(result.stdout, / {4}when: Ping\(\)/);
 });
