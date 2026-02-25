@@ -10,6 +10,7 @@
     "packages/tree-sitter-allium"
   ],
   "scripts": {
+    "prepare": "bash -lc 'if command -v pre-commit >/dev/null 2>&1; then pre-commit install && pre-commit install --hook-type pre-push; else echo \"pre-commit not found; skipping hook install\"; fi'",
     "build": "npm run --workspaces build",
     "test": "npm run --workspaces test",
     "test:emacs:install": "./scripts/run-emacs-test-install.sh",

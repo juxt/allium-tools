@@ -107,6 +107,18 @@ npm install -g @allium/cli
 
 See [AGENTS.md](AGENTS.md) for development rules and the [Project Roadmap](docs/project/plan.md) for build instructions and priorities.
 
+### Git Hooks
+
+This repository uses `pre-commit` hooks for local quality gates.
+
+Install hooks:
+
+```bash
+npm install
+```
+
+The `pre-push` hook runs the full test matrix (`npm run test`, `npm run test:emacs`, and `npm run test:emacs:integration`) before allowing a push.
+
 ## Licence
 
 [MIT](LICENSE)

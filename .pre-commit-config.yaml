@@ -30,3 +30,10 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: all-tests-pre-push
+        name: all-tests-pre-push
+        entry: env PRE_COMMIT_HOME=.pre-commit-cache bash -lc 'npm run test && npm run test:emacs && npm run test:emacs:integration'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

@@ -5,6 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 
+const checkCliPath = path.resolve(__dirname, "../src/check.js");
+
 function writeAllium(
   dir: string,
   relativePath: string,
@@ -21,12 +23,28 @@ function runCheck(
   cwd: string,
   timeoutMs?: number,
   input?: string,
+  allowTimeout = false,
 ): { status: number | null; stdout: string; stderr: string } {
-  const result = spawnSync(
-    process.execPath,
-    [path.resolve("dist/src/check.js"), ...args],
-    { cwd, encoding: "utf8", timeout: timeoutMs, input },
-  );
+  if (!fs.existsSync(checkCliPath)) {
+    throw new Error(`check.js not found at ${checkCliPath}`);
+  }
+  const result = spawnSync(process.execPath, [checkCliPath, ...args], {
+    cwd,
+    encoding: "utf8",
+    timeout: timeoutMs,
+    input,
+  });
+  if (result.error) {
+    const spawnError = result.error as NodeJS.ErrnoException;
+    if (allowTimeout && spawnError.code === "ETIMEDOUT") {
+      return {
+        status: result.status,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      };
+    }
+    throw spawnError;
+  }
   return {
     status: result.status,
     stdout: result.stdout,
@@ -385,7 +403,14 @@ test("fix-code limits autofix to selected finding codes", () => {
 test("watch mode runs an initial cycle", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "allium-check-"));
   writeAllium(dir, "spec.allium", `rule A {\n  when: Ping()\n}\n`);
-  const result = runCheck(["--watch", "spec.allium"], dir, 1200);
+  const result = runCheck(
+    ["--watch", "spec.allium"],
+    dir,
+    2500,
+    undefined,
+    true,
+  );
+  assert.equal(result.status, null);
   assert.match(result.stdout, /allium-check watch/);
   assert.match(result.stdout, /allium\.rule\.missingEnsures/);
 });
@@ -411,8 +436,8 @@ test("fix-interactive applies selected fixes only", () => {
   const result = runCheck(
     ["--autofix", "--fix-interactive", "spec.allium"],
     dir,
-    undefined,
-    "y\nn\n",
+    1500,
+    "y\nn\nq\n",
   );
   assert.equal(result.status, 1);
   assert.match(result.stdout, /Apply fix allium\.rule\.missingEnsures/);
