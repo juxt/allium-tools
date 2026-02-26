@@ -4,6 +4,7 @@ node_modules/
 # Build outputs
 **/dist/
 **/*.tsbuildinfo
+target/
 
 # Test and coverage artifacts
 coverage/
