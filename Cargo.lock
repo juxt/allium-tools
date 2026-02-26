@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "allium-cli"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "allium-parser",
 ]
 
 [[package]]
 name = "allium-parser"
-version = "0.1.0"
+version = "0.1.3"
