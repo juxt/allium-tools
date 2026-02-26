@@ -116,6 +116,14 @@ impl<'s> Parser<'s> {
     }
 
     fn error(&mut self, span: Span, msg: impl Into<String>) {
+        let line = self.source_map.line_col(span.start).0;
+        if let Some(last) = self.diagnostics.last() {
+            if last.severity == crate::diagnostic::Severity::Error
+                && self.source_map.line_col(last.span.start).0 == line
+            {
+                return;
+            }
+        }
         self.diagnostics.push(Diagnostic::error(span, msg));
     }
 
@@ -2605,8 +2613,18 @@ rule ProcessDigests {
 
     #[test]
     fn error_recovery_multiple() {
-        // Parser should recover and report multiple errors
+        // Parser should recover and report multiple errors (on separate lines)
         let r = parse("entity E { + }\nentity F { - }");
         assert!(r.diagnostics.len() >= 2, "expected at least 2 errors, got {}", r.diagnostics.len());
+    }
+
+    #[test]
+    fn error_dedup_same_line() {
+        // Multiple bad tokens on a single line should produce only one error
+        let r = parse("-- allium: 1\n+ - * /");
+        let errors: Vec<_> = r.diagnostics.iter()
+            .filter(|d| d.severity == crate::diagnostic::Severity::Error)
+            .collect();
+        assert_eq!(errors.len(), 1, "expected 1 error for same-line bad tokens, got {}", errors.len());
     }
 }
