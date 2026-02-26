@@ -470,6 +470,35 @@ test("does not report known imported alias in type reference", () => {
   );
 });
 
+test("does not treat slash in inline comment as imported alias", () => {
+  const findings = analyzeAllium(
+    `entity Version {\n  is_display_version: Boolean     -- true for the ordered/booked version, or latest\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.type.undefinedImportedAlias"),
+    false,
+  );
+});
+
+test("still reports unknown alias when not in a comment", () => {
+  const findings = analyzeAllium(
+    `entity Version {\n  policy: ordered/Policy\n}\n`,
+  );
+  assert.ok(
+    findings.some((f) => f.code === "allium.type.undefinedImportedAlias"),
+  );
+});
+
+test("strips inline comment before checking field type references", () => {
+  const findings = analyzeAllium(
+    `entity Order {\n  status: String  -- the current status\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.type.undefinedReference"),
+    false,
+  );
+});
+
 test("reports undefined relationship target type", () => {
   const findings = analyzeAllium(
     `entity Order {\n  items: LineItem for this order\n}\n`,

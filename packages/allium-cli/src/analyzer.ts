@@ -3262,7 +3262,7 @@ function collectFieldTypeSites(
       field;
       field = fieldPattern.exec(body)
     ) {
-      const typeExpression = field[1].trim();
+      const typeExpression = field[1].replace(/\s--.*$/, "").trim();
       out.push({
         typeExpression,
         startOffset: open + 1 + field.index + field[0].indexOf(typeExpression),
