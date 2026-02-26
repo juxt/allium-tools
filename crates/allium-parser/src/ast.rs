@@ -30,11 +30,19 @@ pub struct Module {
 #[derive(Debug, Clone)]
 pub enum Decl {
     Use(UseDecl),
+    ModuleDecl(ModuleDecl),
     Block(BlockDecl),
     Default(DefaultDecl),
     Variant(VariantDecl),
     Deferred(DeferredDecl),
     OpenQuestion(OpenQuestionDecl),
+}
+
+/// `module name`
+#[derive(Debug, Clone)]
+pub struct ModuleDecl {
+    pub span: Span,
+    pub name: Ident,
 }
 
 /// `use "path" as alias`
@@ -173,8 +181,30 @@ pub enum Expr {
     /// `{ a, b, c }` — set literal
     SetLiteral { span: Span, elements: Vec<Expr> },
 
+    /// `[a, b, c]` — list literal
+    ListLiteral { span: Span, elements: Vec<Expr> },
+
     /// `{ key: value, ... }` — object literal
     ObjectLiteral { span: Span, fields: Vec<NamedArg> },
+
+    /// `Set<T>`, `List<T>` — generic type annotation
+    GenericType {
+        span: Span,
+        name: Box<Expr>,
+        args: Vec<Expr>,
+    },
+
+    /// `expr includes expr` / `expr excludes expr`
+    Includes {
+        span: Span,
+        collection: Box<Expr>,
+        element: Box<Expr>,
+    },
+    Excludes {
+        span: Span,
+        collection: Box<Expr>,
+        element: Box<Expr>,
+    },
 
     /// `a.b`
     MemberAccess {
@@ -355,6 +385,22 @@ pub enum Expr {
 
     /// A sequence of expressions from a multi-line block.
     Block { span: Span, items: Vec<Expr> },
+
+    /// `subject word [args...]` — prose-style predicate in clause values.
+    /// Captures remaining same-line tokens after a primary expression.
+    /// The `tail` contains the predicate word(s) and argument(s) in order.
+    Predicate {
+        span: Span,
+        subject: Box<Expr>,
+        tail: Vec<Expr>,
+    },
+
+    /// `start..end` — range expression
+    Range {
+        span: Span,
+        start: Box<Expr>,
+        end: Box<Expr>,
+    },
 }
 
 impl Expr {
@@ -370,7 +416,11 @@ impl Expr {
             | Expr::Within { span }
             | Expr::DurationLiteral { span, .. }
             | Expr::SetLiteral { span, .. }
+            | Expr::ListLiteral { span, .. }
             | Expr::ObjectLiteral { span, .. }
+            | Expr::GenericType { span, .. }
+            | Expr::Includes { span, .. }
+            | Expr::Excludes { span, .. }
             | Expr::MemberAccess { span, .. }
             | Expr::OptionalAccess { span, .. }
             | Expr::NullCoalesce { span, .. }
@@ -397,7 +447,9 @@ impl Expr {
             | Expr::WhenGuard { span, .. }
             | Expr::TypeOptional { span, .. }
             | Expr::LetExpr { span, .. }
-            | Expr::Block { span, .. } => *span,
+            | Expr::Block { span, .. }
+            | Expr::Predicate { span, .. }
+            | Expr::Range { span, .. } => *span,
             Expr::QualifiedName(q) => q.span,
         }
     }

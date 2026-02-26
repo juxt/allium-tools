@@ -50,9 +50,11 @@ pub enum TokenKind {
     Or,
     Exists,
 
-    // Trigger keywords
+    // Trigger / predicate keywords
     TransitionsTo,
     Becomes,
+    Includes,
+    Excludes,
 
     // Context-sensitive identifiers treated as keywords
     Now,
@@ -77,12 +79,15 @@ pub enum TokenKind {
     QuestionQuestion, // ??
     QuestionDot,     // ?.
     Dot,             // .
+    DotDot,          // ..
 
     // Delimiters
     LBrace,
     RBrace,
     LParen,
     RParen,
+    LBracket,        // [
+    RBracket,        // ]
     Colon,
     Comma,
     QuestionMark,    // standalone ?
@@ -136,6 +141,8 @@ impl TokenKind {
                 | TokenKind::Exists
                 | TokenKind::TransitionsTo
                 | TokenKind::Becomes
+                | TokenKind::Includes
+                | TokenKind::Excludes
                 | TokenKind::Now
                 | TokenKind::This
                 | TokenKind::Within
@@ -412,11 +419,14 @@ impl<'s> Lexer<'s> {
             (b'?', b'?') => (TokenKind::QuestionQuestion, 2),
             (b'?', b'.') => (TokenKind::QuestionDot, 2),
             (b'?', _) => (TokenKind::QuestionMark, 1),
+            (b'.', b'.') => (TokenKind::DotDot, 2),
             (b'.', _) => (TokenKind::Dot, 1),
             (b'{', _) => (TokenKind::LBrace, 1),
             (b'}', _) => (TokenKind::RBrace, 1),
             (b'(', _) => (TokenKind::LParen, 1),
             (b')', _) => (TokenKind::RParen, 1),
+            (b'[', _) => (TokenKind::LBracket, 1),
+            (b']', _) => (TokenKind::RBracket, 1),
             (b':', _) => (TokenKind::Colon, 1),
             (b',', _) => (TokenKind::Comma, 1),
             _ => (TokenKind::Error, 1),
@@ -477,6 +487,8 @@ fn classify_keyword(text: &str) -> TokenKind {
         "exists" => TokenKind::Exists,
         "transitions_to" => TokenKind::TransitionsTo,
         "becomes" => TokenKind::Becomes,
+        "includes" => TokenKind::Includes,
+        "excludes" => TokenKind::Excludes,
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         "null" => TokenKind::Null,
