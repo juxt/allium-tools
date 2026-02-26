@@ -19,6 +19,13 @@ jobs:
       - run: npm run lint
       - run: npm run test
 
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+
   tree-sitter:
     runs-on: ubuntu-latest
     steps:

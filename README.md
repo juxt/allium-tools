@@ -80,21 +80,34 @@ rule DispatchOrder {
 1. Install `allium-mode` and configure it to use `allium-lsp` with `eglot` or `lsp-mode`.
 2. See the [Emacs Setup Guide](docs/editors/emacs.md) for details.
 
-## CLI Tools
+## CLI
 
-The Allium CLI suite provides standalone tools for CI/CD and automation.
+The `allium` CLI validates and parses Allium specification files.
 
-- `allium-check`: Validate specifications and apply automatic fixes.
-- `allium-format`: Format Allium files according to standard style.
-- `allium-diagram`: Generate D2 or Mermaid diagrams from specs.
-- `allium-trace`: Check traceability between specs and tests.
-- `allium-drift`: Detect coverage drift between specs and implementation.
+- `allium check` — validate specifications and report diagnostics.
+- `allium parse` — parse a file and output the syntax tree.
 
-Install the CLI tools globally:
+### Install
+
+**Homebrew**
 
 ```bash
-npm install -g @allium/cli
+brew tap juxt/allium && brew install allium
 ```
+
+**Cargo**
+
+```bash
+cargo install allium-cli
+```
+
+**From source**
+
+```bash
+cargo build --release -p allium-cli
+```
+
+Pre-built binaries for Linux and macOS are available on the [GitHub Releases](https://github.com/juxt/allium-tools/releases) page.
 
 ## Documentation
 
