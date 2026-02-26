@@ -256,6 +256,22 @@ impl<'s> Parser<'s> {
         // source before the lexer strips it.
         let version = detect_version(self.source);
 
+        match version {
+            None => {
+                self.diagnostics.push(Diagnostic::warning(
+                    start,
+                    "missing version marker; expected '-- allium: 1' as the first line",
+                ));
+            }
+            Some(1) => {}
+            Some(v) => {
+                self.diagnostics.push(Diagnostic::error(
+                    start,
+                    format!("unsupported allium version {v}; this parser supports version 1"),
+                ));
+            }
+        }
+
         let mut decls = Vec::new();
         while !self.at_eof() {
             if let Some(d) = self.parse_decl() {
@@ -1797,9 +1813,19 @@ impl<'s> Parser<'s> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostic::Severity;
 
     fn parse_ok(src: &str) -> ParseResult {
-        let result = parse(src);
+        // Prefix with version marker if not already present, to avoid
+        // spurious "missing version marker" warnings in every test.
+        let owned;
+        let input = if src.starts_with("-- allium:") {
+            src
+        } else {
+            owned = format!("-- allium: 1\n{src}");
+            &owned
+        };
+        let result = parse(input);
         if !result.diagnostics.is_empty() {
             for d in &result.diagnostics {
                 eprintln!(
@@ -1815,6 +1841,25 @@ mod tests {
     fn version_marker() {
         let r = parse_ok("-- allium: 1\n");
         assert_eq!(r.module.version, Some(1));
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn version_missing_warns() {
+        let r = parse("entity User {}");
+        assert_eq!(r.module.version, None);
+        assert_eq!(r.diagnostics.len(), 1);
+        assert_eq!(r.diagnostics[0].severity, Severity::Warning);
+        assert!(r.diagnostics[0].message.contains("missing version marker"), "got: {}", r.diagnostics[0].message);
+    }
+
+    #[test]
+    fn version_unsupported_errors() {
+        let r = parse("-- allium: 99\nentity User {}");
+        assert_eq!(r.module.version, Some(99));
+        assert!(r.diagnostics.iter().any(|d|
+            d.severity == Severity::Error && d.message.contains("unsupported allium version 99")
+        ), "expected unsupported version error, got: {:?}", r.diagnostics);
     }
 
     #[test]
@@ -2514,7 +2559,7 @@ rule ProcessDigests {
 
     #[test]
     fn error_expected_declaration() {
-        let r = parse("+ invalid");
+        let r = parse("-- allium: 1\n+ invalid");
         assert!(r.diagnostics.len() >= 1);
         let msg = &r.diagnostics[0].message;
         assert!(msg.contains("expected declaration"), "got: {msg}");
@@ -2524,7 +2569,7 @@ rule ProcessDigests {
 
     #[test]
     fn error_expected_expression() {
-        let r = parse("entity E { v: }");
+        let r = parse("-- allium: 1\nentity E { v: }");
         assert!(r.diagnostics.len() >= 1);
         let msg = &r.diagnostics[0].message;
         assert!(msg.contains("expected expression"), "got: {msg}");
@@ -2533,7 +2578,7 @@ rule ProcessDigests {
 
     #[test]
     fn error_expected_block_item() {
-        let r = parse("entity E { + }");
+        let r = parse("-- allium: 1\nentity E { + }");
         assert!(r.diagnostics.len() >= 1);
         let msg = &r.diagnostics[0].message;
         assert!(msg.contains("expected block item"), "got: {msg}");
@@ -2541,7 +2586,7 @@ rule ProcessDigests {
 
     #[test]
     fn error_expected_identifier() {
-        let r = parse("entity 123 {}");
+        let r = parse("-- allium: 1\nentity 123 {}");
         assert!(r.diagnostics.len() >= 1);
         let msg = &r.diagnostics[0].message;
         // Context-aware: says "entity name" not generic "identifier"

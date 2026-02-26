@@ -1,3 +1,4 @@
+-- allium: 1
 enum Status {
     pending | active | completed
 }

@@ -1,3 +1,4 @@
+-- allium: 1
 rule A {
   when: Ping()
   ensures: status = "pending"

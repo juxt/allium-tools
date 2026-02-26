@@ -1,3 +1,4 @@
+-- allium: 1
 module allium_extension_productivity_presets_behaviour
 
 entity DiagnosticsProfile {

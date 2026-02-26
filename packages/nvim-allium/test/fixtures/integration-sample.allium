@@ -1,3 +1,4 @@
+-- allium: 1
 module nvim_integration_sample
 
 entity Account {

@@ -1,3 +1,4 @@
+-- allium: 1
 -- allium-extension-behaviour.allium
 -- Scope: VS Code runtime behavior for Allium diagnostics and quick fixes.
 -- Includes:

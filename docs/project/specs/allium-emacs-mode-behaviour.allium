@@ -1,3 +1,4 @@
+-- allium: 1
 module allium_emacs_mode_behaviour
 
 entity EmacsModeBuffer {

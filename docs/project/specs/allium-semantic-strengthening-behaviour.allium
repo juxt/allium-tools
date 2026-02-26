@@ -1,3 +1,4 @@
+-- allium: 1
 module allium_semantic_strengthening_behaviour
 
 entity Finding {

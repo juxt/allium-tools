@@ -1,3 +1,4 @@
+-- allium: 1
 -- allium-trace-tool-behaviour.allium
 -- Scope: Standalone CLI behavior for tracing rule coverage from specs to tests.
 -- Includes:

@@ -1,3 +1,4 @@
+-- allium: 1
 -- allium-check-tool-behaviour.allium
 -- Scope: Standalone CLI behavior for running Allium checks outside VS Code.
 -- Includes:

@@ -1,3 +1,4 @@
+-- allium: 1
 module allium_diagram_ergonomics_behaviour
 
 entity DiagramInvocation {

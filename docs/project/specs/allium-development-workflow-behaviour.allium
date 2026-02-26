@@ -1,3 +1,4 @@
+-- allium: 1
 module allium_development_workflow_behaviour
 
 rule FullTestMatrixRunsInOrderedPipeline {

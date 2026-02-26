@@ -1,3 +1,4 @@
+-- allium: 1
 entity Invitation {
   status: pending | active | completed
 }

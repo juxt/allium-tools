@@ -1,3 +1,4 @@
+-- allium: 1
 -- allium-drift-tool-behaviour.allium
 -- Scope: Standalone CLI behavior for implementation/spec drift detection.
 -- Includes:

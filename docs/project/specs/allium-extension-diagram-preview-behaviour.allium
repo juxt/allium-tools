@@ -1,3 +1,4 @@
+-- allium: 1
 module allium_extension_diagram_preview_behaviour
 
 entity DiagramPreviewSession {

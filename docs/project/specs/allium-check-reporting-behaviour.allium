@@ -1,3 +1,4 @@
+-- allium: 1
 module allium_check_reporting_behaviour
 
 entity CheckFindingFingerprint {

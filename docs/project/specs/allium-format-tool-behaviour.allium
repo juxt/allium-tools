@@ -1,3 +1,4 @@
+-- allium: 1
 -- allium-format-tool-behaviour.allium
 -- Scope: Standalone CLI behavior for formatting Allium specification files.
 -- Includes:

@@ -1,3 +1,4 @@
+-- allium: 1
 -- allium-release-artifacts-behaviour.allium
 -- Scope: Build and release path for non-Marketplace distribution.
 -- Includes:
