@@ -85,12 +85,12 @@ pub struct DefaultDecl {
     pub value: Expr,
 }
 
-/// `variant Name : Base { ... }`
+/// `variant Name : Type { ... }`
 #[derive(Debug, Clone)]
 pub struct VariantDecl {
     pub span: Span,
     pub name: Ident,
-    pub base: Ident,
+    pub base: Expr,
     pub items: Vec<BlockItem>,
 }
 

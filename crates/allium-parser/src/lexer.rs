@@ -99,6 +99,87 @@ pub enum TokenKind {
     Error,
 }
 
+impl std::fmt::Display for TokenKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TokenKind::Ident => write!(f, "identifier"),
+            TokenKind::Number => write!(f, "number"),
+            TokenKind::Duration => write!(f, "duration"),
+            TokenKind::String => write!(f, "string"),
+            TokenKind::True => write!(f, "'true'"),
+            TokenKind::False => write!(f, "'false'"),
+            TokenKind::Null => write!(f, "'null'"),
+            TokenKind::Rule => write!(f, "'rule'"),
+            TokenKind::Entity => write!(f, "'entity'"),
+            TokenKind::External => write!(f, "'external'"),
+            TokenKind::Value => write!(f, "'value'"),
+            TokenKind::Enum => write!(f, "'enum'"),
+            TokenKind::Given => write!(f, "'given'"),
+            TokenKind::Config => write!(f, "'config'"),
+            TokenKind::Surface => write!(f, "'surface'"),
+            TokenKind::Actor => write!(f, "'actor'"),
+            TokenKind::Default => write!(f, "'default'"),
+            TokenKind::Variant => write!(f, "'variant'"),
+            TokenKind::Deferred => write!(f, "'deferred'"),
+            TokenKind::Open => write!(f, "'open'"),
+            TokenKind::Question => write!(f, "'question'"),
+            TokenKind::Use => write!(f, "'use'"),
+            TokenKind::As => write!(f, "'as'"),
+            TokenKind::Module => write!(f, "'module'"),
+            TokenKind::When => write!(f, "'when'"),
+            TokenKind::Requires => write!(f, "'requires'"),
+            TokenKind::Ensures => write!(f, "'ensures'"),
+            TokenKind::Let => write!(f, "'let'"),
+            TokenKind::For => write!(f, "'for'"),
+            TokenKind::In => write!(f, "'in'"),
+            TokenKind::If => write!(f, "'if'"),
+            TokenKind::Else => write!(f, "'else'"),
+            TokenKind::Where => write!(f, "'where'"),
+            TokenKind::With => write!(f, "'with'"),
+            TokenKind::Not => write!(f, "'not'"),
+            TokenKind::And => write!(f, "'and'"),
+            TokenKind::Or => write!(f, "'or'"),
+            TokenKind::Exists => write!(f, "'exists'"),
+            TokenKind::TransitionsTo => write!(f, "'transitions_to'"),
+            TokenKind::Becomes => write!(f, "'becomes'"),
+            TokenKind::Includes => write!(f, "'includes'"),
+            TokenKind::Excludes => write!(f, "'excludes'"),
+            TokenKind::Now => write!(f, "'now'"),
+            TokenKind::This => write!(f, "'this'"),
+            TokenKind::Within => write!(f, "'within'"),
+            TokenKind::Eq => write!(f, "'='"),
+            TokenKind::EqEq => write!(f, "'=='"),
+            TokenKind::BangEq => write!(f, "'!='"),
+            TokenKind::Lt => write!(f, "'<'"),
+            TokenKind::LtEq => write!(f, "'<='"),
+            TokenKind::Gt => write!(f, "'>'"),
+            TokenKind::GtEq => write!(f, "'>='"),
+            TokenKind::Plus => write!(f, "'+'"),
+            TokenKind::Minus => write!(f, "'-'"),
+            TokenKind::Star => write!(f, "'*'"),
+            TokenKind::Slash => write!(f, "'/'"),
+            TokenKind::Pipe => write!(f, "'|'"),
+            TokenKind::FatArrow => write!(f, "'=>'"),
+            TokenKind::ThinArrow => write!(f, "'->'"),
+            TokenKind::QuestionQuestion => write!(f, "'??'"),
+            TokenKind::QuestionDot => write!(f, "'?.'"),
+            TokenKind::Dot => write!(f, "'.'"),
+            TokenKind::DotDot => write!(f, "'..'"),
+            TokenKind::LBrace => write!(f, "'{{'"),
+            TokenKind::RBrace => write!(f, "'}}'"),
+            TokenKind::LParen => write!(f, "'('"),
+            TokenKind::RParen => write!(f, "')'"),
+            TokenKind::LBracket => write!(f, "'['"),
+            TokenKind::RBracket => write!(f, "']'"),
+            TokenKind::Colon => write!(f, "':'"),
+            TokenKind::Comma => write!(f, "','"),
+            TokenKind::QuestionMark => write!(f, "'?'"),
+            TokenKind::Eof => write!(f, "end of file"),
+            TokenKind::Error => write!(f, "unrecognised token"),
+        }
+    }
+}
+
 impl TokenKind {
     /// True for any keyword or identifier — tokens that look like words.
     pub fn is_word(self) -> bool {
@@ -182,6 +263,18 @@ impl SourceMap {
             .saturating_sub(1);
         let col = offset - self.line_starts[line];
         (line as u32, col as u32)
+    }
+
+    /// Return the text of a single source line (0-indexed), without trailing newline.
+    pub fn line_text<'a>(&self, source: &'a str, line: u32) -> &'a str {
+        let idx = line as usize;
+        let start = self.line_starts[idx];
+        let end = if idx + 1 < self.line_starts.len() {
+            self.line_starts[idx + 1]
+        } else {
+            source.len()
+        };
+        source[start..end].trim_end_matches('\n').trim_end_matches('\r')
     }
 }
 

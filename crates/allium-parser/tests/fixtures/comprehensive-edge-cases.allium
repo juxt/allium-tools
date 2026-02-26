@@ -1,0 +1,487 @@
+-- allium: 1
+
+module comprehensive_test
+
+use "github.com/specs/auth/abc123" as auth
+use "github.com/specs/notifications/def456"
+
+-- ---------------------------------------------------------------------------
+-- Enum: pipe-separated variants
+-- ---------------------------------------------------------------------------
+
+enum Priority { low | medium | high | critical }
+
+enum Status {
+    draft
+    pending
+    active
+    archived
+}
+
+-- ---------------------------------------------------------------------------
+-- External entity
+-- ---------------------------------------------------------------------------
+
+external entity User {
+    email: String
+    name: String
+    active: Boolean
+}
+
+-- ---------------------------------------------------------------------------
+-- Entity: fields, relationships, derived values, optional types, generics
+-- ---------------------------------------------------------------------------
+
+entity Project {
+    name: String
+    description: String?
+    owner: User
+    status: draft | active | archived
+    priority: Priority
+    tags: Set<String>
+    members: Set<User>
+    tasks: Task with project = this
+    active_tasks: tasks where status = active
+    completed_tasks: tasks where status = completed -> task
+    task_count: tasks.count
+    is_active: status = active
+    has_members: members.count > 0
+    created_at: Timestamp
+    locked_until: Timestamp?
+    budget: Decimal?
+    metadata: List<String>
+}
+
+-- ---------------------------------------------------------------------------
+-- Entity: parameterised derived values
+-- ---------------------------------------------------------------------------
+
+entity Task {
+    project: Project
+    assignee: User?
+    status: pending | in_progress | completed | cancelled
+    title: String
+    effort: Integer
+    priority: Priority
+    due_date: Timestamp?
+    is_overdue: due_date != null and due_date < now
+    high_priority_and_overdue: priority = critical and is_overdue
+    dependencies: Set<Task>
+    blocked_by: dependencies where status != completed
+    is_blocked: blocked_by.count > 0
+
+    remaining_effort(total): total - effort
+}
+
+-- ---------------------------------------------------------------------------
+-- Value type
+-- ---------------------------------------------------------------------------
+
+value TimeRange {
+    start: Timestamp
+    end: Timestamp
+    duration: end - start
+}
+
+value Coordinate {
+    x: Decimal
+    y: Decimal
+    distance_from_origin: (x * x + y * y)
+}
+
+-- ---------------------------------------------------------------------------
+-- Given block
+-- ---------------------------------------------------------------------------
+
+given {
+    viewer: User
+    current_time: Timestamp
+}
+
+-- ---------------------------------------------------------------------------
+-- Config blocks: local and qualified
+-- ---------------------------------------------------------------------------
+
+config {
+    max_tasks_per_user: Integer = 50
+    default_priority: Priority = medium
+    session_timeout: Duration = 24.hours
+    archive_after: Duration = 90.days
+    retry_limit: Integer = 3
+}
+
+auth/config {
+    token_expiry: Duration = 1.hours
+}
+
+-- ---------------------------------------------------------------------------
+-- Actor
+-- ---------------------------------------------------------------------------
+
+actor ProjectManager {
+    identified_by: User where role = manager
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: simple trigger, requires, ensures
+-- ---------------------------------------------------------------------------
+
+rule CreateTask {
+    when: CreateTaskRequested(project, title, assignee?)
+    requires: project.status = active
+    requires: project.tasks.count < config.max_tasks_per_user
+    ensures: Task.created(project: project, title: title, assignee: assignee, status: pending, priority: medium)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: transitions_to trigger with binding
+-- ---------------------------------------------------------------------------
+
+rule NotifyOnActivation {
+    when: project: Project.status transitions_to active
+    ensures: Notification.created(to: project.owner.email, template: project_activated)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: becomes trigger
+-- ---------------------------------------------------------------------------
+
+rule ArchiveCompleted {
+    when: task: Task.status becomes completed
+    requires: task.project.status = active
+    ensures: AuditLog.created(action: task_completed, subject: task)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: temporal trigger
+-- ---------------------------------------------------------------------------
+
+rule ExpireStale {
+    when: project: Project.locked_until <= now
+    ensures: Project.unlocked(project: project)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: composite or-trigger
+-- ---------------------------------------------------------------------------
+
+rule RefreshDashboard {
+    when: TaskCreated(task) or TaskUpdated(task) or TaskDeleted(task)
+    ensures: DashboardRefreshed(project: task.project)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: for loop with where filter in ensures
+-- ---------------------------------------------------------------------------
+
+rule NotifyTeam {
+    when: project: Project.status transitions_to archived
+    ensures:
+        for member in project.members where member.active:
+            Notification.created(to: member.email, template: project_archived)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: let bindings in ensures block
+-- ---------------------------------------------------------------------------
+
+rule AssignDefaultPriority {
+    when: CreateTaskWithDefaults(project, title)
+    ensures:
+        let default = config.default_priority
+        let assignee = project.owner
+        Task.created(project: project, title: title, assignee: assignee, priority: default, status: pending)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: if/else conditional in ensures
+-- ---------------------------------------------------------------------------
+
+rule PrioritiseTask {
+    when: task: Task.priority becomes critical
+    ensures:
+        if task.assignee != null:
+            Notification.created(to: task.assignee.email, template: urgent_task)
+        else:
+            Notification.created(to: task.project.owner.email, template: unassigned_urgent)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: if/else if/else chain
+-- ---------------------------------------------------------------------------
+
+rule CategoriseEffort {
+    when: EstimateRequested(task)
+    ensures:
+        if task.effort < 2:
+            task.category = small
+        else if task.effort < 8:
+            task.category = medium
+        else if task.effort < 21:
+            task.category = large
+        else:
+            task.category = epic
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: nested for with let
+-- ---------------------------------------------------------------------------
+
+rule BatchNotify {
+    when: schedule: NotificationSchedule.next_run_at <= now
+    for user in User where user.active:
+        let pending = user.tasks where status = pending
+        ensures: DigestEmail.created(to: user.email, tasks: pending)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: includes / excludes
+-- ---------------------------------------------------------------------------
+
+rule ValidateAssignment {
+    when: AssignTask(task, user)
+    requires: task.project.members includes user
+    requires: task.dependencies excludes task
+    ensures: task.assignee = user
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: in / not in with set literals
+-- ---------------------------------------------------------------------------
+
+rule RestrictTransitions {
+    when: task: Task.status transitions_to cancelled
+    requires: task.status in {pending, in_progress}
+    requires: task.status not in {completed, cancelled}
+    ensures: AuditLog.created(action: task_cancelled)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: exists / not exists
+-- ---------------------------------------------------------------------------
+
+rule RequireAssignee {
+    when: StartTask(task)
+    requires: exists task.assignee
+    requires: not exists task.blocked_by
+    ensures: task.status = in_progress
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: null coalescing and optional chaining
+-- ---------------------------------------------------------------------------
+
+rule FallbackAssignment {
+    when: AutoAssign(task)
+    ensures:
+        let assignee = task.assignee ?? task.project.owner
+        let due = task.due_date?.toString ?? "unset"
+        TaskAssigned(task: task, assignee: assignee)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: lambda expressions
+-- ---------------------------------------------------------------------------
+
+rule ValidateAll {
+    when: BatchValidate(tasks)
+    requires: tasks.all(t => t.status != cancelled)
+    requires: tasks.any(t => t.priority = critical)
+    ensures: ValidationComplete()
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: range literal
+-- ---------------------------------------------------------------------------
+
+rule ValidateEffort {
+    when: SetEffort(task, points)
+    requires: points in [1..100]
+    ensures: task.effort = points
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: arithmetic and parenthesised expressions
+-- ---------------------------------------------------------------------------
+
+rule CalculateBudget {
+    when: BudgetRequested(project)
+    ensures:
+        let total = project.tasks.count * 100 + 500
+        let adjusted = total - (total * 10 / 100)
+        BudgetCalculated(project: project, amount: adjusted)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: list literal and object literal
+-- ---------------------------------------------------------------------------
+
+rule CreateReport {
+    when: ReportRequested(project)
+    ensures:
+        let sections = [overview, tasks, timeline, budget]
+        let options = {format: pdf, include_charts: true}
+        Report.created(project: project, sections: sections, options: options)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: qualified name references
+-- ---------------------------------------------------------------------------
+
+rule ValidateSession {
+    when: SessionCheck(user)
+    requires: auth/Session.valid(user: user)
+    ensures:
+        let expiry = auth/config.token_expiry
+        SessionValidated(user: user, expires_in: expiry)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: string interpolation
+-- ---------------------------------------------------------------------------
+
+rule LogAction {
+    when: ActionPerformed(user, action)
+    ensures: AuditLog.created(message: "User {user} performed {action}")
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: suffix predicate with arguments
+-- ---------------------------------------------------------------------------
+
+rule ValidateCode {
+    when: CodeCheck(finding)
+    requires: finding.code starts_with "proj."
+    requires: finding.severity matches_pattern "error|warning"
+    ensures: FindingValidated(finding: finding)
+}
+
+-- ---------------------------------------------------------------------------
+-- Surface: facing, context, provides, exposes with when guards
+-- ---------------------------------------------------------------------------
+
+surface ProjectDashboard {
+    facing viewer: ProjectManager
+    context project: Project where owner = viewer
+
+    provides: CreateTask(viewer, project) when project.status = active
+    provides: ArchiveProject(viewer, project) when project.tasks.all(t => t.status = completed)
+    provides:
+        AssignTask(viewer, task, member) when task.status = pending
+        RemoveTask(viewer, task) when task.status in {pending, cancelled}
+
+    exposes: TaskList
+    exposes: ProjectSummary
+}
+
+-- ---------------------------------------------------------------------------
+-- Surface: for iteration in provides
+-- ---------------------------------------------------------------------------
+
+surface TaskBoard {
+    facing viewer: User
+    for task in Task where task.assignee = viewer:
+        provides: CompleteTask(viewer, task) when task.status = in_progress
+    exposes: KanbanBoard
+}
+
+-- ---------------------------------------------------------------------------
+-- Variant declarations
+-- ---------------------------------------------------------------------------
+
+variant Email : Notification {
+    subject: String
+    body: String
+    to: String
+}
+
+variant SMS : Notification {
+    phone: String
+    message: String
+}
+
+-- ---------------------------------------------------------------------------
+-- Default declarations
+-- ---------------------------------------------------------------------------
+
+default Priority standard = medium
+default Project template = Project.created(name: "Untitled", status: draft, priority: standard)
+
+-- ---------------------------------------------------------------------------
+-- Deferred
+-- ---------------------------------------------------------------------------
+
+deferred Task.auto_assign
+deferred Project.budget_calculation
+
+-- ---------------------------------------------------------------------------
+-- Open questions
+-- ---------------------------------------------------------------------------
+
+open question "Should archived projects be permanently deleted after a retention period?"
+open question "How should task dependencies handle circular references?"
+
+-- ---------------------------------------------------------------------------
+-- Rule: guidance and tags clauses
+-- ---------------------------------------------------------------------------
+
+rule MigrateData {
+    when: MigrationTriggered()
+    tags: infrastructure, migration
+    guidance: "Run during off-peak hours only"
+    ensures: MigrationComplete()
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: timeout and guarantee clauses
+-- ---------------------------------------------------------------------------
+
+rule ProcessPayment {
+    when: PaymentRequested(order, amount)
+    timeout: 30.seconds
+    guarantee: "Payment will be processed or rolled back"
+    requires: amount > 0
+    ensures: PaymentProcessed(order: order, amount: amount)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: invariant clause
+-- ---------------------------------------------------------------------------
+
+rule EnforceLimit {
+    when: AddMember(project, user)
+    invariant: project.members.count <= 100
+    ensures: project.members includes user
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: related clause
+-- ---------------------------------------------------------------------------
+
+rule LinkTasks {
+    when: LinkRequested(task_a, task_b)
+    related: task_a.dependencies includes task_b
+    ensures: DependencyCreated(from: task_a, to: task_b)
+}
+
+-- ---------------------------------------------------------------------------
+-- Entity: join lookup
+-- ---------------------------------------------------------------------------
+
+entity Assignment {
+    task: Task
+    user: User
+    role: reviewer | implementer | observer
+    match: Task{project, assignee: user}
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule: within keyword as expression
+-- ---------------------------------------------------------------------------
+
+rule ScopedCheck {
+    when: ScopeCheck(item)
+    within: 5.minutes
+    requires: item.status = active
+    ensures: CheckPassed(item: item)
+}

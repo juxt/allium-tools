@@ -97,7 +97,7 @@ impl<'s> Parser<'s> {
         } else {
             self.error(
                 self.peek().span,
-                format!("expected {kind:?}, found {:?}", self.peek_kind()),
+                format!("expected {kind}, found {}", self.peek_kind()),
             );
             None
         }
@@ -121,6 +121,11 @@ impl<'s> Parser<'s> {
 
     /// Consume and return an [`Ident`] from any word token.
     fn parse_ident(&mut self) -> Option<Ident> {
+        self.parse_ident_in("identifier")
+    }
+
+    /// Consume and return an [`Ident`] with a context-specific label for errors.
+    fn parse_ident_in(&mut self, context: &str) -> Option<Ident> {
         let tok = self.peek();
         if tok.kind.is_word() {
             self.advance();
@@ -129,7 +134,10 @@ impl<'s> Parser<'s> {
                 name: self.text(tok.span).to_string(),
             })
         } else {
-            self.error(tok.span, "expected identifier");
+            self.error(
+                tok.span,
+                format!("expected {context}, found {}", tok.kind),
+            );
             None
         }
     }
@@ -202,6 +210,7 @@ fn is_clause_keyword(text: &str) -> bool {
         "when"
             | "requires"
             | "ensures"
+            | "trigger"
             | "facing"
             | "context"
             | "exposes"
@@ -321,7 +330,14 @@ impl<'s> Parser<'s> {
                 self.parse_qualified_config().map(Decl::Block)
             }
             _ => {
-                self.error(self.peek().span, "expected declaration");
+                self.error(
+                    self.peek().span,
+                    format!(
+                        "expected declaration (entity, rule, enum, value, config, surface, actor, \
+                         given, default, variant, deferred, use, open question), found {}",
+                        self.peek_kind(),
+                    ),
+                );
                 None
             }
         }
@@ -331,7 +347,7 @@ impl<'s> Parser<'s> {
 
     fn parse_module_decl(&mut self) -> Option<Decl> {
         let start = self.expect(TokenKind::Module)?.span;
-        let name = self.parse_ident()?;
+        let name = self.parse_ident_in("module name")?;
         Some(Decl::ModuleDecl(ModuleDecl {
             span: start.merge(name.span),
             name,
@@ -344,7 +360,7 @@ impl<'s> Parser<'s> {
         let start = self.expect(TokenKind::Use)?.span;
         let path = self.parse_string()?;
         let alias = if self.eat(TokenKind::As).is_some() {
-            Some(self.parse_ident()?)
+            Some(self.parse_ident_in("import alias")?)
         } else {
             None
         };
@@ -372,7 +388,16 @@ impl<'s> Parser<'s> {
         if kind == BlockKind::ExternalEntity {
             self.expect(TokenKind::Entity)?;
         }
-        let name = Some(self.parse_ident()?);
+        let context = match kind {
+            BlockKind::Entity | BlockKind::ExternalEntity => "entity name",
+            BlockKind::Rule => "rule name",
+            BlockKind::Surface => "surface name",
+            BlockKind::Actor => "actor name",
+            BlockKind::Value => "value type name",
+            BlockKind::Enum => "enum name",
+            _ => "block name",
+        };
+        let name = Some(self.parse_ident_in(context)?);
         self.expect(TokenKind::LBrace)?;
         let items = if kind == BlockKind::Enum {
             self.parse_enum_body()
@@ -398,7 +423,7 @@ impl<'s> Parser<'s> {
             if self.eat(TokenKind::Pipe).is_some() {
                 continue;
             }
-            if let Some(ident) = self.parse_ident() {
+            if let Some(ident) = self.parse_ident_in("enum variant") {
                 items.push(BlockItem {
                     span: ident.span,
                     kind: BlockItemKind::EnumVariant { name: ident },
@@ -426,7 +451,7 @@ impl<'s> Parser<'s> {
     // -- qualified config: `alias/config { ... }` -----------------------
 
     fn parse_qualified_config(&mut self) -> Option<BlockDecl> {
-        let alias = self.parse_ident()?;
+        let alias = self.parse_ident_in("config qualifier")?;
         let start = alias.span;
         self.expect(TokenKind::Slash)?;
         self.advance(); // consume "config" ident
@@ -453,11 +478,11 @@ impl<'s> Parser<'s> {
             && self.peek_at(1).kind.is_word()
             && self.peek_at(2).kind == TokenKind::Eq
         {
-            let t = self.parse_ident()?;
-            let n = self.parse_ident()?;
+            let t = self.parse_ident_in("type name")?;
+            let n = self.parse_ident_in("default name")?;
             (Some(t), n)
         } else {
-            (None, self.parse_ident()?)
+            (None, self.parse_ident_in("default name")?)
         };
 
         self.expect(TokenKind::Eq)?;
@@ -474,9 +499,9 @@ impl<'s> Parser<'s> {
 
     fn parse_variant_decl(&mut self) -> Option<VariantDecl> {
         let start = self.expect(TokenKind::Variant)?.span;
-        let name = self.parse_ident()?;
+        let name = self.parse_ident_in("variant name")?;
         self.expect(TokenKind::Colon)?;
-        let base = self.parse_ident()?;
+        let base = self.parse_expr(0)?;
 
         let items = if self.eat(TokenKind::LBrace).is_some() {
             let items = self.parse_block_items();
@@ -489,7 +514,7 @@ impl<'s> Parser<'s> {
         let end = if let Some(last) = items.last() {
             last.span
         } else {
-            base.span
+            base.span()
         };
         Some(VariantDecl {
             span: start.merge(end),
@@ -593,13 +618,20 @@ impl<'s> Parser<'s> {
             return self.parse_assign_or_clause_item(start);
         }
 
-        self.error(start, "expected block item (name: value, let binding, or clause)");
+        self.error(
+            start,
+            format!(
+                "expected block item (name: value, let name = value, when:/requires:/ensures: clause, \
+                 for ... in ...:, or open question), found {}",
+                self.peek_kind(),
+            ),
+        );
         None
     }
 
     fn parse_let_item(&mut self, start: Span) -> Option<BlockItem> {
         self.advance(); // consume `let`
-        let name = self.parse_ident()?;
+        let name = self.parse_ident_in("binding name")?;
         self.expect(TokenKind::Eq)?;
         let value = self.parse_clause_value(start)?;
         Some(BlockItem {
@@ -613,7 +645,7 @@ impl<'s> Parser<'s> {
     fn parse_binding_clause_item(&mut self, start: Span) -> Option<BlockItem> {
         let keyword_tok = self.advance(); // consume facing/context
         let keyword = self.text(keyword_tok.span).to_string();
-        let binding_name = self.parse_ident()?;
+        let binding_name = self.parse_ident_in(&format!("{keyword} binding name"))?;
         self.advance(); // consume ':'
         let type_expr = self.parse_clause_value(start)?;
         let value_span = type_expr.span();
@@ -632,13 +664,15 @@ impl<'s> Parser<'s> {
     /// The body is a set of nested block items (let, requires, ensures, etc.).
     fn parse_for_block_item(&mut self, start: Span) -> Option<BlockItem> {
         self.advance(); // consume `for`
-        let binding = self.parse_ident()?;
+        let binding = self.parse_ident_in("loop variable")?;
         self.expect(TokenKind::In)?;
 
         let collection = self.parse_expr(BP_WITH_WHERE + 1)?;
 
         let filter = if self.eat(TokenKind::Where).is_some() {
-            Some(self.parse_expr(BP_WITH_WHERE + 1)?)
+            // Parse filter at min_bp 0 — colon terminates naturally since
+            // it's not an expression operator.
+            Some(self.parse_expr(0)?)
         } else {
             None
         };
@@ -753,7 +787,7 @@ impl<'s> Parser<'s> {
         if self.at(TokenKind::Colon) {
             // It's a parameterised assignment: restore and parse properly
             self.pos = saved_pos;
-            let name = self.parse_ident()?;
+            let name = self.parse_ident_in("derived value name")?;
             self.expect(TokenKind::LParen)?;
             let params = self.parse_ident_list()?;
             self.expect(TokenKind::RParen)?;
@@ -782,9 +816,9 @@ impl<'s> Parser<'s> {
     fn parse_ident_list(&mut self) -> Option<Vec<Ident>> {
         let mut params = Vec::new();
         if !self.at(TokenKind::RParen) {
-            params.push(self.parse_ident()?);
+            params.push(self.parse_ident_in("parameter name")?);
             while self.eat(TokenKind::Comma).is_some() {
-                params.push(self.parse_ident()?);
+                params.push(self.parse_ident_in("parameter name")?);
             }
         }
         Some(params)
@@ -811,7 +845,7 @@ impl<'s> Parser<'s> {
                 && self.line_of(self.peek_at(2).span) == next_line;
 
             if next_line == clause_line || colon_is_block_item {
-                let name = self.parse_ident()?;
+                let name = self.parse_ident_in("binding name")?;
                 self.advance(); // consume ':'
                 let inner = self.parse_clause_value(clause_start)?;
                 return Some(Expr::Binding {
@@ -894,7 +928,7 @@ impl<'s> Parser<'s> {
             // Handle `let name = value` inside expression blocks
             if self.at(TokenKind::Let) {
                 let let_start = self.advance().span;
-                if let Some(name) = self.parse_ident() {
+                if let Some(name) = self.parse_ident_in("binding name") {
                     if self.expect(TokenKind::Eq).is_some() {
                         if let Some(value) = self.parse_expr(0) {
                             items.push(Expr::LetExpr {
@@ -936,7 +970,6 @@ impl<'s> Parser<'s> {
 // Binding powers (even = left, odd = right for right-associative)
 const BP_LAMBDA: u8 = 4;
 const BP_WHEN_GUARD: u8 = 5;
-const BP_PIPE: u8 = 6;
 const BP_OR: u8 = 10;
 const BP_AND: u8 = 20;
 const BP_COMPARE: u8 = 30;
@@ -946,6 +979,7 @@ const BP_PROJECTION: u8 = 37;
 const BP_NULL_COALESCE: u8 = 40;
 const BP_ADD: u8 = 50;
 const BP_MUL: u8 = 60;
+const BP_PIPE: u8 = 65;
 const BP_PREFIX: u8 = 70;
 const BP_POSTFIX: u8 = 80;
 
@@ -1102,7 +1136,14 @@ impl<'s> Parser<'s> {
                 })
             }
             _ => {
-                self.error(self.peek().span, "expected expression");
+                self.error(
+                    self.peek().span,
+                    format!(
+                        "expected expression (identifier, number, string, true/false, null, \
+                         if/for/not/exists, '(', '{{', '['), found {}",
+                        self.peek_kind(),
+                    ),
+                );
                 None
             }
         }
@@ -1350,7 +1391,7 @@ impl<'s> Parser<'s> {
                 })
             }
             TokenKind::ThinArrow => {
-                let field = self.parse_ident()?;
+                let field = self.parse_ident_in("projection field")?;
                 Some(Expr::ProjectionMap {
                     span: lhs.span().merge(field.span),
                     source: Box::new(lhs),
@@ -1407,7 +1448,10 @@ impl<'s> Parser<'s> {
                 })
             }
             _ => {
-                self.error(op_tok.span, "unexpected infix operator");
+                self.error(
+                    op_tok.span,
+                    format!("unexpected infix operator {}", op_tok.kind),
+                );
                 None
             }
         }
@@ -1485,7 +1529,7 @@ impl<'s> Parser<'s> {
             }
             TokenKind::Dot => {
                 self.advance();
-                let field = self.parse_ident()?;
+                let field = self.parse_ident_in("field name")?;
                 Some(Expr::MemberAccess {
                     span: lhs.span().merge(field.span),
                     object: Box::new(lhs),
@@ -1494,7 +1538,7 @@ impl<'s> Parser<'s> {
             }
             TokenKind::QuestionDot => {
                 self.advance();
-                let field = self.parse_ident()?;
+                let field = self.parse_ident_in("field name")?;
                 Some(Expr::OptionalAccess {
                     span: lhs.span().merge(field.span),
                     object: Box::new(lhs),
@@ -1532,7 +1576,7 @@ impl<'s> Parser<'s> {
         while !self.at(TokenKind::RParen) && !self.at_eof() {
             // Check for named argument: `name: value`
             if self.peek_kind().is_word() && self.peek_at(1).kind == TokenKind::Colon {
-                let name = self.parse_ident()?;
+                let name = self.parse_ident_in("argument name")?;
                 self.advance(); // :
                 let value = self.parse_expr(0)?;
                 args.push(CallArg::Named(NamedArg {
@@ -1554,7 +1598,7 @@ impl<'s> Parser<'s> {
     fn parse_join_fields(&mut self) -> Option<Vec<JoinField>> {
         let mut fields = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at_eof() {
-            let field = self.parse_ident()?;
+            let field = self.parse_ident_in("join field name")?;
             let value = if self.eat(TokenKind::Colon).is_some() {
                 Some(self.parse_expr(0)?)
             } else {
@@ -1642,14 +1686,15 @@ impl<'s> Parser<'s> {
 
     fn parse_for_expr(&mut self) -> Option<Expr> {
         let start = self.advance().span; // consume `for`
-        let binding = self.parse_ident()?;
+        let binding = self.parse_ident_in("loop variable")?;
         self.expect(TokenKind::In)?;
 
         // Parse collection, stopping before `where` and `:`
         let collection = self.parse_expr(BP_WITH_WHERE + 1)?;
 
         let filter = if self.eat(TokenKind::Where).is_some() {
-            Some(Box::new(self.parse_expr(BP_WITH_WHERE + 1)?))
+            // Parse filter at min_bp 0 — colon terminates naturally.
+            Some(Box::new(self.parse_expr(0)?))
         } else {
             None
         };
@@ -1705,7 +1750,7 @@ impl<'s> Parser<'s> {
     fn parse_object_literal(&mut self, start: Span) -> Option<Expr> {
         let mut fields = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at_eof() {
-            let name = self.parse_ident()?;
+            let name = self.parse_ident_in("field name")?;
             self.expect(TokenKind::Colon)?;
             let value = self.parse_expr(0)?;
             fields.push(NamedArg {
@@ -2259,5 +2304,264 @@ rule ProcessDigests {
 }"#;
         let r = parse_ok(src);
         assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- pipe precedence: tighter than boolean ops ----------------------------
+
+    #[test]
+    fn pipe_binds_tighter_than_or() {
+        // `a or b | c` should parse as `a or (b | c)`, not `(a or b) | c`
+        let src = "entity E { v: a or b | c }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        // Top-level should be LogicalOp(Or)
+        let Expr::LogicalOp { op, right, .. } = value else {
+            panic!("expected LogicalOp, got {value:?}");
+        };
+        assert_eq!(*op, LogicalOp::Or);
+        // Right side should be Pipe(b, c)
+        assert!(matches!(right.as_ref(), Expr::Pipe { .. }));
+    }
+
+    // -- variant with expression base -----------------------------------------
+
+    #[test]
+    fn variant_with_pipe_base() {
+        let src = "variant Mixed : TypeA | TypeB";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Variant(v) = &r.module.declarations[0] else { panic!() };
+        assert!(matches!(v.base, Expr::Pipe { .. }));
+    }
+
+    // -- trigger clause keyword -----------------------------------------------
+
+    #[test]
+    fn trigger_clause() {
+        let src = "rule R { trigger: ExternalEvent(data)\n    ensures: Done() }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Clause { keyword, .. } = &b.items[0].kind else { panic!() };
+        assert_eq!(keyword, "trigger");
+    }
+
+    // -- for-block with comparison in where filter ----------------------------
+
+    #[test]
+    fn for_block_where_comparison() {
+        let src = r#"rule R {
+    when: X()
+    for item in Items where item.status = active:
+        ensures: Processed(item: item)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::ForBlock { filter, .. } = &b.items[1].kind else { panic!() };
+        assert!(filter.is_some());
+        assert!(matches!(filter.as_ref().unwrap(), Expr::Comparison { .. }));
+    }
+
+    // -- for-expression with comparison in where filter -----------------------
+
+    #[test]
+    fn for_expr_where_comparison() {
+        let src = r#"rule R {
+    when: X()
+    ensures:
+        for item in Items where item.active = true:
+            Processed(item: item)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- if/else if/else chain ------------------------------------------------
+
+    #[test]
+    fn if_else_if_else() {
+        let src = r#"rule R {
+    when: X(v)
+    ensures:
+        if v < 10: Small()
+        else if v < 100: Medium()
+        else: Large()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- null coalescing and optional chaining --------------------------------
+
+    #[test]
+    fn null_coalesce_and_optional_chain() {
+        let src = "entity E { v: a?.b ?? fallback }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        // Top-level should be NullCoalesce
+        assert!(matches!(value, Expr::NullCoalesce { .. }));
+    }
+
+    // -- generic types --------------------------------------------------------
+
+    #[test]
+    fn generic_type_nested() {
+        let src = "entity E { v: List<Set<String>> }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- set literal, list literal, object literal ----------------------------
+
+    #[test]
+    fn collection_literals() {
+        let src = r#"rule R {
+    when: X()
+    ensures:
+        let s = {a, b, c}
+        let l = [1, 2, 3]
+        let o = {name: "test", count: 42}
+        Done()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- given block ----------------------------------------------------------
+
+    #[test]
+    fn given_block() {
+        let src = "given { viewer: User\n    time: Timestamp }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.kind, BlockKind::Given);
+        assert!(b.name.is_none());
+    }
+
+    // -- actor block ----------------------------------------------------------
+
+    #[test]
+    fn actor_block() {
+        let src = "actor Admin { identified_by: User where role = admin }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.kind, BlockKind::Actor);
+    }
+
+    // -- join lookup ----------------------------------------------------------
+
+    #[test]
+    fn join_lookup() {
+        let src = "entity E { match: Other{field_a, field_b: value} }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        assert!(matches!(value, Expr::JoinLookup { .. }));
+    }
+
+    // -- includes / excludes --------------------------------------------------
+
+    #[test]
+    fn includes_excludes() {
+        let src = r#"rule R {
+    when: X(a, b)
+    requires: a.items includes b
+    requires: a.items excludes b
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- in / not in with set literal -----------------------------------------
+
+    #[test]
+    fn in_not_in_set() {
+        let src = r#"rule R {
+    when: X(s)
+    requires: s in {a, b, c}
+    requires: s not in {d, e}
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- comprehensive fixture file -------------------------------------------
+
+    #[test]
+    fn comprehensive_fixture() {
+        let src = include_str!("../tests/fixtures/comprehensive-edge-cases.allium");
+        let r = parse(src);
+        assert_eq!(
+            r.diagnostics.len(),
+            0,
+            "expected no errors in comprehensive fixture, got: {:?}",
+            r.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>(),
+        );
+        assert!(r.module.declarations.len() > 30, "expected many declarations");
+    }
+
+    // -- error message quality ------------------------------------------------
+
+    #[test]
+    fn error_expected_declaration() {
+        let r = parse("+ invalid");
+        assert!(r.diagnostics.len() >= 1);
+        let msg = &r.diagnostics[0].message;
+        assert!(msg.contains("expected declaration"), "got: {msg}");
+        assert!(msg.contains("entity"), "should list valid options, got: {msg}");
+        assert!(msg.contains("rule"), "should list valid options, got: {msg}");
+    }
+
+    #[test]
+    fn error_expected_expression() {
+        let r = parse("entity E { v: }");
+        assert!(r.diagnostics.len() >= 1);
+        let msg = &r.diagnostics[0].message;
+        assert!(msg.contains("expected expression"), "got: {msg}");
+        assert!(msg.contains("identifier"), "should list valid starters, got: {msg}");
+    }
+
+    #[test]
+    fn error_expected_block_item() {
+        let r = parse("entity E { + }");
+        assert!(r.diagnostics.len() >= 1);
+        let msg = &r.diagnostics[0].message;
+        assert!(msg.contains("expected block item"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_expected_identifier() {
+        let r = parse("entity 123 {}");
+        assert!(r.diagnostics.len() >= 1);
+        let msg = &r.diagnostics[0].message;
+        // Context-aware: says "entity name" not generic "identifier"
+        assert!(msg.contains("expected entity name"), "got: {msg}");
+        // Human-friendly: says "number" not "Number" or "TokenKind::Number"
+        assert!(msg.contains("number"), "should say what was found, got: {msg}");
+    }
+
+    #[test]
+    fn error_missing_brace() {
+        let r = parse("entity E {");
+        assert!(r.diagnostics.len() >= 1);
+        let msg = &r.diagnostics[0].message;
+        assert!(msg.contains("expected"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_recovery_multiple() {
+        // Parser should recover and report multiple errors
+        let r = parse("entity E { + }\nentity F { - }");
+        assert!(r.diagnostics.len() >= 2, "expected at least 2 errors, got {}", r.diagnostics.len());
     }
 }

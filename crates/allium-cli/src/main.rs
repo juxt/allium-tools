@@ -60,9 +60,8 @@ fn cmd_check(args: &[String]) -> ExitCode {
                 col + 1,
                 d.message,
             );
-        }
+            print_source_snippet(&source_map, &source, line, col);
 
-        for d in &result.diagnostics {
             match d.severity {
                 Severity::Error => total_errors += 1,
                 Severity::Warning => total_warnings += 1,
@@ -146,6 +145,7 @@ fn cmd_parse(args: &[String]) -> ExitCode {
                     Severity::Warning => "warning",
                 };
                 println!("  {}:{}: {severity}: {}", line + 1, col + 1, d.message);
+                print_source_snippet(&source_map, &source, line, col);
             }
         }
     }
@@ -173,7 +173,7 @@ fn describe_decl(decl: &allium_parser::ast::Decl) -> String {
             format!("{:?} {name} ({} items)", b.kind, b.items.len())
         }
         Decl::Default(d) => format!("default {}", d.name.name),
-        Decl::Variant(v) => format!("variant {} : {}", v.name.name, v.base.name),
+        Decl::Variant(v) => format!("variant {} : {:?}", v.name.name, v.base),
         Decl::Deferred(_) => "deferred ...".to_string(),
         Decl::OpenQuestion(q) => {
             let text: String = q.text.parts.iter().map(|p| match p {
@@ -183,6 +183,14 @@ fn describe_decl(decl: &allium_parser::ast::Decl) -> String {
             format!("open question \"{text}\"")
         }
     }
+}
+
+fn print_source_snippet(source_map: &SourceMap, source: &str, line: u32, col: u32) {
+    let line_text = source_map.line_text(source, line);
+    let line_num = format!("{}", line + 1);
+    let gutter = line_num.len();
+    println!("  {} | {}", line_num, line_text);
+    println!("  {} | {}^", " ".repeat(gutter), " ".repeat(col as usize));
 }
 
 fn resolve_files(args: &[String]) -> Vec<PathBuf> {
