@@ -1,5 +1,5 @@
 [package]
-name = "allium"
+name = "allium-cli"
 description = "CLI for checking Allium specification files"
 version.workspace = true
 edition.workspace = true
