@@ -1,5 +1,5 @@
 [package]
-name = "allium-cli"
+name = "allium"
 description = "CLI for checking Allium specification files"
 version.workspace = true
 edition.workspace = true
@@ -10,4 +10,4 @@ name = "allium"
 path = "src/main.rs"
 
 [dependencies]
-allium-parser = { path = "../allium-parser" }
+allium-parser = { path = "../allium-parser", version = "0.1.0" }
