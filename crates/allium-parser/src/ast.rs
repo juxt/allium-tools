@@ -126,6 +126,13 @@ pub enum BlockItemKind {
     Let { name: Ident, value: Expr },
     /// Bare name inside an enum body — `pending`, `shipped`, etc.
     EnumVariant { name: Ident },
+    /// `for binding in collection [where filter]: ...` at block level (rule iteration)
+    ForBlock {
+        binding: Ident,
+        collection: Expr,
+        filter: Option<Expr>,
+        items: Vec<BlockItem>,
+    },
     /// `open question "text"` (nested within a block)
     OpenQuestion { text: StringLiteral },
 }
@@ -295,6 +302,54 @@ pub enum Expr {
         body: Box<Expr>,
     },
 
+    /// `collection where cond -> field` — projection mapping
+    ProjectionMap {
+        span: Span,
+        source: Box<Expr>,
+        field: Ident,
+    },
+
+    /// `Entity.status transitions_to state`
+    TransitionsTo {
+        span: Span,
+        subject: Box<Expr>,
+        new_state: Box<Expr>,
+    },
+
+    /// `Entity.status becomes state`
+    Becomes {
+        span: Span,
+        subject: Box<Expr>,
+        new_state: Box<Expr>,
+    },
+
+    /// `name: expr` — binding inside a clause value (when triggers, facing, context)
+    Binding {
+        span: Span,
+        name: Ident,
+        value: Box<Expr>,
+    },
+
+    /// `action when condition` — guard on a provides/related item
+    WhenGuard {
+        span: Span,
+        action: Box<Expr>,
+        condition: Box<Expr>,
+    },
+
+    /// `T?` — optional type annotation
+    TypeOptional {
+        span: Span,
+        inner: Box<Expr>,
+    },
+
+    /// `let name = value` inside an expression block (ensures, provides, etc.)
+    LetExpr {
+        span: Span,
+        name: Ident,
+        value: Box<Expr>,
+    },
+
     /// `oauth/Session` — qualified name with module prefix
     QualifiedName(QualifiedName),
 
@@ -335,6 +390,13 @@ impl Expr {
             | Expr::Lambda { span, .. }
             | Expr::Conditional { span, .. }
             | Expr::For { span, .. }
+            | Expr::ProjectionMap { span, .. }
+            | Expr::TransitionsTo { span, .. }
+            | Expr::Becomes { span, .. }
+            | Expr::Binding { span, .. }
+            | Expr::WhenGuard { span, .. }
+            | Expr::TypeOptional { span, .. }
+            | Expr::LetExpr { span, .. }
             | Expr::Block { span, .. } => *span,
             Expr::QualifiedName(q) => q.span,
         }

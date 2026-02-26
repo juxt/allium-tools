@@ -223,6 +223,17 @@ fn is_clause_keyword(text: &str) -> bool {
     )
 }
 
+/// True for clause keywords whose value can start with a `name: expr` binding.
+fn clause_allows_binding(keyword: &str) -> bool {
+    matches!(keyword, "when")
+}
+
+/// True for keywords that use `keyword name: value` syntax (no colon after the
+/// keyword). These directly embed a binding.
+fn is_binding_clause_keyword(text: &str) -> bool {
+    matches!(text, "facing" | "context")
+}
+
 /// True if the current token is a keyword that begins a clause.
 fn token_is_clause_keyword(kind: TokenKind) -> bool {
     matches!(
@@ -532,6 +543,11 @@ impl<'s> Parser<'s> {
             return self.parse_let_item(start);
         }
 
+        // `for binding in collection [where filter]: ...` at block level
+        if self.at(TokenKind::For) {
+            return self.parse_for_block_item(start);
+        }
+
         // `open question "text"` (inside a block)
         if self.at(TokenKind::Open) && self.peek_at(1).kind == TokenKind::Question {
             self.advance(); // open
@@ -546,6 +562,15 @@ impl<'s> Parser<'s> {
         // Everything else: `name: value` or `keyword: value` or
         // `name(params): value`
         if self.peek_kind().is_word() {
+            // `facing name: Type` / `context name: Type [where ...]` — binding
+            // clause keywords that don't use `:` after the keyword itself.
+            if is_binding_clause_keyword(self.text(self.peek().span))
+                && self.peek_at(1).kind.is_word()
+                && self.peek_at(2).kind == TokenKind::Colon
+            {
+                return self.parse_binding_clause_item(start);
+            }
+
             // Check for `name(` — potential parameterised assignment
             if self.peek_at(1).kind == TokenKind::LParen {
                 return self.parse_param_or_clause_item(start);
@@ -577,12 +602,99 @@ impl<'s> Parser<'s> {
         })
     }
 
+    /// Parse `facing name: Type` or `context name: Type [where ...]`.
+    /// These keywords don't take `:` after the keyword — they embed a binding directly.
+    fn parse_binding_clause_item(&mut self, start: Span) -> Option<BlockItem> {
+        let keyword_tok = self.advance(); // consume facing/context
+        let keyword = self.text(keyword_tok.span).to_string();
+        let binding_name = self.parse_ident()?;
+        self.advance(); // consume ':'
+        let type_expr = self.parse_clause_value(start)?;
+        let value_span = type_expr.span();
+        let value = Expr::Binding {
+            span: binding_name.span.merge(value_span),
+            name: binding_name,
+            value: Box::new(type_expr),
+        };
+        Some(BlockItem {
+            span: start.merge(value_span),
+            kind: BlockItemKind::Clause { keyword, value },
+        })
+    }
+
+    /// Parse `for binding in collection [where filter]:` at block level.
+    /// The body is a set of nested block items (let, requires, ensures, etc.).
+    fn parse_for_block_item(&mut self, start: Span) -> Option<BlockItem> {
+        self.advance(); // consume `for`
+        let binding = self.parse_ident()?;
+        self.expect(TokenKind::In)?;
+
+        let collection = self.parse_expr(BP_WITH_WHERE + 1)?;
+
+        let filter = if self.eat(TokenKind::Where).is_some() {
+            Some(self.parse_expr(BP_WITH_WHERE + 1)?)
+        } else {
+            None
+        };
+
+        self.expect(TokenKind::Colon)?;
+
+        // The body contains nested block items at higher indentation.
+        let for_line = self.line_of(start);
+        let next_line = self.line_of(self.peek().span);
+
+        let items = if next_line > for_line {
+            let base_col = self.col_of(self.peek().span);
+            self.parse_indented_block_items(base_col)
+        } else {
+            // Single-line for: parse one block item
+            let mut items = Vec::new();
+            if let Some(item) = self.parse_block_item() {
+                items.push(item);
+            }
+            items
+        };
+
+        let end = items
+            .last()
+            .map(|i| i.span)
+            .unwrap_or(start);
+
+        Some(BlockItem {
+            span: start.merge(end),
+            kind: BlockItemKind::ForBlock {
+                binding,
+                collection,
+                filter,
+                items,
+            },
+        })
+    }
+
+    /// Collect block items at column >= `base_col` (for indented for-block bodies).
+    fn parse_indented_block_items(&mut self, base_col: u32) -> Vec<BlockItem> {
+        let mut items = Vec::new();
+        while !self.at_eof()
+            && !self.at(TokenKind::RBrace)
+            && self.col_of(self.peek().span) >= base_col
+        {
+            if let Some(item) = self.parse_block_item() {
+                items.push(item);
+            } else {
+                self.advance();
+                break;
+            }
+        }
+        items
+    }
+
     fn parse_assign_or_clause_item(&mut self, start: Span) -> Option<BlockItem> {
         let name_tok = self.advance(); // consume name/keyword
         let name_text = self.text(name_tok.span).to_string();
         self.advance(); // consume ':'
 
-        let value = self.parse_clause_value(start)?;
+        let allows_binding = clause_allows_binding(&name_text);
+        let value = self.parse_clause_value_maybe_binding(start, allows_binding)?;
         let value_span = value.span();
 
         let kind = if is_clause_keyword(&name_text) {
@@ -672,6 +784,40 @@ impl<'s> Parser<'s> {
         Some(params)
     }
 
+    /// Parse a clause value, optionally checking for a `name: expr` binding
+    /// pattern at the start. Used for when, facing and context clauses where
+    /// the first `ident:` is a binding rather than a nested assignment.
+    fn parse_clause_value_maybe_binding(
+        &mut self,
+        clause_start: Span,
+        allow_binding: bool,
+    ) -> Option<Expr> {
+        if allow_binding
+            && self.peek_kind().is_word()
+            && self.peek_at(1).kind == TokenKind::Colon
+        {
+            // Check this isn't at the start of a new block item on the next line.
+            // Bindings only apply on the same line or the immediate indented value.
+            let clause_line = self.line_of(clause_start);
+            let next_line = self.line_of(self.peek().span);
+            let colon_is_block_item = next_line > clause_line
+                && self.peek_at(2).kind != TokenKind::Eof
+                && self.line_of(self.peek_at(2).span) == next_line;
+
+            if next_line == clause_line || colon_is_block_item {
+                let name = self.parse_ident()?;
+                self.advance(); // consume ':'
+                let inner = self.parse_clause_value(clause_start)?;
+                return Some(Expr::Binding {
+                    span: name.span.merge(inner.span()),
+                    name,
+                    value: Box::new(inner),
+                });
+            }
+        }
+        self.parse_clause_value(clause_start)
+    }
+
     /// Parse a clause value. If the next token is on a new line (indented),
     /// collect a multi-line block. Otherwise parse a single expression.
     fn parse_clause_value(&mut self, clause_start: Span) -> Option<Expr> {
@@ -690,6 +836,7 @@ impl<'s> Parser<'s> {
     }
 
     /// Collect expressions that start at column >= `base_col` into a block.
+    /// Also handles `let name = value` bindings inside clause value blocks.
     fn parse_indented_block(&mut self, base_col: u32) -> Option<Expr> {
         let start = self.peek().span;
         let mut items = Vec::new();
@@ -698,6 +845,24 @@ impl<'s> Parser<'s> {
             && !self.at(TokenKind::RBrace)
             && self.col_of(self.peek().span) >= base_col
         {
+            // Handle `let name = value` inside expression blocks
+            if self.at(TokenKind::Let) {
+                let let_start = self.advance().span;
+                if let Some(name) = self.parse_ident() {
+                    if self.expect(TokenKind::Eq).is_some() {
+                        if let Some(value) = self.parse_expr(0) {
+                            items.push(Expr::LetExpr {
+                                span: let_start.merge(value.span()),
+                                name,
+                                value: Box::new(value),
+                            });
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+
             if let Some(expr) = self.parse_expr(0) {
                 items.push(expr);
             } else {
@@ -724,11 +889,14 @@ impl<'s> Parser<'s> {
 
 // Binding powers (even = left, odd = right for right-associative)
 const BP_LAMBDA: u8 = 4;
+const BP_WHEN_GUARD: u8 = 5;
 const BP_PIPE: u8 = 6;
 const BP_OR: u8 = 10;
 const BP_AND: u8 = 20;
 const BP_COMPARE: u8 = 30;
+const BP_TRANSITION: u8 = 32;
 const BP_WITH_WHERE: u8 = 35;
+const BP_PROJECTION: u8 = 37;
 const BP_NULL_COALESCE: u8 = 40;
 const BP_ADD: u8 = 50;
 const BP_MUL: u8 = 60;
@@ -869,6 +1037,8 @@ impl<'s> Parser<'s> {
     fn infix_bp(&self) -> Option<(u8, u8)> {
         match self.peek_kind() {
             TokenKind::FatArrow => Some((BP_LAMBDA, BP_LAMBDA - 1)), // right-assoc
+            // `when` as an inline guard on provides/related items
+            TokenKind::When => Some((BP_WHEN_GUARD, BP_WHEN_GUARD + 1)),
             TokenKind::Pipe => Some((BP_PIPE, BP_PIPE + 1)),
             TokenKind::Or => Some((BP_OR, BP_OR + 1)),
             TokenKind::And => Some((BP_AND, BP_AND + 1)),
@@ -883,8 +1053,11 @@ impl<'s> Parser<'s> {
             TokenKind::Not if self.peek_at(1).kind == TokenKind::In => {
                 Some((BP_COMPARE, BP_COMPARE + 1))
             }
+            TokenKind::TransitionsTo => Some((BP_TRANSITION, BP_TRANSITION + 1)),
+            TokenKind::Becomes => Some((BP_TRANSITION, BP_TRANSITION + 1)),
             TokenKind::Where => Some((BP_WITH_WHERE, BP_WITH_WHERE + 1)),
             TokenKind::With => Some((BP_WITH_WHERE, BP_WITH_WHERE + 1)),
+            TokenKind::ThinArrow => Some((BP_PROJECTION, BP_PROJECTION + 1)),
             TokenKind::QuestionQuestion => Some((BP_NULL_COALESCE, BP_NULL_COALESCE + 1)),
             TokenKind::Plus | TokenKind::Minus => Some((BP_ADD, BP_ADD + 1)),
             TokenKind::Star | TokenKind::Slash => Some((BP_MUL, BP_MUL + 1)),
@@ -1053,15 +1226,22 @@ impl<'s> Parser<'s> {
                 })
             }
             TokenKind::Slash => {
-                // Check for qualified name: `ident / PascalIdent`
+                // Check for qualified name: `alias/Name` or `alias/config`
+                // Qualified if the LHS is a bare identifier and the RHS is a
+                // word that either starts with uppercase or is a block keyword
+                // (like `config`).
                 if let Expr::Ident(ref id) = lhs {
                     if self.peek_kind().is_word() {
                         let next_text = self.text(self.peek().span);
-                        if next_text
+                        let is_qualified = next_text
                             .chars()
                             .next()
                             .is_some_and(|c| c.is_uppercase())
-                        {
+                            || matches!(
+                                self.peek_kind(),
+                                TokenKind::Config | TokenKind::Entity | TokenKind::Value
+                            );
+                        if is_qualified {
                             let name_tok = self.advance();
                             return Some(Expr::QualifiedName(QualifiedName {
                                 span: lhs.span().merge(name_tok.span),
@@ -1079,6 +1259,39 @@ impl<'s> Parser<'s> {
                     right: Box::new(rhs),
                 })
             }
+            TokenKind::ThinArrow => {
+                let field = self.parse_ident()?;
+                Some(Expr::ProjectionMap {
+                    span: lhs.span().merge(field.span),
+                    source: Box::new(lhs),
+                    field,
+                })
+            }
+            TokenKind::TransitionsTo => {
+                let rhs = self.parse_expr(r_bp)?;
+                Some(Expr::TransitionsTo {
+                    span: lhs.span().merge(rhs.span()),
+                    subject: Box::new(lhs),
+                    new_state: Box::new(rhs),
+                })
+            }
+            TokenKind::Becomes => {
+                let rhs = self.parse_expr(r_bp)?;
+                Some(Expr::Becomes {
+                    span: lhs.span().merge(rhs.span()),
+                    subject: Box::new(lhs),
+                    new_state: Box::new(rhs),
+                })
+            }
+            TokenKind::When => {
+                // Inline guard: `action when condition`
+                let rhs = self.parse_expr(r_bp)?;
+                Some(Expr::WhenGuard {
+                    span: lhs.span().merge(rhs.span()),
+                    action: Box::new(lhs),
+                    condition: Box::new(rhs),
+                })
+            }
             _ => {
                 self.error(op_tok.span, "unexpected infix operator");
                 None
@@ -1091,6 +1304,7 @@ impl<'s> Parser<'s> {
     fn postfix_bp(&self) -> Option<u8> {
         match self.peek_kind() {
             TokenKind::Dot | TokenKind::QuestionDot => Some(BP_POSTFIX),
+            TokenKind::QuestionMark => Some(BP_POSTFIX),
             TokenKind::LParen => Some(BP_POSTFIX),
             TokenKind::LBrace => {
                 // Join lookup: only when preceded by something that looks
@@ -1119,6 +1333,13 @@ impl<'s> Parser<'s> {
 
     fn parse_postfix(&mut self, lhs: Expr) -> Option<Expr> {
         match self.peek_kind() {
+            TokenKind::QuestionMark => {
+                let end = self.advance().span;
+                Some(Expr::TypeOptional {
+                    span: lhs.span().merge(end),
+                    inner: Box::new(lhs),
+                })
+            }
             TokenKind::Dot => {
                 self.advance();
                 let field = self.parse_ident()?;
@@ -1555,6 +1776,151 @@ mod tests {
         assert_eq!(r.diagnostics.len(), 0);
     }
 
+    // -- projection mapping -----------------------------------------------
+
+    #[test]
+    fn projection_arrow() {
+        let src = "entity E { confirmed: confirmations where status = confirmed -> interviewer }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- transitions_to / becomes ------------------------------------------
+
+    #[test]
+    fn transitions_to_trigger() {
+        let src = "rule R { when: Interview.status transitions_to scheduled\n    ensures: Notification.created() }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn becomes_trigger() {
+        let src = "rule R { when: Interview.status becomes scheduled\n    ensures: Notification.created() }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- binding colon in clause values ------------------------------------
+
+    #[test]
+    fn when_binding() {
+        let src = "rule R {\n    when: interview: Interview.status transitions_to scheduled\n    ensures: Notification.created()\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        // The when clause value should be a Binding wrapping a TransitionsTo
+        let decl = &r.module.declarations[0];
+        if let Decl::Block(b) = decl {
+            if let BlockItemKind::Clause { keyword, value } = &b.items[0].kind {
+                assert_eq!(keyword, "when");
+                assert!(matches!(value, Expr::Binding { .. }));
+            } else {
+                panic!("expected clause");
+            }
+        } else {
+            panic!("expected block decl");
+        }
+    }
+
+    #[test]
+    fn when_binding_temporal() {
+        let src = "rule R {\n    when: invitation: Invitation.expires_at <= now\n    ensures: Invitation.expired()\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn when_binding_created() {
+        let src = "rule R {\n    when: batch: DigestBatch.created\n    ensures: Email.created()\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn facing_binding() {
+        let src = "surface S {\n    facing viewer: Interviewer\n    exposes: InterviewList\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn context_binding() {
+        let src = "surface S {\n    facing viewer: Interviewer\n    context assignment: SlotConfirmation where interviewer = viewer\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- rule-level for block item -----------------------------------------
+
+    #[test]
+    fn rule_level_for() {
+        let src = r#"rule ProcessDigests {
+    when: schedule: DigestSchedule.next_run_at <= now
+    for user in Users where notification_setting.digest_enabled:
+        ensures: DigestBatch.created(user: user)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        if let Decl::Block(b) = &r.module.declarations[0] {
+            // Should have when clause + for block item
+            assert!(b.items.len() >= 2);
+            assert!(matches!(b.items[1].kind, BlockItemKind::ForBlock { .. }));
+        } else {
+            panic!("expected block decl");
+        }
+    }
+
+    // -- let inside ensures blocks -----------------------------------------
+
+    #[test]
+    fn let_in_ensures_block() {
+        let src = r#"rule R {
+    when: ScheduleInterview(candidacy, time, interviewers)
+    ensures:
+        let slot = InterviewSlot.created(time: time, candidacy: candidacy)
+        for interviewer in interviewers:
+            SlotConfirmation.created(slot: slot, interviewer: interviewer)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- when guard on provides items --------------------------------------
+
+    #[test]
+    fn provides_when_guard() {
+        let src = "surface S {\n    facing viewer: Interviewer\n    provides: ConfirmSlot(viewer, slot) when slot.status = pending\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- optional type suffix ----------------------------------------------
+
+    #[test]
+    fn optional_type_suffix() {
+        let src = "entity E { locked_until: Timestamp? }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn optional_trigger_param() {
+        let src = "rule R { when: Report(interviewer, interview, reason, details?)\n    ensures: Done() }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- qualified name with config ----------------------------------------
+
+    #[test]
+    fn qualified_config_access() {
+        let src = "entity E { duration: oauth/config.session_duration }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- comprehensive integration test ------------------------------------
+
     #[test]
     fn realistic_spec() {
         let src = r#"-- allium: 1
@@ -1572,7 +1938,9 @@ entity Order {
     total: Decimal
     items: OrderItem with order = this
     shipped_items: items where status = shipped
+    confirmed_items: items where status = confirmed -> item
     is_complete: status = delivered
+    locked_until: Timestamp?
 }
 
 config {
@@ -1587,7 +1955,7 @@ rule PlaceOrder {
 }
 
 rule ShipOrder {
-    when: ShipmentRequested(order)
+    when: order: Order.status transitions_to shipped
     ensures: Email.created(to: order.customer.email, template: order_shipped)
 }
 
@@ -1596,6 +1964,55 @@ open question "How do we handle partial shipments?"
         let r = parse_ok(src);
         assert_eq!(r.diagnostics.len(), 0, "expected no errors");
         assert_eq!(r.module.version, Some(1));
+        assert_eq!(r.module.declarations.len(), 7);
+    }
+
+    #[test]
+    fn extension_behaviour_excerpt() {
+        // Exercises: inline enums, generic types, or-triggers, named call
+        // args, config with typed defaults, module declaration.
+        let src = r#"value Document {
+    uri: String
+    text: String
+}
+
+entity Finding {
+    code: String
+    severity: error | warning | info
+    range: FindingRange
+}
+
+entity DiagnosticsMode {
+    value: strict | relaxed
+}
+
+config {
+    duplicateKey: String = "allium.config.duplicateKey"
+}
+
+rule RefreshDiagnostics {
+    when: DocumentOpened(document) or DocumentChanged(document)
+    requires: document.language_id = "allium"
+    ensures: FindingsComputed(document)
+}
+
+surface DiagnosticsDashboard {
+    facing viewer: Developer
+    context doc: Document where viewer.active_document = doc
+    provides: RunChecks(viewer) when doc.language_id = "allium"
+    exposes: FindingList
+}
+
+rule ProcessDigests {
+    when: schedule: DigestSchedule.next_run_at <= now
+    for user in Users where notification_setting.digest_enabled:
+        let settings = user.notification_setting
+        ensures: DigestBatch.created(user: user)
+}
+"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "expected no errors");
+        // value + entity + entity + config + rule + surface + rule = 7
         assert_eq!(r.module.declarations.len(), 7);
     }
 }

@@ -50,6 +50,10 @@ pub enum TokenKind {
     Or,
     Exists,
 
+    // Trigger keywords
+    TransitionsTo,
+    Becomes,
+
     // Context-sensitive identifiers treated as keywords
     Now,
     This,
@@ -130,6 +134,8 @@ impl TokenKind {
                 | TokenKind::And
                 | TokenKind::Or
                 | TokenKind::Exists
+                | TokenKind::TransitionsTo
+                | TokenKind::Becomes
                 | TokenKind::Now
                 | TokenKind::This
                 | TokenKind::Within
@@ -469,6 +475,8 @@ fn classify_keyword(text: &str) -> TokenKind {
         "and" => TokenKind::And,
         "or" => TokenKind::Or,
         "exists" => TokenKind::Exists,
+        "transitions_to" => TokenKind::TransitionsTo,
+        "becomes" => TokenKind::Becomes,
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         "null" => TokenKind::Null,
