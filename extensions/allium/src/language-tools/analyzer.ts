@@ -1558,7 +1558,7 @@ function findSurfaceActorLinkIssues(
   const surfaceBlocks = blocks.filter((block) => block.kind === "surface");
   const referencedActors = new Set<string>();
   const forPattern =
-    /^\s*facing\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/m;
+    /^\s*(?:facing|for)\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/m;
 
   for (const surface of surfaceBlocks) {
     const match = surface.body.match(forPattern);
@@ -1645,17 +1645,17 @@ function findSurfaceBindingUsageIssues(
   for (const surface of surfaceBlocks) {
     const body = surface.body;
     const forMatch = body.match(
-      /^\s*facing\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*[A-Za-z_][A-Za-z0-9_]*(?:\s+with\s+.+)?\s*$/m,
+      /^\s*(?:facing|for)\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*[A-Za-z_][A-Za-z0-9_]*(?:\s+with\s+.+)?\s*$/m,
     );
     const contextMatch = body.match(
       /^\s*context\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*[A-Za-z_][A-Za-z0-9_]*(?:\s+with\s+.+)?\s*$/m,
     );
     const bindings = [
       ...(forMatch
-        ? [{ name: forMatch[1], source: "facing", line: forMatch[0] }]
+        ? [{ name: forMatch[1], sourcePattern: "(?:facing|for)", sourceLabel: "for", line: forMatch[0] }]
         : []),
       ...(contextMatch
-        ? [{ name: contextMatch[1], source: "context", line: contextMatch[0] }]
+        ? [{ name: contextMatch[1], sourcePattern: "context", sourceLabel: "context", line: contextMatch[0] }]
         : []),
     ];
 
@@ -1670,7 +1670,7 @@ function findSurfaceBindingUsageIssues(
       }
 
       const linePattern = new RegExp(
-        `^\\s*${binding.source}\\s+${escapeRegex(binding.name)}\\s*:`,
+        `^\\s*${binding.sourcePattern}\\s+${escapeRegex(binding.name)}\\s*:`,
         "m",
       );
       const lineMatch = body.match(linePattern);
@@ -1688,7 +1688,7 @@ function findSurfaceBindingUsageIssues(
           absoluteOffset,
           absoluteOffset + binding.name.length,
           "allium.surface.unusedBinding",
-          `Surface '${surface.name}' binding '${binding.name}' from '${binding.source}' is not used in the surface body.`,
+          `Surface '${surface.name}' binding '${binding.name}' from '${binding.sourceLabel}' is not used in the surface body.`,
           "warning",
         ),
       );
@@ -2972,7 +2972,7 @@ function collectTypeSchemas(
       field = fieldPattern.exec(body)
     ) {
       const name = field[1];
-      const rhs = field[2].trim();
+      const rhs = field[2].replace(/\s*--.*$/, "").trim();
       if (
         /^[A-Za-z_][A-Za-z0-9_]*\s+for\s+this\s+[A-Za-z_][A-Za-z0-9_]*$/.test(
           rhs,
@@ -2992,6 +2992,10 @@ function collectTypeSchemas(
       );
       if (genericMatch) {
         fields.set(name, { typeName: genericMatch[2], isCollection: true });
+        continue;
+      }
+      if (/^[a-z_][a-z0-9_]*(?:\s*\|\s*[a-z_][a-z0-9_]*)+$/.test(cleaned)) {
+        fields.set(name, { typeName: "__enum", isCollection: false });
         continue;
       }
       const direct = cleaned.match(/^([A-Za-z_][A-Za-z0-9_]*)$/);
@@ -3032,7 +3036,7 @@ function collectRulePathSuffixes(
 function collectSurfaceBindingTypes(body: string): Map<string, string> {
   const bindings = new Map<string, string>();
   const patterns = [
-    /^\s*facing\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)/m,
+    /^\s*(?:facing|for)\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)/m,
     /^\s*context\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)/m,
   ];
   for (const pattern of patterns) {
