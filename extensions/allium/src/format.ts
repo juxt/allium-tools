@@ -134,10 +134,13 @@ export function formatAlliumText(
 
     const isTopLevelDeclaration =
       indentLevel === 0 && isTopLevelDeclarationLine(trimmed);
+    const prevNonBlank = lastNonBlankLine(formattedLines);
     if (
       isTopLevelDeclaration &&
       formattedLines.length > 0 &&
-      blankLinesAtEnd(formattedLines) < topLevelSpacing
+      blankLinesAtEnd(formattedLines) < topLevelSpacing &&
+      prevNonBlank !== null &&
+      !prevNonBlank.trimStart().startsWith("--")
     ) {
       while (blankLinesAtEnd(formattedLines) < topLevelSpacing) {
         formattedLines.push("");
@@ -376,6 +379,15 @@ function wildcardToRegex(pattern: string): RegExp {
     .replace(/\?/g, ".");
 
   return new RegExp(`^${escaped}$`);
+}
+
+function lastNonBlankLine(lines: string[]): string | null {
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i] !== "") {
+      return lines[i];
+    }
+  }
+  return null;
 }
 
 function blankLinesAtEnd(lines: string[]): number {

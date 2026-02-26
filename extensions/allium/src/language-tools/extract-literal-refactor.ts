@@ -48,9 +48,10 @@ export function planExtractLiteralToConfig(
       text: `${configInsert.indent}${key}: ${typeName} = ${selected}\n`,
     });
   } else {
+    const insertOffset = findInsertAfterVersionMarker(text);
     edits.push({
-      startOffset: 0,
-      endOffset: 0,
+      startOffset: insertOffset,
+      endOffset: insertOffset,
       text: `config {\n    ${key}: ${typeName} = ${selected}\n}\n\n`,
     });
   }
@@ -196,6 +197,11 @@ function findMatchingBrace(text: string, openOffset: number): number {
     }
   }
   return -1;
+}
+
+function findInsertAfterVersionMarker(text: string): number {
+  const match = text.match(/^--\s*allium:\s*\d+[^\n]*\n/);
+  return match ? match[0].length : 0;
 }
 
 function escapeRegex(value: string): string {
