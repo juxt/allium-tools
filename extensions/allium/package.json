@@ -21,7 +21,8 @@
   ],
   "icon": "icon.png",
   "files": [
-    "dist/**",
+    "dist/extension.js",
+    "dist/allium-lsp.js",
     "language-basics/**",
     "README.md",
     "LICENSE",
