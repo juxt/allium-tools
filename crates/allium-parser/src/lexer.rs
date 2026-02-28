@@ -33,6 +33,7 @@ pub enum TokenKind {
     Use,
     As,
     Module,
+    System,
 
     // Clause / expression keywords
     When,
@@ -126,6 +127,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Use => write!(f, "'use'"),
             TokenKind::As => write!(f, "'as'"),
             TokenKind::Module => write!(f, "'module'"),
+            TokenKind::System => write!(f, "'system'"),
             TokenKind::When => write!(f, "'when'"),
             TokenKind::Requires => write!(f, "'requires'"),
             TokenKind::Ensures => write!(f, "'ensures'"),
@@ -206,6 +208,7 @@ impl TokenKind {
                 | TokenKind::Use
                 | TokenKind::As
                 | TokenKind::Module
+                | TokenKind::System
                 | TokenKind::When
                 | TokenKind::Requires
                 | TokenKind::Ensures
@@ -564,6 +567,7 @@ fn classify_keyword(text: &str) -> TokenKind {
         "use" => TokenKind::Use,
         "as" => TokenKind::As,
         "module" => TokenKind::Module,
+        "system" => TokenKind::System,
         "when" => TokenKind::When,
         "requires" => TokenKind::Requires,
         "ensures" => TokenKind::Ensures,

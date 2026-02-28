@@ -32,6 +32,7 @@ pub enum Decl {
     Use(UseDecl),
     ModuleDecl(ModuleDecl),
     Block(BlockDecl),
+    Guidance(GuidanceDecl),
     Default(DefaultDecl),
     Variant(VariantDecl),
     Deferred(DeferredDecl),
@@ -74,6 +75,7 @@ pub enum BlockKind {
     Rule,
     Surface,
     Actor,
+    System,
 }
 
 /// `default [Type] name = value`
@@ -99,6 +101,13 @@ pub struct VariantDecl {
 pub struct DeferredDecl {
     pub span: Span,
     pub path: Expr,
+}
+
+/// `guidance: value` at module level
+#[derive(Debug, Clone)]
+pub struct GuidanceDecl {
+    pub span: Span,
+    pub value: Expr,
 }
 
 /// `open question "text"`
@@ -140,6 +149,11 @@ pub enum BlockItemKind {
         collection: Expr,
         filter: Option<Expr>,
         items: Vec<BlockItem>,
+    },
+    /// `if condition: ... else if ...: ... else: ...` at block level
+    IfBlock {
+        branches: Vec<CondBlockBranch>,
+        else_items: Option<Vec<BlockItem>>,
     },
     /// `open question "text"` (nested within a block)
     OpenQuestion { text: StringLiteral },
@@ -460,6 +474,14 @@ pub struct CondBranch {
     pub span: Span,
     pub condition: Expr,
     pub body: Expr,
+}
+
+/// A branch of a block-level `if`/`else if` chain.
+#[derive(Debug, Clone)]
+pub struct CondBlockBranch {
+    pub span: Span,
+    pub condition: Expr,
+    pub items: Vec<BlockItem>,
 }
 
 // ---------------------------------------------------------------------------

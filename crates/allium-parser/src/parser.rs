@@ -341,6 +341,7 @@ impl<'s> Parser<'s> {
             TokenKind::Config => self.parse_anonymous_block(BlockKind::Config).map(Decl::Block),
             TokenKind::Surface => self.parse_block(BlockKind::Surface).map(Decl::Block),
             TokenKind::Actor => self.parse_block(BlockKind::Actor).map(Decl::Block),
+            TokenKind::System => self.parse_block(BlockKind::System).map(Decl::Block),
             TokenKind::Default => self.parse_default_decl().map(Decl::Default),
             TokenKind::Variant => self.parse_variant_decl().map(Decl::Variant),
             TokenKind::Deferred => self.parse_deferred_decl().map(Decl::Deferred),
@@ -353,12 +354,19 @@ impl<'s> Parser<'s> {
             {
                 self.parse_qualified_config().map(Decl::Block)
             }
+            // Standalone `guidance: value` at module level
+            TokenKind::Ident
+                if self.text(self.peek().span) == "guidance"
+                    && self.peek_at(1).kind == TokenKind::Colon =>
+            {
+                self.parse_guidance_decl().map(Decl::Guidance)
+            }
             _ => {
                 self.error(
                     self.peek().span,
                     format!(
                         "expected declaration (entity, rule, enum, value, config, surface, actor, \
-                         given, default, variant, deferred, use, open question), found {}",
+                         system, given, default, variant, deferred, use, open question), found {}",
                         self.peek_kind(),
                     ),
                 );
@@ -419,6 +427,7 @@ impl<'s> Parser<'s> {
             BlockKind::Actor => "actor name",
             BlockKind::Value => "value type name",
             BlockKind::Enum => "enum name",
+            BlockKind::System => "system name",
             _ => "block name",
         };
         let name = Some(self.parse_ident_in(context)?);
@@ -570,6 +579,18 @@ impl<'s> Parser<'s> {
             text,
         })
     }
+
+    // -- guidance declaration ----------------------------------------------
+
+    fn parse_guidance_decl(&mut self) -> Option<GuidanceDecl> {
+        let start = self.advance().span; // consume "guidance" ident
+        self.advance(); // consume ':'
+        let value = self.parse_clause_value(start)?;
+        Some(GuidanceDecl {
+            span: start.merge(value.span()),
+            value,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +622,11 @@ impl<'s> Parser<'s> {
         // `for binding in collection [where filter]: ...` at block level
         if self.at(TokenKind::For) {
             return self.parse_for_block_item(start);
+        }
+
+        // `if condition: ... [else if ...: ...] [else: ...]` at block level
+        if self.at(TokenKind::If) {
+            return self.parse_if_block_item(start);
         }
 
         // `open question "text"` (inside a block)
@@ -688,12 +714,17 @@ impl<'s> Parser<'s> {
     /// The body is a set of nested block items (let, requires, ensures, etc.).
     fn parse_for_block_item(&mut self, start: Span) -> Option<BlockItem> {
         self.advance(); // consume `for`
+        // Accept optional `each` keyword: `for each x in ...`
+        if self.peek_kind().is_word() && self.text(self.peek().span) == "each" {
+            self.advance();
+        }
         let binding = self.parse_ident_in("loop variable")?;
         self.expect(TokenKind::In)?;
 
         let collection = self.parse_expr(BP_WITH_WHERE + 1)?;
 
-        let filter = if self.eat(TokenKind::Where).is_some() {
+        let filter = if self.eat(TokenKind::Where).is_some() || self.eat(TokenKind::With).is_some()
+        {
             // Parse filter at min_bp 0 — colon terminates naturally since
             // it's not an expression operator.
             Some(self.parse_expr(0)?)
@@ -750,6 +781,75 @@ impl<'s> Parser<'s> {
             }
         }
         items
+    }
+
+    /// Parse `if condition: ... [else if ...: ...] [else: ...]` at block level.
+    fn parse_if_block_item(&mut self, start: Span) -> Option<BlockItem> {
+        self.advance(); // consume `if`
+        let mut branches = Vec::new();
+
+        // First branch
+        let condition = self.parse_expr(0)?;
+        self.expect(TokenKind::Colon)?;
+        let if_line = self.line_of(start);
+        let items = self.parse_if_block_body(if_line);
+        branches.push(CondBlockBranch {
+            span: start.merge(items.last().map(|i| i.span).unwrap_or(start)),
+            condition,
+            items,
+        });
+
+        // else if / else
+        let mut else_items = None;
+        while self.at(TokenKind::Else) {
+            let else_tok = self.advance();
+            if self.at(TokenKind::If) {
+                let if_start = self.advance().span;
+                let cond = self.parse_expr(0)?;
+                self.expect(TokenKind::Colon)?;
+                let body_items = self.parse_if_block_body(self.line_of(else_tok.span));
+                branches.push(CondBlockBranch {
+                    span: if_start.merge(body_items.last().map(|i| i.span).unwrap_or(if_start)),
+                    condition: cond,
+                    items: body_items,
+                });
+            } else {
+                self.expect(TokenKind::Colon)?;
+                let body_items = self.parse_if_block_body(self.line_of(else_tok.span));
+                else_items = Some(body_items);
+                break;
+            }
+        }
+
+        let end = else_items
+            .as_ref()
+            .and_then(|items| items.last().map(|i| i.span))
+            .or_else(|| branches.last().and_then(|b| b.items.last().map(|i| i.span)))
+            .unwrap_or(start);
+
+        Some(BlockItem {
+            span: start.merge(end),
+            kind: BlockItemKind::IfBlock {
+                branches,
+                else_items,
+            },
+        })
+    }
+
+    /// Parse the body of an if/else if/else block branch.
+    fn parse_if_block_body(&mut self, keyword_line: u32) -> Vec<BlockItem> {
+        let next_line = self.line_of(self.peek().span);
+        if next_line > keyword_line {
+            let base_col = self.col_of(self.peek().span);
+            self.parse_indented_block_items(base_col)
+        } else {
+            // Single-line: parse one block item
+            let mut items = Vec::new();
+            if let Some(item) = self.parse_block_item() {
+                items.push(item);
+            }
+            items
+        }
     }
 
     fn parse_assign_or_clause_item(&mut self, start: Span) -> Option<BlockItem> {
@@ -1144,6 +1244,14 @@ impl<'s> Parser<'s> {
             k if k.is_word() => {
                 let id = self.parse_ident()?;
                 Some(Expr::Ident(id))
+            }
+            TokenKind::Star => {
+                // Wildcard `*` in type position (e.g. `Codec<*>`)
+                let t = self.advance();
+                Some(Expr::Ident(Ident {
+                    span: t.span,
+                    name: "*".into(),
+                }))
             }
             TokenKind::Minus => {
                 // Unary minus: -expr → BinaryOp(0, Sub, expr)
@@ -1710,6 +1818,10 @@ impl<'s> Parser<'s> {
 
     fn parse_for_expr(&mut self) -> Option<Expr> {
         let start = self.advance().span; // consume `for`
+        // Accept optional `each` keyword: `for each x in ...`
+        if self.peek_kind().is_word() && self.text(self.peek().span) == "each" {
+            self.advance();
+        }
         let binding = self.parse_ident_in("loop variable")?;
         self.expect(TokenKind::In)?;
 
@@ -2626,5 +2738,147 @@ rule ProcessDigests {
             .filter(|d| d.severity == crate::diagnostic::Severity::Error)
             .collect();
         assert_eq!(errors.len(), 1, "expected 1 error for same-line bad tokens, got {}", errors.len());
+    }
+
+    // -- new language constructs -------------------------------------------
+
+    #[test]
+    fn system_declaration() {
+        let src = "system PaymentGateway {\n    timeout: 30.seconds\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.kind, BlockKind::System);
+        assert_eq!(b.name.as_ref().unwrap().name, "PaymentGateway");
+    }
+
+    #[test]
+    fn standalone_guidance() {
+        let src = "guidance: \"All rules must be idempotent\"";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        assert!(matches!(&r.module.declarations[0], Decl::Guidance(_)));
+    }
+
+    #[test]
+    fn for_each_block() {
+        let src = r#"rule R {
+    when: X()
+    for each user in Users where user.active:
+        ensures: Notified(user: user)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert!(matches!(b.items[1].kind, BlockItemKind::ForBlock { .. }));
+    }
+
+    #[test]
+    fn for_each_expr() {
+        let src = r#"rule R {
+    when: X(project)
+    ensures:
+        let total = for each task in project.tasks: task.effort
+        Done(total: total)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn for_each_where() {
+        let src = r#"rule R {
+    when: X()
+    for each item in Items where item.active:
+        ensures: Processed(item: item)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn for_each_with() {
+        let src = r#"rule R {
+    when: X()
+    for each slot in Slot with slot.role = reviewer:
+        ensures: Reviewed(slot: slot)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::ForBlock { filter, .. } = &b.items[1].kind else { panic!() };
+        assert!(filter.is_some());
+    }
+
+    #[test]
+    fn block_level_if() {
+        let src = r#"rule R {
+    when: X(task)
+    if task.priority = high:
+        ensures: Escalated(task: task)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::IfBlock { branches, else_items } = &b.items[1].kind else {
+            panic!("expected IfBlock, got {:?}", b.items[1].kind);
+        };
+        assert_eq!(branches.len(), 1);
+        assert!(else_items.is_none());
+    }
+
+    #[test]
+    fn block_level_if_else() {
+        let src = r#"rule R {
+    when: X(score)
+    if score > 80:
+        ensures: High()
+    else if score > 40:
+        ensures: Medium()
+    else:
+        ensures: Low()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::IfBlock { branches, else_items } = &b.items[1].kind else {
+            panic!("expected IfBlock, got {:?}", b.items[1].kind);
+        };
+        assert_eq!(branches.len(), 2);
+        assert!(else_items.is_some());
+    }
+
+    #[test]
+    fn wildcard_type_parameter() {
+        let src = "entity E { codec: Codec<*> }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        if let Expr::GenericType { args, .. } = value {
+            assert_eq!(args.len(), 1);
+            if let Expr::Ident(id) = &args[0] {
+                assert_eq!(id.name, "*");
+            } else {
+                panic!("expected wildcard ident, got {:?}", args[0]);
+            }
+        } else {
+            panic!("expected GenericType, got {:?}", value);
+        }
+    }
+
+    #[test]
+    fn language_reference_fixture() {
+        let src = include_str!("../tests/fixtures/language-reference-constructs.allium");
+        let r = parse(src);
+        let errors: Vec<_> = r.diagnostics.iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert_eq!(
+            errors.len(),
+            0,
+            "expected no errors in language-reference fixture, got: {:?}",
+            errors.iter().map(|d| &d.message).collect::<Vec<_>>(),
+        );
     }
 }

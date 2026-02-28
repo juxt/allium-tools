@@ -1,0 +1,265 @@
+-- allium: 1
+
+-- ---------------------------------------------------------------------------
+-- System declarations
+-- ---------------------------------------------------------------------------
+
+system PaymentGateway {
+    timeout: 30.seconds
+    guarantee: "Exactly-once delivery"
+}
+
+system NotificationRouter {
+    guidance: "Route based on user preferences"
+    provides: SendNotification(user, message)
+}
+
+-- ---------------------------------------------------------------------------
+-- Top-level guidance
+-- ---------------------------------------------------------------------------
+
+guidance: "All rules in this module must be idempotent"
+
+guidance:
+    "Multi-line guidance is also supported"
+
+-- ---------------------------------------------------------------------------
+-- for each iteration (block-level)
+-- ---------------------------------------------------------------------------
+
+rule NotifyAll {
+    when: BroadcastRequested(message)
+    for each user in User where user.active:
+        ensures: Notification.created(to: user.email, message: message)
+}
+
+-- ---------------------------------------------------------------------------
+-- for each iteration (expression-level)
+-- ---------------------------------------------------------------------------
+
+rule SumEffort {
+    when: EstimateProject(project)
+    ensures:
+        let total = for each task in project.tasks: task.effort
+        ProjectEstimated(project: project, total: total)
+}
+
+-- ---------------------------------------------------------------------------
+-- for each with `with` filter
+-- ---------------------------------------------------------------------------
+
+rule ProcessAssignments {
+    when: ReviewRequested(project)
+    for each assignment in Assignment with assignment.role = reviewer:
+        ensures: ReviewCreated(assignment: assignment)
+}
+
+-- ---------------------------------------------------------------------------
+-- for each with `where` filter (standard form)
+-- ---------------------------------------------------------------------------
+
+rule AlertOverdue {
+    when: DailyCheck()
+    for each task in Task where task.is_overdue:
+        ensures: OverdueAlert.created(task: task)
+}
+
+-- ---------------------------------------------------------------------------
+-- Block-level if/else if/else
+-- ---------------------------------------------------------------------------
+
+rule CategoriseRisk {
+    when: RiskAssessment(score)
+    if score > 80:
+        ensures: HighRisk.created(score: score)
+    else if score > 40:
+        ensures: MediumRisk.created(score: score)
+    else:
+        ensures: LowRisk.created(score: score)
+}
+
+-- ---------------------------------------------------------------------------
+-- Block-level if (no else)
+-- ---------------------------------------------------------------------------
+
+rule MaybeNotify {
+    when: TaskCompleted(task)
+    if task.assignee != null:
+        ensures: Notification.created(to: task.assignee.email, template: task_done)
+}
+
+-- ---------------------------------------------------------------------------
+-- Wildcard type parameter
+-- ---------------------------------------------------------------------------
+
+entity Codec {
+    encoder: Encoder<*>
+    decoder: Decoder<*>
+    handler: Handler<String, *>
+}
+
+-- ---------------------------------------------------------------------------
+-- All declaration types from the language reference
+-- ---------------------------------------------------------------------------
+
+module language_reference_test
+
+use "github.com/specs/shared/abc123" as shared
+
+enum Severity { low | medium | high | critical }
+
+external entity ExternalUser {
+    id: String
+    email: String
+}
+
+entity Document {
+    title: String
+    author: ExternalUser
+    status: draft | published | archived
+    tags: Set<String>
+    sections: Section with document = this
+    active_sections: sections where status = active
+    section_titles: sections where status = active -> title
+    word_count: sections.sum(s => s.word_count)
+    is_published: status = published
+    published_at: Timestamp?
+}
+
+value Address {
+    street: String
+    city: String
+    postcode: String
+}
+
+given {
+    viewer: ExternalUser
+    current_time: Timestamp
+}
+
+config {
+    max_documents: Integer = 1000
+    default_status: String = "draft"
+    review_timeout: Duration = 48.hours
+}
+
+actor Editor {
+    identified_by: ExternalUser where role = editor
+}
+
+surface DocumentManager {
+    facing viewer: Editor
+    context doc: Document where author = viewer
+    provides: PublishDocument(viewer, doc) when doc.status = draft
+    exposes: DocumentList
+}
+
+rule CreateDocument {
+    when: CreateDocumentRequested(title, author)
+    requires: title != ""
+    requires: exists author
+    ensures: Document.created(title: title, author: author, status: draft)
+}
+
+rule TransitionPublish {
+    when: doc: Document.status transitions_to published
+    ensures: AuditLog.created(action: published, document: doc)
+}
+
+rule BecomesArchived {
+    when: doc: Document.status becomes archived
+    ensures: Notification.created(to: doc.author.email, template: doc_archived)
+}
+
+rule CollectionOps {
+    when: Validate(doc)
+    requires: doc.tags includes "reviewed"
+    requires: doc.tags excludes "draft"
+    requires: doc.status in {draft, published}
+    requires: doc.status not in {archived}
+    ensures: ValidationPassed()
+}
+
+default Document template = Document.created(title: "Untitled", status: draft)
+
+variant TechnicalDoc : Document {
+    language: String
+    framework: String
+}
+
+deferred Document.auto_categorise
+
+open question "Should documents have version history?"
+
+rule ComputeMetrics {
+    when: MetricsRequested(doc)
+    ensures:
+        let count = doc.sections.count
+        let avg = doc.word_count / count
+        let items = [count, avg]
+        let meta = {document: doc.title, sections: count}
+        MetricsComputed(document: doc, average: avg)
+}
+
+rule WithTimeout {
+    when: SlowOperation(data)
+    timeout: 60.seconds
+    guarantee: "Will complete or roll back"
+    guidance: "Prefer off-peak execution"
+    tags: infrastructure, slow
+    invariant: data.valid = true
+    ensures: OperationComplete(data: data)
+}
+
+rule QualifiedAccess {
+    when: SharedCheck(item)
+    requires: shared/Validator.check(item: item)
+    ensures:
+        let cfg = shared/config.timeout
+        CheckPassed(item: item, timeout: cfg)
+}
+
+rule StringInterpolation {
+    when: LogEvent(user, action)
+    ensures: Log.created(message: "User {user} did {action}")
+}
+
+rule Predicates {
+    when: CodeCheck(finding)
+    requires: finding.code starts_with "doc."
+    ensures: FindingLogged(finding: finding)
+}
+
+rule Arithmetic {
+    when: Calculate(a, b)
+    ensures:
+        let sum = a + b
+        let diff = a - b
+        let prod = a * b
+        let quot = a / b
+        let neg = -a
+        let expr = (a + b) * (a - b)
+        Calculated(result: sum)
+}
+
+rule NullHandling {
+    when: SafeAccess(item)
+    ensures:
+        let val = item.optional?.field ?? "default"
+        let check = exists item.optional
+        let neg = not exists item.removed
+        Handled(value: val)
+}
+
+rule Ranges {
+    when: BoundCheck(value)
+    requires: value in [1..100]
+    ensures: InRange()
+}
+
+rule Lambdas {
+    when: Transform(items)
+    requires: items.all(i => i.valid)
+    requires: items.any(i => i.priority = high)
+    ensures: Transformed()
+}
