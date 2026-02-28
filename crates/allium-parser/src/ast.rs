@@ -145,7 +145,7 @@ pub enum BlockItemKind {
     EnumVariant { name: Ident },
     /// `for binding in collection [where filter]: ...` at block level (rule iteration)
     ForBlock {
-        binding: Ident,
+        binding: ForBinding,
         collection: Expr,
         filter: Option<Expr>,
         items: Vec<BlockItem>,
@@ -155,6 +155,8 @@ pub enum BlockItemKind {
         branches: Vec<CondBlockBranch>,
         else_items: Option<Vec<BlockItem>>,
     },
+    /// `Shard.shard_cache: value` — dot-path reverse relationship
+    PathAssignment { path: Expr, value: Expr },
     /// `open question "text"` (nested within a block)
     OpenQuestion { text: StringLiteral },
 }
@@ -340,7 +342,7 @@ pub enum Expr {
     /// `for x in collection [where cond]: body`
     For {
         span: Span,
-        binding: Ident,
+        binding: ForBinding,
         collection: Box<Expr>,
         filter: Option<Box<Expr>>,
         body: Box<Expr>,
@@ -482,6 +484,14 @@ pub struct CondBlockBranch {
     pub span: Span,
     pub condition: Expr,
     pub items: Vec<BlockItem>,
+}
+
+/// Binding in a `for each` loop — either a single identifier or a
+/// destructured tuple like `(a, b)`.
+#[derive(Debug, Clone)]
+pub enum ForBinding {
+    Single(Ident),
+    Destructured(Vec<Ident>, Span),
 }
 
 // ---------------------------------------------------------------------------

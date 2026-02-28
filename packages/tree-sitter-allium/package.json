@@ -1,6 +1,6 @@
 {
   "name": "tree-sitter-allium",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Tree-sitter grammar for the Allium language.",
   "license": "MIT",
   "main": "bindings/node",

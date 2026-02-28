@@ -652,6 +652,14 @@ impl<'s> Parser<'s> {
                 return self.parse_binding_clause_item(start);
             }
 
+            // Check for `Name.field:` — dot-path reverse relationship
+            if self.peek_at(1).kind == TokenKind::Dot
+                && self.peek_at(2).kind.is_word()
+                && self.peek_at(3).kind == TokenKind::Colon
+            {
+                return self.parse_path_assignment_item(start);
+            }
+
             // Check for `name(` — potential parameterised assignment
             if self.peek_at(1).kind == TokenKind::LParen {
                 return self.parse_param_or_clause_item(start);
@@ -718,7 +726,7 @@ impl<'s> Parser<'s> {
         if self.peek_kind().is_word() && self.text(self.peek().span) == "each" {
             self.advance();
         }
-        let binding = self.parse_ident_in("loop variable")?;
+        let binding = self.parse_for_binding()?;
         self.expect(TokenKind::In)?;
 
         let collection = self.parse_expr(BP_WITH_WHERE + 1)?;
@@ -882,6 +890,30 @@ impl<'s> Parser<'s> {
         })
     }
 
+    /// Parse `Entity.field: value` — a dot-path reverse relationship declaration.
+    fn parse_path_assignment_item(&mut self, start: Span) -> Option<BlockItem> {
+        let obj_tok = self.advance(); // consume first ident
+        self.advance(); // consume '.'
+        let field = self.parse_ident_in("field name")?;
+        self.advance(); // consume ':'
+
+        let path = Expr::MemberAccess {
+            span: obj_tok.span.merge(field.span),
+            object: Box::new(Expr::Ident(Ident {
+                span: obj_tok.span,
+                name: self.text(obj_tok.span).to_string(),
+            })),
+            field,
+        };
+
+        let value = self.parse_clause_value(start)?;
+        let value_span = value.span();
+        Some(BlockItem {
+            span: start.merge(value_span),
+            kind: BlockItemKind::PathAssignment { path, value },
+        })
+    }
+
     fn parse_param_or_clause_item(&mut self, start: Span) -> Option<BlockItem> {
         // Could be `name(params): value` (param assignment) or
         // `name(args)` which is an expression that happens to start a clause
@@ -948,6 +980,23 @@ impl<'s> Parser<'s> {
         Some(params)
     }
 
+    /// Parse a for-loop binding: either a single ident or `(a, b)` destructuring.
+    fn parse_for_binding(&mut self) -> Option<ForBinding> {
+        if self.at(TokenKind::LParen) {
+            let start = self.advance().span; // consume '('
+            let mut idents = Vec::new();
+            idents.push(self.parse_ident_in("loop variable")?);
+            while self.eat(TokenKind::Comma).is_some() {
+                idents.push(self.parse_ident_in("loop variable")?);
+            }
+            let end = self.expect(TokenKind::RParen)?.span;
+            Some(ForBinding::Destructured(idents, start.merge(end)))
+        } else {
+            let ident = self.parse_ident_in("loop variable")?;
+            Some(ForBinding::Single(ident))
+        }
+    }
+
     /// Parse a clause value, optionally checking for a `name: expr` binding
     /// pattern at the start. Used for when, facing and context clauses where
     /// the first `ident:` is a binding rather than a nested assignment.
@@ -990,8 +1039,18 @@ impl<'s> Parser<'s> {
         let next_line = self.line_of(next.span);
 
         if next_line > clause_line {
-            // Multi-line block
+            // Multi-line block — but only if the next token is actually
+            // indented past the clause keyword. When a clause has only a
+            // comment as its value (stripped by the lexer), the next visible
+            // token is a sibling at the same indentation.
             let base_col = self.col_of(next.span);
+            let clause_col = self.col_of(clause_start);
+            if base_col <= clause_col {
+                return Some(Expr::Block {
+                    span: clause_start,
+                    items: Vec::new(),
+                });
+            }
             self.parse_indented_block(base_col)
         } else {
             // Single-line — parse primary expression, then check for suffix predicate
@@ -1822,18 +1881,19 @@ impl<'s> Parser<'s> {
         if self.peek_kind().is_word() && self.text(self.peek().span) == "each" {
             self.advance();
         }
-        let binding = self.parse_ident_in("loop variable")?;
+        let binding = self.parse_for_binding()?;
         self.expect(TokenKind::In)?;
 
         // Parse collection, stopping before `where` and `:`
         let collection = self.parse_expr(BP_WITH_WHERE + 1)?;
 
-        let filter = if self.eat(TokenKind::Where).is_some() {
-            // Parse filter at min_bp 0 — colon terminates naturally.
-            Some(Box::new(self.parse_expr(0)?))
-        } else {
-            None
-        };
+        let filter =
+            if self.eat(TokenKind::Where).is_some() || self.eat(TokenKind::With).is_some() {
+                // Parse filter at min_bp 0 — colon terminates naturally.
+                Some(Box::new(self.parse_expr(0)?))
+            } else {
+                None
+            };
 
         self.expect(TokenKind::Colon)?;
         let body = self.parse_branch_body(start)?;
@@ -2865,6 +2925,62 @@ rule ProcessDigests {
         } else {
             panic!("expected GenericType, got {:?}", value);
         }
+    }
+
+    #[test]
+    fn guidance_clause_comment_only_value() {
+        let src = r#"rule R {
+    guidance: -- just a comment
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.items.len(), 2);
+        // guidance clause should have an empty block value
+        let BlockItemKind::Clause { keyword, value } = &b.items[0].kind else { panic!() };
+        assert_eq!(keyword, "guidance");
+        assert!(matches!(value, Expr::Block { items, .. } if items.is_empty()));
+    }
+
+    #[test]
+    fn for_expr_with_filter() {
+        let src = r#"rule R {
+    when: X(project)
+    ensures:
+        let total = for each task in project.tasks with task.active: task.effort
+        Done(total: total)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn for_each_destructured_binding() {
+        let src = r#"rule R {
+    when: X()
+    for each (key, value) in Pairs where key != null:
+        ensures: Processed(key: key, value: value)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::ForBlock { binding, .. } = &b.items[1].kind else { panic!() };
+        assert!(matches!(binding, ForBinding::Destructured(ids, _) if ids.len() == 2));
+    }
+
+    #[test]
+    fn dot_path_assignment() {
+        let src = r#"entity Shard {
+    ShardGroup.shard_cache: Shard with group = this
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::PathAssignment { path, .. } = &b.items[0].kind else {
+            panic!("expected PathAssignment, got {:?}", b.items[0].kind);
+        };
+        assert!(matches!(path, Expr::MemberAccess { .. }));
     }
 
     #[test]

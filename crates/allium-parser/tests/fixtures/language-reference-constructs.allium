@@ -263,3 +263,43 @@ rule Lambdas {
     requires: items.any(i => i.priority = high)
     ensures: Transformed()
 }
+
+-- ---------------------------------------------------------------------------
+-- Comment-only clause value
+-- ---------------------------------------------------------------------------
+
+rule CommentOnlyGuidance {
+    guidance: -- this is just a comment
+    when: X()
+    ensures: Done()
+}
+
+-- ---------------------------------------------------------------------------
+-- for each with `with` filter (expression-level)
+-- ---------------------------------------------------------------------------
+
+rule ExprForWithFilter {
+    when: Summarise(project)
+    ensures:
+        let total = for each task in project.tasks with task.billable: task.hours
+        Summarised(project: project, total: total)
+}
+
+-- ---------------------------------------------------------------------------
+-- Tuple destructuring in for each
+-- ---------------------------------------------------------------------------
+
+rule ProcessPairs {
+    when: PairsReady()
+    for each (key, value) in Pairs where key != null:
+        ensures: PairProcessed(key: key, value: value)
+}
+
+-- ---------------------------------------------------------------------------
+-- Dot-path reverse relationship declaration
+-- ---------------------------------------------------------------------------
+
+entity Shard {
+    group: ShardGroup
+    ShardGroup.shard_cache: Shard with group = this
+}
