@@ -6,5 +6,5 @@ Read `README.md` for an overview of the project and `AGENTS.md` for development 
 
 ## Key policies
 
-- **Versioning:** See `VERSIONING.md` for the tiered versioning scheme and how to bump versions.
+- **Versioning:** See `docs/versioning.md` for the tiered versioning scheme and how to bump versions.
 - **Specs:** After completing any feature work, update the Allium specs in `docs/project/specs/` to reflect current behaviour.

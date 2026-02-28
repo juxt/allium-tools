@@ -49,6 +49,6 @@ Not every artifact needs manual follow-up. The Homebrew formula is the only piec
 
 ## When to release
 
-All core-tier packages share a major.minor version (see `VERSIONING.md`). Right now, every release cuts a single tag and publishes everything. This means a tree-sitter bugfix produces new Rust binaries even if nothing changed in the Rust crates, and vice versa.
+All core-tier packages share a major.minor version (see `docs/versioning.md`). Right now, every release cuts a single tag and publishes everything. This means a tree-sitter bugfix produces new Rust binaries even if nothing changed in the Rust crates, and vice versa.
 
 This is fine while the project is small. If the coupling becomes a problem, the natural split is separate tags per artifact group (e.g. `cli-v1.0.1`, `vscode-v0.3.0`), each triggering only its own CI job. That would also let the Homebrew update script run automatically as a post-release workflow step rather than requiring a manual invocation.
