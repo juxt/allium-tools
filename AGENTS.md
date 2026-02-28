@@ -65,6 +65,7 @@ When modifying code or tests:
 
 * **Allium language semantics and syntax:** https://juxt.github.io/allium/language (authoritative for any language-level behaviour in this repository)
 * **Architecture & key concepts:** `README.md` and `docs/project/architecture.md`.
+* **Versioning policy:** `VERSIONING.md` — defines which packages share versions and how to bump them.
 
 ---
 
