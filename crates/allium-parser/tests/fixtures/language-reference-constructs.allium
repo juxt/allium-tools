@@ -1,66 +1,43 @@
 -- allium: 1
 
 -- ---------------------------------------------------------------------------
--- System declarations
--- ---------------------------------------------------------------------------
-
-system PaymentGateway {
-    timeout: 30.seconds
-    guarantee: "Exactly-once delivery"
-}
-
-system NotificationRouter {
-    guidance: "Route based on user preferences"
-    provides: SendNotification(user, message)
-}
-
--- ---------------------------------------------------------------------------
--- Top-level guidance
--- ---------------------------------------------------------------------------
-
-guidance: "All rules in this module must be idempotent"
-
-guidance:
-    "Multi-line guidance is also supported"
-
--- ---------------------------------------------------------------------------
--- for each iteration (block-level)
+-- for iteration (block-level)
 -- ---------------------------------------------------------------------------
 
 rule NotifyAll {
     when: BroadcastRequested(message)
-    for each user in User where user.active:
+    for user in User where user.active:
         ensures: Notification.created(to: user.email, message: message)
 }
 
 -- ---------------------------------------------------------------------------
--- for each iteration (expression-level)
+-- for iteration (expression-level)
 -- ---------------------------------------------------------------------------
 
 rule SumEffort {
     when: EstimateProject(project)
     ensures:
-        let total = for each task in project.tasks: task.effort
+        let total = for task in project.tasks: task.effort
         ProjectEstimated(project: project, total: total)
 }
 
 -- ---------------------------------------------------------------------------
--- for each with `with` filter
+-- for with `with` filter
 -- ---------------------------------------------------------------------------
 
 rule ProcessAssignments {
     when: ReviewRequested(project)
-    for each assignment in Assignment with assignment.role = reviewer:
+    for assignment in Assignment with assignment.role = reviewer:
         ensures: ReviewCreated(assignment: assignment)
 }
 
 -- ---------------------------------------------------------------------------
--- for each with `where` filter (standard form)
+-- for with `where` filter (standard form)
 -- ---------------------------------------------------------------------------
 
 rule AlertOverdue {
     when: DailyCheck()
-    for each task in Task where task.is_overdue:
+    for task in Task where task.is_overdue:
         ensures: OverdueAlert.created(task: task)
 }
 
@@ -101,8 +78,6 @@ entity Codec {
 -- ---------------------------------------------------------------------------
 -- All declaration types from the language reference
 -- ---------------------------------------------------------------------------
-
-module language_reference_test
 
 use "github.com/specs/shared/abc123" as shared
 
@@ -173,8 +148,6 @@ rule BecomesArchived {
 
 rule CollectionOps {
     when: Validate(doc)
-    requires: doc.tags includes "reviewed"
-    requires: doc.tags excludes "draft"
     requires: doc.status in {draft, published}
     requires: doc.status not in {archived}
     ensures: ValidationPassed()
@@ -201,13 +174,9 @@ rule ComputeMetrics {
         MetricsComputed(document: doc, average: avg)
 }
 
-rule WithTimeout {
+rule WithGuidance {
     when: SlowOperation(data)
-    timeout: 60.seconds
-    guarantee: "Will complete or roll back"
     guidance: "Prefer off-peak execution"
-    tags: infrastructure, slow
-    invariant: data.valid = true
     ensures: OperationComplete(data: data)
 }
 
@@ -222,12 +191,6 @@ rule QualifiedAccess {
 rule StringInterpolation {
     when: LogEvent(user, action)
     ensures: Log.created(message: "User {user} did {action}")
-}
-
-rule Predicates {
-    when: CodeCheck(finding)
-    requires: finding.code starts_with "doc."
-    ensures: FindingLogged(finding: finding)
 }
 
 rule Arithmetic {
@@ -251,12 +214,6 @@ rule NullHandling {
         Handled(value: val)
 }
 
-rule Ranges {
-    when: BoundCheck(value)
-    requires: value in [1..100]
-    ensures: InRange()
-}
-
 rule Lambdas {
     when: Transform(items)
     requires: items.all(i => i.valid)
@@ -275,23 +232,23 @@ rule CommentOnlyGuidance {
 }
 
 -- ---------------------------------------------------------------------------
--- for each with `with` filter (expression-level)
+-- for with `with` filter (expression-level)
 -- ---------------------------------------------------------------------------
 
 rule ExprForWithFilter {
     when: Summarise(project)
     ensures:
-        let total = for each task in project.tasks with task.billable: task.hours
+        let total = for task in project.tasks with task.billable: task.hours
         Summarised(project: project, total: total)
 }
 
 -- ---------------------------------------------------------------------------
--- Tuple destructuring in for each
+-- Tuple destructuring in for
 -- ---------------------------------------------------------------------------
 
 rule ProcessPairs {
     when: PairsReady()
-    for each (key, value) in Pairs where key != null:
+    for (key, value) in Pairs where key != null:
         ensures: PairProcessed(key: key, value: value)
 }
 

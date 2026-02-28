@@ -30,20 +30,11 @@ pub struct Module {
 #[derive(Debug, Clone)]
 pub enum Decl {
     Use(UseDecl),
-    ModuleDecl(ModuleDecl),
     Block(BlockDecl),
-    Guidance(GuidanceDecl),
     Default(DefaultDecl),
     Variant(VariantDecl),
     Deferred(DeferredDecl),
     OpenQuestion(OpenQuestionDecl),
-}
-
-/// `module name`
-#[derive(Debug, Clone)]
-pub struct ModuleDecl {
-    pub span: Span,
-    pub name: Ident,
 }
 
 /// `use "path" as alias`
@@ -75,7 +66,6 @@ pub enum BlockKind {
     Rule,
     Surface,
     Actor,
-    System,
 }
 
 /// `default [Type] name = value`
@@ -101,13 +91,6 @@ pub struct VariantDecl {
 pub struct DeferredDecl {
     pub span: Span,
     pub path: Expr,
-}
-
-/// `guidance: value` at module level
-#[derive(Debug, Clone)]
-pub struct GuidanceDecl {
-    pub span: Span,
-    pub value: Expr,
 }
 
 /// `open question "text"`
@@ -208,18 +191,6 @@ pub enum Expr {
         span: Span,
         name: Box<Expr>,
         args: Vec<Expr>,
-    },
-
-    /// `expr includes expr` / `expr excludes expr`
-    Includes {
-        span: Span,
-        collection: Box<Expr>,
-        element: Box<Expr>,
-    },
-    Excludes {
-        span: Span,
-        collection: Box<Expr>,
-        element: Box<Expr>,
     },
 
     /// `a.b`
@@ -402,21 +373,6 @@ pub enum Expr {
     /// A sequence of expressions from a multi-line block.
     Block { span: Span, items: Vec<Expr> },
 
-    /// `subject word [args...]` — prose-style predicate in clause values.
-    /// Captures remaining same-line tokens after a primary expression.
-    /// The `tail` contains the predicate word(s) and argument(s) in order.
-    Predicate {
-        span: Span,
-        subject: Box<Expr>,
-        tail: Vec<Expr>,
-    },
-
-    /// `start..end` — range expression
-    Range {
-        span: Span,
-        start: Box<Expr>,
-        end: Box<Expr>,
-    },
 }
 
 impl Expr {
@@ -435,8 +391,6 @@ impl Expr {
             | Expr::ListLiteral { span, .. }
             | Expr::ObjectLiteral { span, .. }
             | Expr::GenericType { span, .. }
-            | Expr::Includes { span, .. }
-            | Expr::Excludes { span, .. }
             | Expr::MemberAccess { span, .. }
             | Expr::OptionalAccess { span, .. }
             | Expr::NullCoalesce { span, .. }
@@ -463,9 +417,7 @@ impl Expr {
             | Expr::WhenGuard { span, .. }
             | Expr::TypeOptional { span, .. }
             | Expr::LetExpr { span, .. }
-            | Expr::Block { span, .. }
-            | Expr::Predicate { span, .. }
-            | Expr::Range { span, .. } => *span,
+            | Expr::Block { span, .. } => *span,
             Expr::QualifiedName(q) => q.span,
         }
     }
@@ -486,7 +438,7 @@ pub struct CondBlockBranch {
     pub items: Vec<BlockItem>,
 }
 
-/// Binding in a `for each` loop — either a single identifier or a
+/// Binding in a `for` loop — either a single identifier or a
 /// destructured tuple like `(a, b)`.
 #[derive(Debug, Clone)]
 pub enum ForBinding {

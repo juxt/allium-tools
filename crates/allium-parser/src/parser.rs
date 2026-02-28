@@ -218,7 +218,6 @@ fn is_clause_keyword(text: &str) -> bool {
         "when"
             | "requires"
             | "ensures"
-            | "trigger"
             | "facing"
             | "context"
             | "exposes"
@@ -229,8 +228,6 @@ fn is_clause_keyword(text: &str) -> bool {
             | "guidance"
             | "identified_by"
             | "within"
-            | "tags"
-            | "invariant"
     )
 }
 
@@ -341,12 +338,10 @@ impl<'s> Parser<'s> {
             TokenKind::Config => self.parse_anonymous_block(BlockKind::Config).map(Decl::Block),
             TokenKind::Surface => self.parse_block(BlockKind::Surface).map(Decl::Block),
             TokenKind::Actor => self.parse_block(BlockKind::Actor).map(Decl::Block),
-            TokenKind::System => self.parse_block(BlockKind::System).map(Decl::Block),
             TokenKind::Default => self.parse_default_decl().map(Decl::Default),
             TokenKind::Variant => self.parse_variant_decl().map(Decl::Variant),
             TokenKind::Deferred => self.parse_deferred_decl().map(Decl::Deferred),
             TokenKind::Open => self.parse_open_question_decl().map(Decl::OpenQuestion),
-            TokenKind::Module => self.parse_module_decl(),
             // Qualified config: `alias/config { ... }`
             TokenKind::Ident
                 if self.peek_at(1).kind == TokenKind::Slash
@@ -354,19 +349,12 @@ impl<'s> Parser<'s> {
             {
                 self.parse_qualified_config().map(Decl::Block)
             }
-            // Standalone `guidance: value` at module level
-            TokenKind::Ident
-                if self.text(self.peek().span) == "guidance"
-                    && self.peek_at(1).kind == TokenKind::Colon =>
-            {
-                self.parse_guidance_decl().map(Decl::Guidance)
-            }
             _ => {
                 self.error(
                     self.peek().span,
                     format!(
                         "expected declaration (entity, rule, enum, value, config, surface, actor, \
-                         system, given, default, variant, deferred, use, open question), found {}",
+                         given, default, variant, deferred, use, open question), found {}",
                         self.peek_kind(),
                     ),
                 );
@@ -376,15 +364,6 @@ impl<'s> Parser<'s> {
     }
 
     // -- module declaration -----------------------------------------------
-
-    fn parse_module_decl(&mut self) -> Option<Decl> {
-        let start = self.expect(TokenKind::Module)?.span;
-        let name = self.parse_ident_in("module name")?;
-        Some(Decl::ModuleDecl(ModuleDecl {
-            span: start.merge(name.span),
-            name,
-        }))
-    }
 
     // -- use declaration ------------------------------------------------
 
@@ -427,7 +406,6 @@ impl<'s> Parser<'s> {
             BlockKind::Actor => "actor name",
             BlockKind::Value => "value type name",
             BlockKind::Enum => "enum name",
-            BlockKind::System => "system name",
             _ => "block name",
         };
         let name = Some(self.parse_ident_in(context)?);
@@ -582,15 +560,6 @@ impl<'s> Parser<'s> {
 
     // -- guidance declaration ----------------------------------------------
 
-    fn parse_guidance_decl(&mut self) -> Option<GuidanceDecl> {
-        let start = self.advance().span; // consume "guidance" ident
-        self.advance(); // consume ':'
-        let value = self.parse_clause_value(start)?;
-        Some(GuidanceDecl {
-            span: start.merge(value.span()),
-            value,
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -722,10 +691,6 @@ impl<'s> Parser<'s> {
     /// The body is a set of nested block items (let, requires, ensures, etc.).
     fn parse_for_block_item(&mut self, start: Span) -> Option<BlockItem> {
         self.advance(); // consume `for`
-        // Accept optional `each` keyword: `for each x in ...`
-        if self.peek_kind().is_word() && self.text(self.peek().span) == "each" {
-            self.advance();
-        }
         let binding = self.parse_for_binding()?;
         self.expect(TokenKind::In)?;
 
@@ -1053,48 +1018,8 @@ impl<'s> Parser<'s> {
             }
             self.parse_indented_block(base_col)
         } else {
-            // Single-line — parse primary expression, then check for suffix predicate
-            let expr = self.parse_expr(0)?;
-            self.maybe_wrap_suffix_predicate(expr, clause_line)
-        }
-    }
-
-    /// If there are remaining tokens on `clause_line` after the primary
-    /// expression, collect them as a suffix predicate tail.
-    fn maybe_wrap_suffix_predicate(&mut self, expr: Expr, clause_line: u32) -> Option<Expr> {
-        if self.at_eof()
-            || self.at(TokenKind::RBrace)
-            || self.line_of(self.peek().span) != clause_line
-        {
-            return Some(expr);
-        }
-
-        let mut tail = Vec::new();
-        while !self.at_eof()
-            && !self.at(TokenKind::RBrace)
-            && self.line_of(self.peek().span) == clause_line
-        {
-            if let Some(e) = self.try_parse_expr(0) {
-                tail.push(e);
-            } else {
-                // Unrecognised token — consume as raw identifier to avoid stalling.
-                let tok = self.advance();
-                tail.push(Expr::Ident(Ident {
-                    span: tok.span,
-                    name: self.text(tok.span).to_string(),
-                }));
-            }
-        }
-
-        if tail.is_empty() {
-            Some(expr)
-        } else {
-            let end = tail.last().unwrap().span();
-            Some(Expr::Predicate {
-                span: expr.span().merge(end),
-                subject: Box::new(expr),
-                tail,
-            })
+            // Single-line clause value
+            self.parse_expr(0)
         }
     }
 
@@ -1187,21 +1112,6 @@ impl<'s> Parser<'s> {
         }
 
         Some(lhs)
-    }
-
-    /// Try to parse an expression without emitting diagnostics on failure.
-    /// Restores position if parsing fails.
-    fn try_parse_expr(&mut self, min_bp: u8) -> Option<Expr> {
-        let saved_pos = self.pos;
-        let saved_diag_count = self.diagnostics.len();
-        match self.parse_expr(min_bp) {
-            Some(expr) => Some(expr),
-            None => {
-                self.pos = saved_pos;
-                self.diagnostics.truncate(saved_diag_count);
-                None
-            }
-        }
     }
 
     // -- prefix ---------------------------------------------------------
@@ -1350,7 +1260,7 @@ impl<'s> Parser<'s> {
             TokenKind::Pipe => Some((BP_PIPE, BP_PIPE + 1)),
             TokenKind::Or => Some((BP_OR, BP_OR + 1)),
             TokenKind::And => Some((BP_AND, BP_AND + 1)),
-            TokenKind::Eq | TokenKind::EqEq | TokenKind::BangEq => {
+            TokenKind::Eq | TokenKind::BangEq => {
                 Some((BP_COMPARE, BP_COMPARE + 1))
             }
             TokenKind::Lt => {
@@ -1374,13 +1284,10 @@ impl<'s> Parser<'s> {
             }
             TokenKind::TransitionsTo => Some((BP_TRANSITION, BP_TRANSITION + 1)),
             TokenKind::Becomes => Some((BP_TRANSITION, BP_TRANSITION + 1)),
-            TokenKind::Includes => Some((BP_COMPARE, BP_COMPARE + 1)),
-            TokenKind::Excludes => Some((BP_COMPARE, BP_COMPARE + 1)),
             TokenKind::Where => Some((BP_WITH_WHERE, BP_WITH_WHERE + 1)),
             TokenKind::With => Some((BP_WITH_WHERE, BP_WITH_WHERE + 1)),
             TokenKind::ThinArrow => Some((BP_PROJECTION, BP_PROJECTION + 1)),
             TokenKind::QuestionQuestion => Some((BP_NULL_COALESCE, BP_NULL_COALESCE + 1)),
-            TokenKind::DotDot => Some((BP_ADD + 1, BP_ADD + 2)), // tighter than +/-
             TokenKind::Plus | TokenKind::Minus => Some((BP_ADD, BP_ADD + 1)),
             TokenKind::Star | TokenKind::Slash => Some((BP_MUL, BP_MUL + 1)),
             _ => None,
@@ -1424,7 +1331,7 @@ impl<'s> Parser<'s> {
                     right: Box::new(rhs),
                 })
             }
-            TokenKind::Eq | TokenKind::EqEq => {
+            TokenKind::Eq => {
                 let rhs = self.parse_expr(r_bp)?;
                 Some(Expr::Comparison {
                     span: lhs.span().merge(rhs.span()),
@@ -1605,22 +1512,6 @@ impl<'s> Parser<'s> {
                     new_state: Box::new(rhs),
                 })
             }
-            TokenKind::Includes => {
-                let rhs = self.parse_expr(r_bp)?;
-                Some(Expr::Includes {
-                    span: lhs.span().merge(rhs.span()),
-                    collection: Box::new(lhs),
-                    element: Box::new(rhs),
-                })
-            }
-            TokenKind::Excludes => {
-                let rhs = self.parse_expr(r_bp)?;
-                Some(Expr::Excludes {
-                    span: lhs.span().merge(rhs.span()),
-                    collection: Box::new(lhs),
-                    element: Box::new(rhs),
-                })
-            }
             TokenKind::When => {
                 // Inline guard: `action when condition`
                 let rhs = self.parse_expr(r_bp)?;
@@ -1628,14 +1519,6 @@ impl<'s> Parser<'s> {
                     span: lhs.span().merge(rhs.span()),
                     action: Box::new(lhs),
                     condition: Box::new(rhs),
-                })
-            }
-            TokenKind::DotDot => {
-                let rhs = self.parse_expr(r_bp)?;
-                Some(Expr::Range {
-                    span: lhs.span().merge(rhs.span()),
-                    start: Box::new(lhs),
-                    end: Box::new(rhs),
                 })
             }
             _ => {
@@ -1877,10 +1760,6 @@ impl<'s> Parser<'s> {
 
     fn parse_for_expr(&mut self) -> Option<Expr> {
         let start = self.advance().span; // consume `for`
-        // Accept optional `each` keyword: `for each x in ...`
-        if self.peek_kind().is_word() && self.text(self.peek().span) == "each" {
-            self.advance();
-        }
         let binding = self.parse_for_binding()?;
         self.expect(TokenKind::In)?;
 
@@ -2444,84 +2323,6 @@ rule ProcessDigests {
     }
 
     #[test]
-    fn suffix_predicate_simple() {
-        let src = r#"rule R {
-    when: RenameRequested(symbol)
-    requires: symbol resolves_to_single_definition
-    ensures: RenameApplied()
-}"#;
-        let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        // when + requires + ensures = 3 items
-        assert_eq!(b.items.len(), 3);
-        // The requires value should be a Predicate
-        let BlockItemKind::Clause { keyword, value } = &b.items[1].kind else { panic!() };
-        assert_eq!(keyword, "requires");
-        assert!(matches!(value, Expr::Predicate { .. }));
-    }
-
-    #[test]
-    fn suffix_predicate_with_arg() {
-        let src = r#"rule R {
-    when: X()
-    requires: finding.code starts_with "allium."
-}"#;
-        let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        let BlockItemKind::Clause { value, .. } = &b.items[1].kind else { panic!() };
-        if let Expr::Predicate { subject, tail, .. } = value {
-            assert!(matches!(subject.as_ref(), Expr::MemberAccess { .. }));
-            assert_eq!(tail.len(), 2); // starts_with + "allium."
-        } else {
-            panic!("expected Predicate, got {:?}", value);
-        }
-    }
-
-    #[test]
-    fn suffix_predicate_with_comparison() {
-        let src = r#"rule R {
-    when: X()
-    requires: clause compares_literals = true
-}"#;
-        let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        let BlockItemKind::Clause { value, .. } = &b.items[1].kind else { panic!() };
-        // Should be Predicate(clause, [Comparison(compares_literals, Eq, true)])
-        if let Expr::Predicate { tail, .. } = value {
-            assert_eq!(tail.len(), 1);
-            assert!(matches!(tail[0], Expr::Comparison { .. }));
-        } else {
-            panic!("expected Predicate");
-        }
-    }
-
-    #[test]
-    fn range_literal_in_list() {
-        let src = r#"rule R {
-    when: X()
-    requires: width in [1..8]
-}"#;
-        let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        let BlockItemKind::Clause { value, .. } = &b.items[1].kind else { panic!() };
-        // Should be In(width, ListLiteral([Range(1, 8)]))
-        if let Expr::In { collection, .. } = value {
-            if let Expr::ListLiteral { elements, .. } = collection.as_ref() {
-                assert_eq!(elements.len(), 1);
-                assert!(matches!(elements[0], Expr::Range { .. }));
-            } else {
-                panic!("expected ListLiteral");
-            }
-        } else {
-            panic!("expected In");
-        }
-    }
-
-    #[test]
     fn exists_as_identifier() {
         let src = r#"rule R {
     when: X()
@@ -2559,18 +2360,6 @@ rule ProcessDigests {
         assert_eq!(r.diagnostics.len(), 0);
         let Decl::Variant(v) = &r.module.declarations[0] else { panic!() };
         assert!(matches!(v.base, Expr::Pipe { .. }));
-    }
-
-    // -- trigger clause keyword -----------------------------------------------
-
-    #[test]
-    fn trigger_clause() {
-        let src = "rule R { trigger: ExternalEvent(data)\n    ensures: Done() }";
-        let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        let BlockItemKind::Clause { keyword, .. } = &b.items[0].kind else { panic!() };
-        assert_eq!(keyword, "trigger");
     }
 
     // -- for-block with comparison in where filter ----------------------------
@@ -2692,20 +2481,6 @@ rule ProcessDigests {
         assert!(matches!(value, Expr::JoinLookup { .. }));
     }
 
-    // -- includes / excludes --------------------------------------------------
-
-    #[test]
-    fn includes_excludes() {
-        let src = r#"rule R {
-    when: X(a, b)
-    requires: a.items includes b
-    requires: a.items excludes b
-    ensures: Done()
-}"#;
-        let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0);
-    }
-
     // -- in / not in with set literal -----------------------------------------
 
     #[test]
@@ -2800,31 +2575,11 @@ rule ProcessDigests {
         assert_eq!(errors.len(), 1, "expected 1 error for same-line bad tokens, got {}", errors.len());
     }
 
-    // -- new language constructs -------------------------------------------
-
     #[test]
-    fn system_declaration() {
-        let src = "system PaymentGateway {\n    timeout: 30.seconds\n}";
-        let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        assert_eq!(b.kind, BlockKind::System);
-        assert_eq!(b.name.as_ref().unwrap().name, "PaymentGateway");
-    }
-
-    #[test]
-    fn standalone_guidance() {
-        let src = "guidance: \"All rules must be idempotent\"";
-        let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0);
-        assert!(matches!(&r.module.declarations[0], Decl::Guidance(_)));
-    }
-
-    #[test]
-    fn for_each_block() {
+    fn for_block() {
         let src = r#"rule R {
     when: X()
-    for each user in Users where user.active:
+    for user in Users where user.active:
         ensures: Notified(user: user)
 }"#;
         let r = parse_ok(src);
@@ -2834,11 +2589,11 @@ rule ProcessDigests {
     }
 
     #[test]
-    fn for_each_expr() {
+    fn for_expr() {
         let src = r#"rule R {
     when: X(project)
     ensures:
-        let total = for each task in project.tasks: task.effort
+        let total = for task in project.tasks: task.effort
         Done(total: total)
 }"#;
         let r = parse_ok(src);
@@ -2846,10 +2601,10 @@ rule ProcessDigests {
     }
 
     #[test]
-    fn for_each_where() {
+    fn for_where() {
         let src = r#"rule R {
     when: X()
-    for each item in Items where item.active:
+    for item in Items where item.active:
         ensures: Processed(item: item)
 }"#;
         let r = parse_ok(src);
@@ -2857,10 +2612,10 @@ rule ProcessDigests {
     }
 
     #[test]
-    fn for_each_with() {
+    fn for_with() {
         let src = r#"rule R {
     when: X()
-    for each slot in Slot with slot.role = reviewer:
+    for slot in Slot with slot.role = reviewer:
         ensures: Reviewed(slot: slot)
 }"#;
         let r = parse_ok(src);
@@ -2948,7 +2703,7 @@ rule ProcessDigests {
         let src = r#"rule R {
     when: X(project)
     ensures:
-        let total = for each task in project.tasks with task.active: task.effort
+        let total = for task in project.tasks with task.active: task.effort
         Done(total: total)
 }"#;
         let r = parse_ok(src);
@@ -2956,10 +2711,10 @@ rule ProcessDigests {
     }
 
     #[test]
-    fn for_each_destructured_binding() {
+    fn for_destructured_binding() {
         let src = r#"rule R {
     when: X()
-    for each (key, value) in Pairs where key != null:
+    for (key, value) in Pairs where key != null:
         ensures: Processed(key: key, value: value)
 }"#;
         let r = parse_ok(src);
@@ -2996,5 +2751,449 @@ rule ProcessDigests {
             "expected no errors in language-reference fixture, got: {:?}",
             errors.iter().map(|d| &d.message).collect::<Vec<_>>(),
         );
+    }
+
+    // =====================================================================
+    // V1 SPEC CONFORMANCE TESTS
+    //
+    // These tests verify that the parser conforms to the Allium V1 language
+    // reference (docs/allium-v1-language-reference.md). Each test is tagged
+    // with the finding number from the audit.
+    //
+    // Tests marked "should reject" are expected to FAIL until the parser
+    // is updated to reject non-spec constructs.
+    //
+    // Tests marked "should parse" are expected to FAIL until the parser
+    // is updated to handle spec-defined constructs.
+    // =====================================================================
+
+    // -- Finding 1: spec uses `for`, not `for each` ---------------------------
+
+    #[test]
+    fn spec_for_bare_form() {
+        // The spec uses bare `for` exclusively. This must parse cleanly.
+        let src = r#"rule ProcessDigests {
+    when: schedule: DigestSchedule.next_run_at <= now
+    for user in Users where notification_setting.digest_enabled:
+        let settings = user.notification_setting
+        ensures: DigestBatch.created(user: user)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn spec_reject_for_each() {
+        // `for each` is not in the spec. The parser should reject it.
+        let src = r#"rule R {
+    when: X()
+    for each user in Users where user.active:
+        ensures: Notified(user: user)
+}"#;
+        let r = parse_ok(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for `for each` (not in spec), but parsed without errors"
+        );
+    }
+
+    // -- Finding 2: spec uses `=`, not `==` -----------------------------------
+
+    #[test]
+    fn spec_reject_double_equals() {
+        // The spec uses `=` for equality. `==` should not be accepted.
+        let src = "rule R { when: X(a)\n    requires: a.status == active\n    ensures: Done() }";
+        let r = parse_ok(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for `==` (not in spec), but parsed without errors"
+        );
+    }
+
+    // -- Finding 3: `system` blocks are not in the spec -----------------------
+
+    #[test]
+    fn spec_reject_system_block() {
+        // `system` is not a declaration type in the V1 spec.
+        let src = "system PaymentGateway {\n    timeout: 30.seconds\n}";
+        let r = parse_ok(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for `system` block (not in spec), but parsed without errors"
+        );
+    }
+
+    // -- Finding 6: `tags` clause is not in the spec --------------------------
+
+    #[test]
+    fn spec_reject_tags_clause() {
+        // `tags:` is not a clause keyword in the V1 spec.
+        let src = r#"rule R {
+    when: MigrationTriggered()
+    tags: infrastructure, migration
+    ensures: MigrationComplete()
+}"#;
+        let r = parse_ok(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for `tags:` clause (not in spec), but parsed without errors"
+        );
+    }
+
+    // -- Finding 7: `includes`/`excludes` are not in the spec -----------------
+
+    #[test]
+    fn spec_reject_includes_operator() {
+        // The spec uses `x in collection`, not `collection includes x`.
+        let src = r#"rule R {
+    when: X(a, b)
+    requires: a.items includes b
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for `includes` operator (not in spec), but parsed without errors"
+        );
+    }
+
+    #[test]
+    fn spec_reject_excludes_operator() {
+        // The spec uses `x not in collection`, not `collection excludes x`.
+        let src = r#"rule R {
+    when: X(a, b)
+    requires: a.items excludes b
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for `excludes` operator (not in spec), but parsed without errors"
+        );
+    }
+
+    // -- Finding 8: range literals (`..`) are not in the spec -----------------
+
+    #[test]
+    fn spec_reject_range_literal() {
+        // The `..` range operator is not defined in the V1 spec.
+        let src = r#"rule R {
+    when: X(v)
+    requires: v in [1..100]
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for `..` range (not in spec), but parsed without errors"
+        );
+    }
+
+    // -- Finding 9: `within` is only for actors, not rules --------------------
+
+    #[test]
+    fn spec_within_in_actor() {
+        // The spec defines `within:` as an actor clause.
+        let src = r#"actor WorkspaceAdmin {
+    within: Workspace
+    identified_by: User where role = admin
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "within: in actor should parse cleanly");
+    }
+
+    // -- Finding 10: `module` declaration is not in the spec ------------------
+
+    #[test]
+    fn spec_reject_module_declaration() {
+        // `module Name` is not a declaration in the V1 spec.
+        let src = "module my_spec";
+        let r = parse_ok(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for `module` declaration (not in spec), but parsed without errors"
+        );
+    }
+
+    // -- Finding 11: `guidance` at module level is not in the spec ------------
+
+    #[test]
+    fn spec_reject_module_level_guidance() {
+        // The spec shows `guidance:` only as a surface clause.
+        let src = r#"guidance: "All rules must be idempotent""#;
+        let r = parse_ok(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for module-level `guidance:` (not in spec), but parsed without errors"
+        );
+    }
+
+    // -- Finding 12: `guarantee`/`timeout` in rules is not in the spec --------
+
+    #[test]
+    fn spec_guarantee_in_surface() {
+        // The spec defines `guarantee:` as a surface clause.
+        let src = r#"surface S {
+    facing viewer: User
+    guarantee: DataIntegrity
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "guarantee: in surface should parse cleanly");
+    }
+
+    #[test]
+    fn spec_timeout_in_surface() {
+        // The spec defines `timeout:` as a surface clause with rule name syntax.
+        let src = r#"surface InvitationView {
+    facing recipient: Candidate
+    context invitation: ResourceInvitation where email = recipient.email
+    timeout: InvitationExpires
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "timeout: in surface should parse cleanly");
+    }
+
+    #[test]
+    fn spec_timeout_in_surface_with_when() {
+        // The spec shows `timeout: RuleName when condition`.
+        let src = r#"surface InvitationView {
+    facing recipient: Candidate
+    context invitation: ResourceInvitation where email = recipient.email
+    timeout: InvitationExpires when invitation.expires_at <= now
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "timeout: with when guard should parse cleanly");
+    }
+
+    // -- Finding 15: suffix predicates are not in the spec --------------------
+
+    #[test]
+    fn spec_reject_suffix_predicate() {
+        // The spec does not define suffix predicate syntax like `starts_with`.
+        let src = r#"rule R {
+    when: X()
+    requires: finding.code starts_with "allium."
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for suffix predicate (not in spec), but parsed without errors"
+        );
+    }
+
+    // -- Finding 17: `.add()`/`.remove()` are in the spec ---------------------
+
+    #[test]
+    fn spec_add_remove_in_ensures() {
+        // The spec documents `.add()` and `.remove()` as ensures-only mutations.
+        // These parse as regular method calls, which is correct.
+        let src = r#"rule R {
+    when: AssignInterviewer(interview, new_interviewer)
+    ensures:
+        interview.interviewers.add(new_interviewer)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, ".add() should parse cleanly");
+    }
+
+    #[test]
+    fn spec_remove_in_ensures() {
+        let src = r#"rule R {
+    when: RemoveInterviewer(interview, leaving)
+    ensures:
+        interview.interviewers.remove(leaving)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, ".remove() should parse cleanly");
+    }
+
+    // -- Finding 18: `.first`/`.last` are in the spec -------------------------
+
+    #[test]
+    fn spec_first_last_access() {
+        // The spec documents `.first` and `.last` for ordered collections.
+        let src = "entity E { latest: attempts.last\n    earliest: attempts.first }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, ".first/.last should parse cleanly");
+    }
+
+    // -- Finding 19: set arithmetic is in the spec ----------------------------
+
+    #[test]
+    fn spec_set_arithmetic() {
+        // The spec documents `+` and `-` on collections as set arithmetic.
+        let src = r#"entity Role {
+    permissions: Set<String>
+    inherited: Set<String>
+    all_permissions: permissions + inherited
+    removed: old_mentions - new_mentions
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "set arithmetic should parse cleanly");
+    }
+
+    // -- Finding 20: discard binding `_` is in the spec -----------------------
+
+    #[test]
+    fn spec_discard_binding_in_trigger() {
+        // The spec shows `when: _: LogProcessor.last_flush_check + ...`
+        let src = r#"rule R {
+    when: _: LogProcessor.last_flush_check <= now
+    ensures: Flushed()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "discard binding _ in trigger should parse cleanly");
+    }
+
+    #[test]
+    fn spec_discard_in_trigger_params() {
+        // The spec shows `when: SomeEvent(_, slot)`
+        let src = r#"rule R {
+    when: SomeEvent(_, slot)
+    ensures: Processed(slot: slot)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "discard _ in trigger params should parse cleanly");
+    }
+
+    #[test]
+    fn spec_discard_in_for() {
+        // The spec shows `for _ in items: Counted(batch)`
+        let src = r#"rule R {
+    when: X(items)
+    ensures:
+        for _ in items: Counted()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "discard _ in for should parse cleanly");
+    }
+
+    // -- Finding 21: default with object literal is in the spec ---------------
+
+    #[test]
+    fn spec_default_with_object_literal() {
+        // The spec shows: default InterviewType all_in_one = { name: "All in one", duration: 75.minutes }
+        let src = r#"default InterviewType all_in_one = { name: "All in one", duration: 75.minutes }"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "default with object literal should parse cleanly");
+    }
+
+    #[test]
+    fn spec_default_multiline_object() {
+        // The spec shows multi-line defaults with object literals.
+        let src = r#"default Role viewer = {
+    name: "viewer",
+    permissions: { "documents.read" }
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "multi-line default with object literal should parse cleanly");
+    }
+
+    // -- Spec surface features: related, let, guarantee, timeout --------------
+
+    #[test]
+    fn spec_surface_related_clause() {
+        // The spec shows `related:` with surface references.
+        let src = r#"surface InterviewerDashboard {
+    facing viewer: Interviewer
+    context assignment: SlotConfirmation where interviewer = viewer
+    related: InterviewDetail(assignment.slot.interview) when assignment.slot.interview != null
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "related: in surface should parse cleanly");
+    }
+
+    #[test]
+    fn spec_surface_let_binding() {
+        // The spec shows `let` bindings inside surfaces.
+        let src = r#"surface S {
+    facing viewer: User
+    let comments = Comments where parent = viewer
+    exposes: CommentList
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "let in surface should parse cleanly");
+    }
+
+    #[test]
+    fn spec_surface_multiline_context_where() {
+        // The spec shows context with where on a continuation line.
+        let src = r#"surface InterviewerPendingAssignments {
+    facing viewer: Interviewer
+    context assignment: InterviewAssignment
+        where interviewer = viewer and status = pending
+    exposes: AssignmentList
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "multi-line context where should parse cleanly");
+    }
+
+    // -- Spec: `for` inside surfaces ------------------------------------------
+
+    #[test]
+    fn spec_for_in_surface_provides() {
+        // The spec shows for iteration inside surface provides.
+        let src = r#"surface TaskBoard {
+    facing viewer: User
+    for task in Task where task.assignee = viewer:
+        provides: CompleteTask(viewer, task) when task.status = in_progress
+    exposes: KanbanBoard
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "for in surface provides should parse cleanly");
+    }
+
+    // -- Spec: `use` without alias --------------------------------------------
+
+    #[test]
+    fn spec_use_without_alias() {
+        // The spec shows `use` both with and without `as alias`.
+        let src = r#"use "github.com/specs/notifications/def456""#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "use without alias should parse cleanly");
+    }
+
+    // -- Spec: empty external entity ------------------------------------------
+
+    #[test]
+    fn spec_empty_external_entity() {
+        // The spec shows external entities with empty bodies as type placeholders.
+        let src = "external entity Commentable {}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "empty external entity should parse cleanly");
+    }
+
+    // -- Spec: multi-line provides block in surface ---------------------------
+
+    #[test]
+    fn spec_surface_multiline_provides() {
+        // The spec shows provides as a multi-line block.
+        let src = r#"surface ProjectDashboard {
+    facing viewer: ProjectManager
+    context project: Project where owner = viewer
+    provides:
+        CreateTask(viewer, project) when project.status = active
+        ArchiveProject(viewer, project) when project.tasks.all(t => t.status = completed)
+    exposes: TaskList
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "multi-line provides should parse cleanly");
+    }
+
+    // -- Spec: multi-line exposes block in surface ----------------------------
+
+    #[test]
+    fn spec_surface_multiline_exposes() {
+        // The spec shows exposes as a multi-line block.
+        let src = r#"surface InterviewerDashboard {
+    facing viewer: Interviewer
+    context assignment: SlotConfirmation where interviewer = viewer
+    exposes:
+        assignment.slot.time
+        assignment.status
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0, "multi-line exposes should parse cleanly");
     }
 }

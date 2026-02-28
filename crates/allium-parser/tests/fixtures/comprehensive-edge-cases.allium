@@ -1,7 +1,5 @@
 -- allium: 1
 
-module comprehensive_test
-
 use "github.com/specs/auth/abc123" as auth
 use "github.com/specs/notifications/def456"
 
@@ -235,17 +233,6 @@ rule BatchNotify {
 }
 
 -- ---------------------------------------------------------------------------
--- Rule: includes / excludes
--- ---------------------------------------------------------------------------
-
-rule ValidateAssignment {
-    when: AssignTask(task, user)
-    requires: task.project.members includes user
-    requires: task.dependencies excludes task
-    ensures: task.assignee = user
-}
-
--- ---------------------------------------------------------------------------
 -- Rule: in / not in with set literals
 -- ---------------------------------------------------------------------------
 
@@ -291,16 +278,6 @@ rule ValidateAll {
 }
 
 -- ---------------------------------------------------------------------------
--- Rule: range literal
--- ---------------------------------------------------------------------------
-
-rule ValidateEffort {
-    when: SetEffort(task, points)
-    requires: points in [1..100]
-    ensures: task.effort = points
-}
-
--- ---------------------------------------------------------------------------
 -- Rule: arithmetic and parenthesised expressions
 -- ---------------------------------------------------------------------------
 
@@ -343,17 +320,6 @@ rule ValidateSession {
 rule LogAction {
     when: ActionPerformed(user, action)
     ensures: AuditLog.created(message: "User {user} performed {action}")
-}
-
--- ---------------------------------------------------------------------------
--- Rule: suffix predicate with arguments
--- ---------------------------------------------------------------------------
-
-rule ValidateCode {
-    when: CodeCheck(finding)
-    requires: finding.code starts_with "proj."
-    requires: finding.severity matches_pattern "error|warning"
-    ensures: FindingValidated(finding: finding)
 }
 
 -- ---------------------------------------------------------------------------
@@ -422,46 +388,13 @@ open question "Should archived projects be permanently deleted after a retention
 open question "How should task dependencies handle circular references?"
 
 -- ---------------------------------------------------------------------------
--- Rule: guidance and tags clauses
+-- Rule: guidance clause
 -- ---------------------------------------------------------------------------
 
 rule MigrateData {
     when: MigrationTriggered()
-    tags: infrastructure, migration
     guidance: "Run during off-peak hours only"
     ensures: MigrationComplete()
-}
-
--- ---------------------------------------------------------------------------
--- Rule: timeout and guarantee clauses
--- ---------------------------------------------------------------------------
-
-rule ProcessPayment {
-    when: PaymentRequested(order, amount)
-    timeout: 30.seconds
-    guarantee: "Payment will be processed or rolled back"
-    requires: amount > 0
-    ensures: PaymentProcessed(order: order, amount: amount)
-}
-
--- ---------------------------------------------------------------------------
--- Rule: invariant clause
--- ---------------------------------------------------------------------------
-
-rule EnforceLimit {
-    when: AddMember(project, user)
-    invariant: project.members.count <= 100
-    ensures: project.members includes user
-}
-
--- ---------------------------------------------------------------------------
--- Rule: related clause
--- ---------------------------------------------------------------------------
-
-rule LinkTasks {
-    when: LinkRequested(task_a, task_b)
-    related: task_a.dependencies includes task_b
-    ensures: DependencyCreated(from: task_a, to: task_b)
 }
 
 -- ---------------------------------------------------------------------------
@@ -473,15 +406,4 @@ entity Assignment {
     user: User
     role: reviewer | implementer | observer
     match: Task{project, assignee: user}
-}
-
--- ---------------------------------------------------------------------------
--- Rule: within keyword as expression
--- ---------------------------------------------------------------------------
-
-rule ScopedCheck {
-    when: ScopeCheck(item)
-    within: 5.minutes
-    requires: item.status = active
-    ensures: CheckPassed(item: item)
 }

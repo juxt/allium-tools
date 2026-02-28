@@ -32,8 +32,6 @@ pub enum TokenKind {
     Question,
     Use,
     As,
-    Module,
-    System,
 
     // Clause / expression keywords
     When,
@@ -51,11 +49,9 @@ pub enum TokenKind {
     Or,
     Exists,
 
-    // Trigger / predicate keywords
+    // Trigger keywords
     TransitionsTo,
     Becomes,
-    Includes,
-    Excludes,
 
     // Context-sensitive identifiers treated as keywords
     Now,
@@ -64,7 +60,6 @@ pub enum TokenKind {
 
     // Operators
     Eq,              // =
-    EqEq,            // ==
     BangEq,          // !=
     Lt,              // <
     LtEq,            // <=
@@ -80,7 +75,6 @@ pub enum TokenKind {
     QuestionQuestion, // ??
     QuestionDot,     // ?.
     Dot,             // .
-    DotDot,          // ..
 
     // Delimiters
     LBrace,
@@ -126,8 +120,6 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Question => write!(f, "'question'"),
             TokenKind::Use => write!(f, "'use'"),
             TokenKind::As => write!(f, "'as'"),
-            TokenKind::Module => write!(f, "'module'"),
-            TokenKind::System => write!(f, "'system'"),
             TokenKind::When => write!(f, "'when'"),
             TokenKind::Requires => write!(f, "'requires'"),
             TokenKind::Ensures => write!(f, "'ensures'"),
@@ -144,13 +136,10 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Exists => write!(f, "'exists'"),
             TokenKind::TransitionsTo => write!(f, "'transitions_to'"),
             TokenKind::Becomes => write!(f, "'becomes'"),
-            TokenKind::Includes => write!(f, "'includes'"),
-            TokenKind::Excludes => write!(f, "'excludes'"),
             TokenKind::Now => write!(f, "'now'"),
             TokenKind::This => write!(f, "'this'"),
             TokenKind::Within => write!(f, "'within'"),
             TokenKind::Eq => write!(f, "'='"),
-            TokenKind::EqEq => write!(f, "'=='"),
             TokenKind::BangEq => write!(f, "'!='"),
             TokenKind::Lt => write!(f, "'<'"),
             TokenKind::LtEq => write!(f, "'<='"),
@@ -166,7 +155,6 @@ impl std::fmt::Display for TokenKind {
             TokenKind::QuestionQuestion => write!(f, "'??'"),
             TokenKind::QuestionDot => write!(f, "'?.'"),
             TokenKind::Dot => write!(f, "'.'"),
-            TokenKind::DotDot => write!(f, "'..'"),
             TokenKind::LBrace => write!(f, "'{{'"),
             TokenKind::RBrace => write!(f, "'}}'"),
             TokenKind::LParen => write!(f, "'('"),
@@ -207,8 +195,6 @@ impl TokenKind {
                 | TokenKind::Question
                 | TokenKind::Use
                 | TokenKind::As
-                | TokenKind::Module
-                | TokenKind::System
                 | TokenKind::When
                 | TokenKind::Requires
                 | TokenKind::Ensures
@@ -225,8 +211,6 @@ impl TokenKind {
                 | TokenKind::Exists
                 | TokenKind::TransitionsTo
                 | TokenKind::Becomes
-                | TokenKind::Includes
-                | TokenKind::Excludes
                 | TokenKind::Now
                 | TokenKind::This
                 | TokenKind::Within
@@ -499,7 +483,6 @@ impl<'s> Lexer<'s> {
 
         let (kind, len) = match (b, next) {
             (b'=', b'>') => (TokenKind::FatArrow, 2),
-            (b'=', b'=') => (TokenKind::EqEq, 2),
             (b'=', _) => (TokenKind::Eq, 1),
             (b'!', b'=') => (TokenKind::BangEq, 2),
             (b'<', b'=') => (TokenKind::LtEq, 2),
@@ -515,7 +498,6 @@ impl<'s> Lexer<'s> {
             (b'?', b'?') => (TokenKind::QuestionQuestion, 2),
             (b'?', b'.') => (TokenKind::QuestionDot, 2),
             (b'?', _) => (TokenKind::QuestionMark, 1),
-            (b'.', b'.') => (TokenKind::DotDot, 2),
             (b'.', _) => (TokenKind::Dot, 1),
             (b'{', _) => (TokenKind::LBrace, 1),
             (b'}', _) => (TokenKind::RBrace, 1),
@@ -566,8 +548,6 @@ fn classify_keyword(text: &str) -> TokenKind {
         "question" => TokenKind::Question,
         "use" => TokenKind::Use,
         "as" => TokenKind::As,
-        "module" => TokenKind::Module,
-        "system" => TokenKind::System,
         "when" => TokenKind::When,
         "requires" => TokenKind::Requires,
         "ensures" => TokenKind::Ensures,
@@ -584,8 +564,6 @@ fn classify_keyword(text: &str) -> TokenKind {
         "exists" => TokenKind::Exists,
         "transitions_to" => TokenKind::TransitionsTo,
         "becomes" => TokenKind::Becomes,
-        "includes" => TokenKind::Includes,
-        "excludes" => TokenKind::Excludes,
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         "null" => TokenKind::Null,
