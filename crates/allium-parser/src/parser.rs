@@ -696,8 +696,7 @@ impl<'s> Parser<'s> {
 
         let collection = self.parse_expr(BP_WITH_WHERE + 1)?;
 
-        let filter = if self.eat(TokenKind::Where).is_some() || self.eat(TokenKind::With).is_some()
-        {
+        let filter = if self.eat(TokenKind::Where).is_some() {
             // Parse filter at min_bp 0 — colon terminates naturally since
             // it's not an expression operator.
             Some(self.parse_expr(0)?)
@@ -1078,12 +1077,12 @@ impl<'s> Parser<'s> {
 // Binding powers (even = left, odd = right for right-associative)
 const BP_LAMBDA: u8 = 4;
 const BP_WHEN_GUARD: u8 = 5;
+const BP_PROJECTION: u8 = 6;
+const BP_WITH_WHERE: u8 = 7;
 const BP_OR: u8 = 10;
 const BP_AND: u8 = 20;
 const BP_COMPARE: u8 = 30;
 const BP_TRANSITION: u8 = 32;
-const BP_WITH_WHERE: u8 = 35;
-const BP_PROJECTION: u8 = 37;
 const BP_NULL_COALESCE: u8 = 40;
 const BP_ADD: u8 = 50;
 const BP_MUL: u8 = 60;
@@ -1160,7 +1159,11 @@ impl<'s> Parser<'s> {
             TokenKind::If => self.parse_if_expr(),
             TokenKind::For => self.parse_for_expr(),
             TokenKind::LBrace => self.parse_brace_expr(),
-            TokenKind::LBracket => self.parse_list_literal(),
+            TokenKind::LBracket => {
+                let t = self.advance();
+                self.error(t.span, "list literals `[...]` are not supported; use `Set<T>` type annotation or `{...}` set literal");
+                None
+            }
             TokenKind::LParen => self.parse_paren_expr(),
             TokenKind::Number => {
                 let t = self.advance();
@@ -1766,13 +1769,12 @@ impl<'s> Parser<'s> {
         // Parse collection, stopping before `where` and `:`
         let collection = self.parse_expr(BP_WITH_WHERE + 1)?;
 
-        let filter =
-            if self.eat(TokenKind::Where).is_some() || self.eat(TokenKind::With).is_some() {
-                // Parse filter at min_bp 0 — colon terminates naturally.
-                Some(Box::new(self.parse_expr(0)?))
-            } else {
-                None
-            };
+        let filter = if self.eat(TokenKind::Where).is_some() {
+            // Parse filter at min_bp 0 — colon terminates naturally.
+            Some(Box::new(self.parse_expr(0)?))
+        } else {
+            None
+        };
 
         self.expect(TokenKind::Colon)?;
         let body = self.parse_branch_body(start)?;
@@ -1808,19 +1810,6 @@ impl<'s> Parser<'s> {
         self.parse_set_literal(start)
     }
 
-    fn parse_list_literal(&mut self) -> Option<Expr> {
-        let start = self.advance().span; // consume [
-        let mut elements = Vec::new();
-        while !self.at(TokenKind::RBracket) && !self.at_eof() {
-            elements.push(self.parse_expr(0)?);
-            self.eat(TokenKind::Comma);
-        }
-        let end = self.expect(TokenKind::RBracket)?.span;
-        Some(Expr::ListLiteral {
-            span: start.merge(end),
-            elements,
-        })
-    }
 
     fn parse_object_literal(&mut self, start: Span) -> Option<Expr> {
         let mut fields = Vec::new();
@@ -2438,12 +2427,27 @@ rule ProcessDigests {
     when: X()
     ensures:
         let s = {a, b, c}
-        let l = [1, 2, 3]
         let o = {name: "test", count: 42}
         Done()
 }"#;
         let r = parse_ok(src);
         assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn spec_reject_list_literal() {
+        // The spec does not define `[...]` list literal syntax.
+        let src = r#"rule R {
+    when: X()
+    ensures:
+        let l = [1, 2, 3]
+        Done()
+}"#;
+        let r = parse_ok(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for `[...]` list literal (not in spec), but parsed without errors"
+        );
     }
 
     // -- given block ----------------------------------------------------------
@@ -2612,17 +2616,19 @@ rule ProcessDigests {
     }
 
     #[test]
-    fn for_with() {
+    fn spec_reject_for_with_filter() {
+        // The spec uses `where` for iteration filtering; `with` is for
+        // relationship declarations only.
         let src = r#"rule R {
     when: X()
     for slot in Slot with slot.role = reviewer:
         ensures: Reviewed(slot: slot)
 }"#;
         let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        let BlockItemKind::ForBlock { filter, .. } = &b.items[1].kind else { panic!() };
-        assert!(filter.is_some());
+        assert!(
+            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for `for ... with` (spec uses `where`), but parsed without errors"
+        );
     }
 
     #[test]
@@ -2699,7 +2705,8 @@ rule ProcessDigests {
     }
 
     #[test]
-    fn for_expr_with_filter() {
+    fn spec_reject_for_expr_with_filter() {
+        // Expression-level `for` also only accepts `where`, not `with`.
         let src = r#"rule R {
     when: X(project)
     ensures:
@@ -2707,7 +2714,10 @@ rule ProcessDigests {
         Done(total: total)
 }"#;
         let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0);
+        assert!(
+            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for `for ... with` in expression (spec uses `where`), but parsed without errors"
+        );
     }
 
     #[test]
@@ -3195,5 +3205,625 @@ rule ProcessDigests {
 }"#;
         let r = parse_ok(src);
         assert_eq!(r.diagnostics.len(), 0, "multi-line exposes should parse cleanly");
+    }
+
+    // =====================================================================
+    // COVERAGE GAP TESTS
+    //
+    // Dedicated unit tests for spec constructs that previously only had
+    // fixture-file coverage.
+    // =====================================================================
+
+    // -- Composite or-triggers ------------------------------------------------
+
+    #[test]
+    fn composite_or_trigger() {
+        let src = r#"rule R {
+    when: EventA(x) or EventB(x) or EventC(x)
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Clause { keyword, value } = &b.items[0].kind else { panic!() };
+        assert_eq!(keyword, "when");
+        // Top-level should be LogicalOp(Or) wrapping another Or
+        let Expr::LogicalOp { op, left, .. } = value else {
+            panic!("expected LogicalOp, got {value:?}");
+        };
+        assert_eq!(*op, LogicalOp::Or);
+        assert!(matches!(left.as_ref(), Expr::LogicalOp { op: LogicalOp::Or, .. }));
+    }
+
+    // -- Value type declaration -----------------------------------------------
+
+    #[test]
+    fn value_type_declaration() {
+        let src = r#"value TimeRange {
+    start: Timestamp
+    end: Timestamp
+    duration: end - start
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.kind, BlockKind::Value);
+        assert_eq!(b.name.as_ref().unwrap().name, "TimeRange");
+        assert_eq!(b.items.len(), 3);
+    }
+
+    // -- Qualified config block -----------------------------------------------
+
+    #[test]
+    fn qualified_config_block() {
+        let src = r#"use "github.com/specs/oauth/abc123" as oauth
+oauth/config {
+    session_duration: Duration = 24.hours
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        assert_eq!(r.module.declarations.len(), 2);
+    }
+
+    // -- String interpolation -------------------------------------------------
+
+    #[test]
+    fn string_interpolation_parts() {
+        let src = r#"rule R {
+    when: X(name, action)
+    ensures: Log.created(message: "User {name} did {action}")
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        // Dig into the message arg to verify interpolation parts
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Clause { value, .. } = &b.items[1].kind else { panic!() };
+        let Expr::Call { args, .. } = value else { panic!() };
+        let CallArg::Named(arg) = &args[0] else { panic!() };
+        let Expr::StringLiteral(s) = &arg.value else { panic!() };
+        assert_eq!(s.parts.len(), 4, "expected 4 string parts: text, interp, text, interp");
+        assert!(matches!(&s.parts[0], StringPart::Text(t) if t == "User "));
+        assert!(matches!(&s.parts[1], StringPart::Interpolation(id) if id.name == "name"));
+        assert!(matches!(&s.parts[2], StringPart::Text(t) if t == " did "));
+        assert!(matches!(&s.parts[3], StringPart::Interpolation(id) if id.name == "action"));
+    }
+
+    // -- `this` keyword as expression -----------------------------------------
+
+    #[test]
+    fn this_keyword_expression() {
+        // `Item with parent = this` parses as With(Item, Eq(parent, this))
+        // because `with` binds looser than `=`, capturing the full predicate.
+        let src = "entity E { items: Item with parent = this }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::With { predicate, .. } = value else {
+            panic!("expected With, got {value:?}");
+        };
+        let Expr::Comparison { op, right, .. } = predicate.as_ref() else {
+            panic!("expected Comparison in with predicate, got {predicate:?}");
+        };
+        assert_eq!(*op, ComparisonOp::Eq);
+        assert!(matches!(right.as_ref(), Expr::This { .. }));
+    }
+
+    // -- `not` prefix operator (standalone) -----------------------------------
+
+    #[test]
+    fn not_prefix_standalone() {
+        let src = r#"rule R {
+    when: X(user)
+    requires: not user.is_locked
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Clause { keyword, value } = &b.items[1].kind else { panic!() };
+        assert_eq!(keyword, "requires");
+        assert!(matches!(value, Expr::Not { .. }));
+    }
+
+    // -- Unary minus ----------------------------------------------------------
+
+    #[test]
+    fn unary_minus() {
+        let src = "entity E { offset: -1 }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        assert!(matches!(value, Expr::BinaryOp { op: BinaryOp::Sub, .. }
+                        | Expr::NumberLiteral { .. }), "expected negation, got {value:?}");
+    }
+
+    // -- Parenthesised expression grouping ------------------------------------
+
+    #[test]
+    fn parenthesised_expression() {
+        let src = "entity E { v: (a + b) * c }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        // Top level should be Mul, with left being Add (grouped by parens)
+        let Expr::BinaryOp { op, left, .. } = value else {
+            panic!("expected BinaryOp, got {value:?}");
+        };
+        assert_eq!(*op, BinaryOp::Mul);
+        assert!(matches!(left.as_ref(), Expr::BinaryOp { op: BinaryOp::Add, .. }));
+    }
+
+    // -- Boolean literals -----------------------------------------------------
+
+    #[test]
+    fn boolean_literals() {
+        let src = r#"rule R {
+    when: X(item)
+    ensures:
+        item.active = true
+        item.deleted = false
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- `null` literal -------------------------------------------------------
+
+    #[test]
+    fn null_literal() {
+        let src = "entity E { v: parent ?? null }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::NullCoalesce { right, .. } = value else { panic!() };
+        assert!(matches!(right.as_ref(), Expr::Null { .. }));
+    }
+
+    // -- Empty set literal ----------------------------------------------------
+
+    #[test]
+    fn empty_set_literal() {
+        let src = "entity E { tags: Set<String>\n    default_tags: {} }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[1].kind else { panic!() };
+        let Expr::SetLiteral { elements, .. } = value else { panic!("expected SetLiteral, got {value:?}") };
+        assert!(elements.is_empty());
+    }
+
+    // =====================================================================
+    // PRE-1.0 COVERAGE TESTS
+    //
+    // Additional tests addressing gaps identified during the pre-release
+    // review: parameterised derived values, operator precedence matrix,
+    // indentation-based multi-line detection, and set/object literal
+    // disambiguation.
+    // =====================================================================
+
+    // -- Parameterised derived values (ParamAssignment) --------------------
+
+    #[test]
+    fn param_assignment_single() {
+        let src = "entity Plan { can_use(feature): feature in features }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::ParamAssignment { name, params, value } = &b.items[0].kind else {
+            panic!("expected ParamAssignment, got {:?}", b.items[0].kind);
+        };
+        assert_eq!(name.name, "can_use");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "feature");
+        assert!(matches!(value, Expr::In { .. }));
+    }
+
+    #[test]
+    fn param_assignment_multiple() {
+        let src = "entity E { distance(x, y): (x * x + y * y) }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::ParamAssignment { name, params, .. } = &b.items[0].kind else {
+            panic!("expected ParamAssignment, got {:?}", b.items[0].kind);
+        };
+        assert_eq!(name.name, "distance");
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "x");
+        assert_eq!(params[1].name, "y");
+    }
+
+    #[test]
+    fn param_assignment_simple_expression() {
+        let src = "entity Task { remaining_effort(total): total - effort }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::ParamAssignment { name, params, value } = &b.items[0].kind else {
+            panic!("expected ParamAssignment, got {:?}", b.items[0].kind);
+        };
+        assert_eq!(name.name, "remaining_effort");
+        assert_eq!(params.len(), 1);
+        assert!(matches!(value, Expr::BinaryOp { op: BinaryOp::Sub, .. }));
+    }
+
+    // -- Operator precedence matrix ----------------------------------------
+
+    #[test]
+    fn precedence_logical_and_binds_tighter_than_or() {
+        // `a or b and c` => Or(a, And(b, c))
+        let src = "entity E { v: a or b and c }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::LogicalOp { op, right, .. } = value else {
+            panic!("expected LogicalOp, got {value:?}");
+        };
+        assert_eq!(*op, LogicalOp::Or);
+        assert!(matches!(right.as_ref(), Expr::LogicalOp { op: LogicalOp::And, .. }));
+    }
+
+    #[test]
+    fn precedence_comparison_binds_tighter_than_and() {
+        // `a = b and c != d` => And(Eq(a, b), NotEq(c, d))
+        let src = "entity E { v: a = b and c != d }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::LogicalOp { op, left, right, .. } = value else {
+            panic!("expected LogicalOp, got {value:?}");
+        };
+        assert_eq!(*op, LogicalOp::And);
+        assert!(matches!(left.as_ref(), Expr::Comparison { op: ComparisonOp::Eq, .. }));
+        assert!(matches!(right.as_ref(), Expr::Comparison { op: ComparisonOp::NotEq, .. }));
+    }
+
+    #[test]
+    fn precedence_arithmetic_binds_tighter_than_comparison() {
+        // `a + b > c * d` => Gt(Add(a, b), Mul(c, d))
+        let src = "entity E { v: a + b > c * d }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::Comparison { op, left, right, .. } = value else {
+            panic!("expected Comparison, got {value:?}");
+        };
+        assert_eq!(*op, ComparisonOp::Gt);
+        assert!(matches!(left.as_ref(), Expr::BinaryOp { op: BinaryOp::Add, .. }));
+        assert!(matches!(right.as_ref(), Expr::BinaryOp { op: BinaryOp::Mul, .. }));
+    }
+
+    #[test]
+    fn precedence_null_coalesce_binds_tighter_than_comparison() {
+        // `a ?? b = c` => Eq(NullCoalesce(a, b), c)
+        let src = "entity E { v: a ?? b = c }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::Comparison { op, left, .. } = value else {
+            panic!("expected Comparison, got {value:?}");
+        };
+        assert_eq!(*op, ComparisonOp::Eq);
+        assert!(matches!(left.as_ref(), Expr::NullCoalesce { .. }));
+    }
+
+    #[test]
+    fn precedence_not_binds_tighter_than_and() {
+        // `not a and b` => And(Not(a), b)
+        let src = r#"rule R {
+    when: X(a, b)
+    requires: not a and b
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Clause { value, .. } = &b.items[1].kind else { panic!() };
+        let Expr::LogicalOp { op, left, .. } = value else {
+            panic!("expected LogicalOp, got {value:?}");
+        };
+        assert_eq!(*op, LogicalOp::And);
+        assert!(matches!(left.as_ref(), Expr::Not { .. }));
+    }
+
+    #[test]
+    fn precedence_where_captures_full_condition() {
+        // `items where status = active` => Where(items, Eq(status, active))
+        // where (BP 7) binds looser than comparison (BP 30), so the full
+        // condition `status = active` is captured as the where predicate.
+        let src = "entity E { v: items where status = active }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::Where { condition, .. } = value else {
+            panic!("expected Where, got {value:?}");
+        };
+        assert!(matches!(condition.as_ref(), Expr::Comparison { op: ComparisonOp::Eq, .. }));
+    }
+
+    #[test]
+    fn precedence_where_captures_and_or_conditions() {
+        // `items where status = active and count > 0` =>
+        //   Where(items, And(Eq(status, active), Gt(count, 0)))
+        let src = "entity E { v: items where status = active and count > 0 }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::Where { condition, .. } = value else {
+            panic!("expected Where, got {value:?}");
+        };
+        assert!(matches!(condition.as_ref(), Expr::LogicalOp { op: LogicalOp::And, .. }));
+    }
+
+    #[test]
+    fn precedence_projection_applies_to_where_result() {
+        // `items where status = confirmed -> interviewer` =>
+        //   ProjectionMap(Where(items, Eq(status, confirmed)), interviewer)
+        let src = "entity E { v: items where status = confirmed -> interviewer }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::ProjectionMap { source, field, .. } = value else {
+            panic!("expected ProjectionMap, got {value:?}");
+        };
+        assert_eq!(field.name, "interviewer");
+        assert!(matches!(source.as_ref(), Expr::Where { .. }));
+    }
+
+    #[test]
+    fn precedence_lambda_binds_loosest() {
+        // `items.any(i => i.active and i.valid)` => Lambda(i, And(active, valid))
+        let src = "entity E { v: items.any(i => i.active and i.valid) }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::Call { args, .. } = value else { panic!() };
+        let CallArg::Positional(Expr::Lambda { body, .. }) = &args[0] else { panic!() };
+        assert!(matches!(body.as_ref(), Expr::LogicalOp { op: LogicalOp::And, .. }));
+    }
+
+    #[test]
+    fn precedence_in_binds_at_comparison_level() {
+        // `x in {a, b} and y not in {c}` => And(In(x, {a,b}), NotIn(y, {c}))
+        let src = r#"rule R {
+    when: X(x, y)
+    requires: x in {a, b} and y not in {c}
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Clause { value, .. } = &b.items[1].kind else { panic!() };
+        let Expr::LogicalOp { op, left, right, .. } = value else {
+            panic!("expected LogicalOp, got {value:?}");
+        };
+        assert_eq!(*op, LogicalOp::And);
+        assert!(matches!(left.as_ref(), Expr::In { .. }));
+        assert!(matches!(right.as_ref(), Expr::NotIn { .. }));
+    }
+
+    // -- Multi-line clause value detection ----------------------------------
+
+    #[test]
+    fn multiline_ensures_block() {
+        let src = r#"rule R {
+    when: X(doc)
+    ensures:
+        doc.status = published
+        Notification.created(to: doc.author)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Clause { keyword, value } = &b.items[1].kind else { panic!() };
+        assert_eq!(keyword, "ensures");
+        let Expr::Block { items, .. } = value else {
+            panic!("expected Block for multi-line ensures, got {value:?}");
+        };
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn singleline_ensures_value() {
+        let src = r#"rule R {
+    when: X(doc)
+    ensures: doc.status = published
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Clause { keyword, value } = &b.items[1].kind else { panic!() };
+        assert_eq!(keyword, "ensures");
+        // Single-line value should NOT be wrapped in a Block
+        assert!(!matches!(value, Expr::Block { .. }), "single-line ensures should not be Block");
+    }
+
+    #[test]
+    fn multiline_requires_with_continuation() {
+        let src = r#"rule R {
+    when: X(a)
+    requires:
+        a.count >= 2
+        or a.items.any(i => i.can_solo)
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- Set vs object literal disambiguation ------------------------------
+
+    #[test]
+    fn object_literal_single_field() {
+        let src = r#"rule R {
+    when: X()
+    ensures:
+        let o = {name: "test"}
+        Done()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Clause { value, .. } = &b.items[1].kind else { panic!() };
+        let Expr::Block { items, .. } = value else { panic!() };
+        let Expr::LetExpr { value: let_val, .. } = &items[0] else { panic!() };
+        assert!(matches!(let_val.as_ref(), Expr::ObjectLiteral { .. }));
+    }
+
+    #[test]
+    fn set_literal_single_element() {
+        let src = r#"rule R {
+    when: X()
+    ensures:
+        let s = {active}
+        Done()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Clause { value, .. } = &b.items[1].kind else { panic!() };
+        let Expr::Block { items, .. } = value else { panic!() };
+        let Expr::LetExpr { value: let_val, .. } = &items[0] else { panic!() };
+        assert!(matches!(let_val.as_ref(), Expr::SetLiteral { .. }),
+            "bare {{ident}} should parse as set literal, got {:?}", let_val);
+    }
+
+    // -- Lambda variations -------------------------------------------------
+
+    #[test]
+    fn lambda_with_chained_access() {
+        let src = "entity E { v: items.all(t => t.item.status = active) }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn nested_lambda() {
+        let src = "entity E { v: groups.any(g => g.items.all(i => i.valid)) }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- Qualified name variations -----------------------------------------
+
+    #[test]
+    fn qualified_name_with_member_access() {
+        let src = "entity E { v: shared/Validator.check }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::MemberAccess { object, field, .. } = value else {
+            panic!("expected MemberAccess, got {value:?}");
+        };
+        assert!(matches!(object.as_ref(), Expr::QualifiedName(_)));
+        assert_eq!(field.name, "check");
+    }
+
+    #[test]
+    fn qualified_name_in_call() {
+        let src = r#"rule R {
+    when: X(item)
+    requires: shared/Validator.check(item: item)
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -- Nested control flow -----------------------------------------------
+
+    #[test]
+    fn nested_if_inside_for() {
+        let src = r#"rule R {
+    when: X()
+    for user in Users where user.active:
+        if user.role = admin:
+            ensures: AdminNotified(user: user)
+        else:
+            ensures: UserNotified(user: user)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::ForBlock { items, .. } = &b.items[1].kind else { panic!() };
+        assert!(matches!(items[0].kind, BlockItemKind::IfBlock { .. }));
+    }
+
+    #[test]
+    fn for_with_let_before_ensures() {
+        let src = r#"rule R {
+    when: schedule: DigestSchedule.next_run_at <= now
+    for user in Users where user.active:
+        let pending = user.tasks where status = pending
+        ensures: DigestEmail.created(to: user.email, tasks: pending)
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::ForBlock { items, .. } = &b.items[1].kind else { panic!() };
+        assert_eq!(items.len(), 2, "for body should have let + ensures");
+        assert!(matches!(items[0].kind, BlockItemKind::Let { .. }));
+        assert!(matches!(items[1].kind, BlockItemKind::Clause { .. }));
+    }
+
+    // -- Join lookup variations --------------------------------------------
+
+    #[test]
+    fn join_lookup_all_unnamed() {
+        let src = "entity E { match: Other{a, b, c} }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::JoinLookup { fields, .. } = value else { panic!() };
+        assert_eq!(fields.len(), 3);
+        assert!(fields.iter().all(|f| f.value.is_none()));
+    }
+
+    #[test]
+    fn join_lookup_all_named() {
+        let src = "entity E { match: Membership{user: actor, workspace: ws} }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::JoinLookup { fields, .. } = value else { panic!() };
+        assert_eq!(fields.len(), 2);
+        assert!(fields.iter().all(|f| f.value.is_some()));
+    }
+
+    #[test]
+    fn join_lookup_in_requires() {
+        let src = r#"rule R {
+    when: X(user, workspace)
+    requires: exists WorkspaceMembership{user: user, workspace: workspace}
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn join_lookup_negated_in_requires() {
+        let src = r#"rule R {
+    when: X(email)
+    requires: not exists User{email: email}
+    ensures: Done()
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
     }
 }

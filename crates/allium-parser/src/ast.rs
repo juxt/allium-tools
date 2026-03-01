@@ -180,9 +180,6 @@ pub enum Expr {
     /// `{ a, b, c }` — set literal
     SetLiteral { span: Span, elements: Vec<Expr> },
 
-    /// `[a, b, c]` — list literal
-    ListLiteral { span: Span, elements: Vec<Expr> },
-
     /// `{ key: value, ... }` — object literal
     ObjectLiteral { span: Span, fields: Vec<NamedArg> },
 
@@ -388,7 +385,6 @@ impl Expr {
             | Expr::Within { span }
             | Expr::DurationLiteral { span, .. }
             | Expr::SetLiteral { span, .. }
-            | Expr::ListLiteral { span, .. }
             | Expr::ObjectLiteral { span, .. }
             | Expr::GenericType { span, .. }
             | Expr::MemberAccess { span, .. }

@@ -296,7 +296,7 @@ rule CalculateBudget {
 rule CreateReport {
     when: ReportRequested(project)
     ensures:
-        let sections = [overview, tasks, timeline, budget]
+        let sections = {overview, tasks, timeline, budget}
         let options = {format: pdf, include_charts: true}
         Report.created(project: project, sections: sections, options: options)
 }

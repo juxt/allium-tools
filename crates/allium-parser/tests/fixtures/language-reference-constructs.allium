@@ -22,12 +22,12 @@ rule SumEffort {
 }
 
 -- ---------------------------------------------------------------------------
--- for with `with` filter
+-- for with `where` filter (relationship context)
 -- ---------------------------------------------------------------------------
 
 rule ProcessAssignments {
     when: ReviewRequested(project)
-    for assignment in Assignment with assignment.role = reviewer:
+    for assignment in Assignment where assignment.role = reviewer:
         ensures: ReviewCreated(assignment: assignment)
 }
 
@@ -169,7 +169,7 @@ rule ComputeMetrics {
     ensures:
         let count = doc.sections.count
         let avg = doc.word_count / count
-        let items = [count, avg]
+        let items = {count, avg}
         let meta = {document: doc.title, sections: count}
         MetricsComputed(document: doc, average: avg)
 }
@@ -232,13 +232,13 @@ rule CommentOnlyGuidance {
 }
 
 -- ---------------------------------------------------------------------------
--- for with `with` filter (expression-level)
+-- for with `where` filter (expression-level)
 -- ---------------------------------------------------------------------------
 
 rule ExprForWithFilter {
     when: Summarise(project)
     ensures:
-        let total = for task in project.tasks with task.billable: task.hours
+        let total = for task in project.tasks where task.billable: task.hours
         Summarised(project: project, total: total)
 }
 

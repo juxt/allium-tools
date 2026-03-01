@@ -10,4 +10,4 @@ name = "allium"
 path = "src/main.rs"
 
 [dependencies]
-allium-parser = { path = "../allium-parser", version = "0.1.0" }
+allium-parser = { path = "../allium-parser", version = "1.0.0" }
