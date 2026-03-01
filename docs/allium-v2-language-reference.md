@@ -1559,7 +1559,7 @@ surface DomainIntegration {
         EventOutcome
 
     expects DeterministicEvaluation {
-        evaluate: (event: T, entities: EntityMap) -> EventOutcome
+        evaluate: (event_name: String, payload: ByteArray, current_state: ByteArray) -> EventOutcome
 
         invariant: Determinism
             -- For identical inputs, evaluate must produce
@@ -1570,7 +1570,7 @@ surface DomainIntegration {
     }
 
     offers EventSubmitter {
-        submit: (idempotency_key: String, event: T) -> Future<ByteArray?>
+        submit: (idempotency_key: String, event_name: String, payload: ByteArray) -> EventSubmission
 
         invariant: AtMostOnceProcessing
             -- Within the TTL window, duplicate submissions
