@@ -8,6 +8,8 @@
 //! Expressions are fully typed — the parser produces the rich [`Expr`] tree
 //! directly.
 
+use serde::Serialize;
+
 use crate::Span;
 
 // ---------------------------------------------------------------------------
@@ -15,7 +17,7 @@ use crate::Span;
 // ---------------------------------------------------------------------------
 
 /// A parsed `.allium` file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Module {
     pub span: Span,
     /// Extracted from `-- allium: N` if present.
@@ -27,7 +29,7 @@ pub struct Module {
 // Declarations
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Decl {
     Use(UseDecl),
     Block(BlockDecl),
@@ -39,7 +41,7 @@ pub enum Decl {
 }
 
 /// `use "path" as alias`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct UseDecl {
     pub span: Span,
     pub path: StringLiteral,
@@ -47,7 +49,7 @@ pub struct UseDecl {
 }
 
 /// A named or anonymous block: `entity User { ... }`, `config { ... }`, etc.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BlockDecl {
     pub span: Span,
     pub kind: BlockKind,
@@ -56,7 +58,7 @@ pub struct BlockDecl {
     pub items: Vec<BlockItem>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum BlockKind {
     Entity,
     ExternalEntity,
@@ -72,7 +74,7 @@ pub enum BlockKind {
 }
 
 /// `default [Type] name = value`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DefaultDecl {
     pub span: Span,
     pub type_name: Option<Ident>,
@@ -81,7 +83,7 @@ pub struct DefaultDecl {
 }
 
 /// `variant Name : Type { ... }`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VariantDecl {
     pub span: Span,
     pub name: Ident,
@@ -90,21 +92,21 @@ pub struct VariantDecl {
 }
 
 /// `deferred path.expression`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DeferredDecl {
     pub span: Span,
     pub path: Expr,
 }
 
 /// `open question "text"`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OpenQuestionDecl {
     pub span: Span,
     pub text: StringLiteral,
 }
 
 /// `invariant Name { expr }` — top-level expression-bearing invariant
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InvariantDecl {
     pub span: Span,
     pub name: Ident,
@@ -115,13 +117,13 @@ pub struct InvariantDecl {
 // Block items — uniform representation for declaration bodies
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BlockItem {
     pub span: Span,
     pub kind: BlockItemKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum BlockItemKind {
     /// `keyword: value` — when:, requires:, ensures:, facing:, etc.
     Clause { keyword: String, value: Expr },
@@ -171,7 +173,7 @@ pub enum BlockItemKind {
 // Expressions
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Expr {
     /// `identifier` or `_`
     Ident(Ident),
@@ -442,7 +444,7 @@ impl Expr {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CondBranch {
     pub span: Span,
     pub condition: Expr,
@@ -450,7 +452,7 @@ pub struct CondBranch {
 }
 
 /// A branch of a block-level `if`/`else if` chain.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CondBlockBranch {
     pub span: Span,
     pub condition: Expr,
@@ -459,7 +461,7 @@ pub struct CondBlockBranch {
 
 /// Binding in a `for` loop — either a single identifier or a
 /// destructured tuple like `(a, b)`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ForBinding {
     Single(Ident),
     Destructured(Vec<Ident>, Span),
@@ -469,45 +471,45 @@ pub enum ForBinding {
 // Shared types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Ident {
     pub span: Span,
     pub name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct QualifiedName {
     pub span: Span,
     pub qualifier: Option<String>,
     pub name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StringLiteral {
     pub span: Span,
     pub parts: Vec<StringPart>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum StringPart {
     Text(String),
     Interpolation(Ident),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct NamedArg {
     pub span: Span,
     pub name: Ident,
     pub value: Expr,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum CallArg {
     Positional(Expr),
     Named(NamedArg),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct JoinField {
     pub span: Span,
     pub field: Ident,
@@ -515,7 +517,7 @@ pub struct JoinField {
     pub value: Option<Expr>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -523,7 +525,7 @@ pub enum BinaryOp {
     Div,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ComparisonOp {
     Eq,
     NotEq,
@@ -533,7 +535,7 @@ pub enum ComparisonOp {
     GtEq,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum LogicalOp {
     And,
     Or,

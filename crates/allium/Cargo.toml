@@ -11,3 +11,4 @@ path = "src/main.rs"
 
 [dependencies]
 allium-parser = { path = "../allium-parser", version = "1.0.0" }
+serde_json = "1"

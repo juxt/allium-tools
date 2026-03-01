@@ -9,15 +9,45 @@ fn main() -> ExitCode {
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
         eprintln!("Usage: allium check <file.allium>...");
         eprintln!("       allium check <directory>");
+        eprintln!("       allium parse <file.allium>");
         return ExitCode::from(2);
     }
 
     match args[0].as_str() {
         "check" => cmd_check(&args[1..]),
+        "parse" => cmd_parse(&args[1..]),
         other => {
             eprintln!("Unknown command: {other}");
-            eprintln!("Available commands: check");
+            eprintln!("Available commands: check, parse");
             ExitCode::from(2)
+        }
+    }
+}
+
+fn cmd_parse(args: &[String]) -> ExitCode {
+    if args.len() != 1 {
+        eprintln!("Usage: allium parse <file.allium>");
+        return ExitCode::from(2);
+    }
+
+    let path = Path::new(&args[0]);
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{}: {e}", path.display());
+            return ExitCode::from(1);
+        }
+    };
+
+    let result = allium_parser::parse(&source);
+    match serde_json::to_string_pretty(&result) {
+        Ok(json) => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Failed to serialise AST: {e}");
+            ExitCode::from(1)
         }
     }
 }

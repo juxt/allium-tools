@@ -4,6 +4,8 @@
 //! bodies use direct recursive descent. Multi-line clause values are detected
 //! by comparing the line/column of the next token against the clause keyword.
 
+use serde::Serialize;
+
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::lexer::{lex, SourceMap, Token, TokenKind};
@@ -13,7 +15,7 @@ use crate::Span;
 // Public API
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ParseResult {
     pub module: Module,
     pub diagnostics: Vec<Diagnostic>,

@@ -1,6 +1,8 @@
+use serde::Serialize;
+
 /// Byte offset range in source text. Attached to every AST node
 /// so diagnostics can point at the exact source location.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
