@@ -393,8 +393,8 @@ open question "How should task dependencies handle circular references?"
 
 rule MigrateData {
     when: MigrationTriggered()
-    guidance: "Run during off-peak hours only"
     ensures: MigrationComplete()
+    guidance: "Run during off-peak hours only"
 }
 
 -- ---------------------------------------------------------------------------

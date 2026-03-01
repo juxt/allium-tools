@@ -53,6 +53,13 @@ pub enum TokenKind {
     TransitionsTo,
     Becomes,
 
+    // Contract and invariant keywords
+    Implies,
+    Contract,
+    Invariant,
+    Expects,
+    Offers,
+
     // Context-sensitive identifiers treated as keywords
     Now,
     This,
@@ -136,6 +143,11 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Exists => write!(f, "'exists'"),
             TokenKind::TransitionsTo => write!(f, "'transitions_to'"),
             TokenKind::Becomes => write!(f, "'becomes'"),
+            TokenKind::Implies => write!(f, "'implies'"),
+            TokenKind::Contract => write!(f, "'contract'"),
+            TokenKind::Invariant => write!(f, "'invariant'"),
+            TokenKind::Expects => write!(f, "'expects'"),
+            TokenKind::Offers => write!(f, "'offers'"),
             TokenKind::Now => write!(f, "'now'"),
             TokenKind::This => write!(f, "'this'"),
             TokenKind::Within => write!(f, "'within'"),
@@ -211,6 +223,11 @@ impl TokenKind {
                 | TokenKind::Exists
                 | TokenKind::TransitionsTo
                 | TokenKind::Becomes
+                | TokenKind::Implies
+                | TokenKind::Contract
+                | TokenKind::Invariant
+                | TokenKind::Expects
+                | TokenKind::Offers
                 | TokenKind::Now
                 | TokenKind::This
                 | TokenKind::Within
@@ -562,6 +579,11 @@ fn classify_keyword(text: &str) -> TokenKind {
         "and" => TokenKind::And,
         "or" => TokenKind::Or,
         "exists" => TokenKind::Exists,
+        "implies" => TokenKind::Implies,
+        "contract" => TokenKind::Contract,
+        "invariant" => TokenKind::Invariant,
+        "expects" => TokenKind::Expects,
+        "offers" => TokenKind::Offers,
         "transitions_to" => TokenKind::TransitionsTo,
         "becomes" => TokenKind::Becomes,
         "true" => TokenKind::True,

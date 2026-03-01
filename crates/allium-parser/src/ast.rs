@@ -35,6 +35,7 @@ pub enum Decl {
     Variant(VariantDecl),
     Deferred(DeferredDecl),
     OpenQuestion(OpenQuestionDecl),
+    Invariant(InvariantDecl),
 }
 
 /// `use "path" as alias`
@@ -66,6 +67,8 @@ pub enum BlockKind {
     Rule,
     Surface,
     Actor,
+    Contract,
+    Invariant,
 }
 
 /// `default [Type] name = value`
@@ -98,6 +101,14 @@ pub struct DeferredDecl {
 pub struct OpenQuestionDecl {
     pub span: Span,
     pub text: StringLiteral,
+}
+
+/// `invariant Name { expr }` — top-level expression-bearing invariant
+#[derive(Debug, Clone)]
+pub struct InvariantDecl {
+    pub span: Span,
+    pub name: Ident,
+    pub body: Expr,
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +153,18 @@ pub enum BlockItemKind {
     PathAssignment { path: Expr, value: Expr },
     /// `open question "text"` (nested within a block)
     OpenQuestion { text: StringLiteral },
+    /// `expects ContractName` (reference) or `expects Name { ... }` (inline obligation block)
+    Expects {
+        name: Ident,
+        items: Option<Vec<BlockItem>>,
+    },
+    /// `offers ContractName` (reference) or `offers Name { ... }` (inline obligation block)
+    Offers {
+        name: Ident,
+        items: Option<Vec<BlockItem>>,
+    },
+    /// `invariant Name { expr }` inside an entity/value block
+    InvariantBlock { name: Ident, body: Expr },
 }
 
 // ---------------------------------------------------------------------------
@@ -514,4 +537,5 @@ pub enum ComparisonOp {
 pub enum LogicalOp {
     And,
     Or,
+    Implies,
 }
