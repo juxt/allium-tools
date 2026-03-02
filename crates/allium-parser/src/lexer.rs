@@ -57,8 +57,9 @@ pub enum TokenKind {
     Implies,
     Contract,
     Invariant,
-    Expects,
-    Offers,
+
+    // Sigil
+    At,              // @
 
     // Context-sensitive identifiers treated as keywords
     Now,
@@ -146,8 +147,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Implies => write!(f, "'implies'"),
             TokenKind::Contract => write!(f, "'contract'"),
             TokenKind::Invariant => write!(f, "'invariant'"),
-            TokenKind::Expects => write!(f, "'expects'"),
-            TokenKind::Offers => write!(f, "'offers'"),
+            TokenKind::At => write!(f, "'@'"),
             TokenKind::Now => write!(f, "'now'"),
             TokenKind::This => write!(f, "'this'"),
             TokenKind::Within => write!(f, "'within'"),
@@ -226,8 +226,6 @@ impl TokenKind {
                 | TokenKind::Implies
                 | TokenKind::Contract
                 | TokenKind::Invariant
-                | TokenKind::Expects
-                | TokenKind::Offers
                 | TokenKind::Now
                 | TokenKind::This
                 | TokenKind::Within
@@ -524,6 +522,7 @@ impl<'s> Lexer<'s> {
             (b']', _) => (TokenKind::RBracket, 1),
             (b':', _) => (TokenKind::Colon, 1),
             (b',', _) => (TokenKind::Comma, 1),
+            (b'@', _) => (TokenKind::At, 1),
             _ => (TokenKind::Error, 1),
         };
 
@@ -582,8 +581,6 @@ fn classify_keyword(text: &str) -> TokenKind {
         "implies" => TokenKind::Implies,
         "contract" => TokenKind::Contract,
         "invariant" => TokenKind::Invariant,
-        "expects" => TokenKind::Expects,
-        "offers" => TokenKind::Offers,
         "transitions_to" => TokenKind::TransitionsTo,
         "becomes" => TokenKind::Becomes,
         "true" => TokenKind::True,

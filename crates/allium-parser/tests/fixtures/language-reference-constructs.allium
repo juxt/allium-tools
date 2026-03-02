@@ -177,7 +177,8 @@ rule ComputeMetrics {
 rule WithGuidance {
     when: SlowOperation(data)
     ensures: OperationComplete(data: data)
-    guidance: "Prefer off-peak execution"
+    @guidance
+        -- Prefer off-peak execution
 }
 
 rule QualifiedAccess {
@@ -228,7 +229,8 @@ rule Lambdas {
 rule CommentOnlyGuidance {
     when: X()
     ensures: Done()
-    guidance: -- this is just a comment
+    @guidance
+        -- this is just a comment
 }
 
 -- ---------------------------------------------------------------------------

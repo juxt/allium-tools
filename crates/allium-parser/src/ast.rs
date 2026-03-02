@@ -155,18 +155,54 @@ pub enum BlockItemKind {
     PathAssignment { path: Expr, value: Expr },
     /// `open question "text"` (nested within a block)
     OpenQuestion { text: StringLiteral },
-    /// `expects ContractName` (reference) or `expects Name { ... }` (inline obligation block)
-    Expects {
-        name: Ident,
-        items: Option<Vec<BlockItem>>,
+    /// `contracts:` clause in a surface body
+    ContractsClause {
+        entries: Vec<ContractBinding>,
     },
-    /// `offers ContractName` (reference) or `offers Name { ... }` (inline obligation block)
-    Offers {
-        name: Ident,
-        items: Option<Vec<BlockItem>>,
-    },
+    /// `@invariant`, `@guidance`, `@guarantee` prose annotation
+    Annotation(Annotation),
     /// `invariant Name { expr }` inside an entity/value block
     InvariantBlock { name: Ident, body: Expr },
+}
+
+// ---------------------------------------------------------------------------
+// Contract bindings (ALP-15)
+// ---------------------------------------------------------------------------
+
+/// Direction marker for contract bindings in surfaces.
+#[derive(Debug, Clone, Serialize)]
+pub enum ContractDirection {
+    Demands,
+    Fulfils,
+}
+
+/// A single entry in a `contracts:` clause.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContractBinding {
+    pub direction: ContractDirection,
+    pub name: Ident,
+    pub span: Span,
+}
+
+// ---------------------------------------------------------------------------
+// Annotations (ALP-16)
+// ---------------------------------------------------------------------------
+
+/// Prose annotation kinds.
+#[derive(Debug, Clone, Serialize)]
+pub enum AnnotationKind {
+    Invariant,
+    Guidance,
+    Guarantee,
+}
+
+/// A prose annotation: `@invariant Name`, `@guidance`, `@guarantee Name`.
+#[derive(Debug, Clone, Serialize)]
+pub struct Annotation {
+    pub kind: AnnotationKind,
+    pub name: Option<Ident>,
+    pub body: Vec<String>,
+    pub span: Span,
 }
 
 // ---------------------------------------------------------------------------

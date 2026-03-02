@@ -18,7 +18,7 @@ The CLI (`crates/allium/src/main.rs`) already has a `cmd_check` function that pa
 
 ## Existing infrastructure
 
-**AST** (`ast.rs`): `Module` contains `Vec<Decl>`. Declarations are `Use`, `Block`, `Default`, `Variant`, `Deferred`, `OpenQuestion`, `Invariant`. `BlockDecl` has a `kind: BlockKind` (Entity, ExternalEntity, Value, Enum, Given, Config, Rule, Surface, Actor, Contract, Invariant) and `items: Vec<BlockItem>`. Block items are the uniform representation for declaration bodies — fields, clauses, relationships, lets, enum variants, for/if blocks, path assignments, expects/offers, invariant blocks, open questions.
+**AST** (`ast.rs`): `Module` contains `Vec<Decl>`. Declarations are `Use`, `Block`, `Default`, `Variant`, `Deferred`, `OpenQuestion`, `Invariant`. `BlockDecl` has a `kind: BlockKind` (Entity, ExternalEntity, Value, Enum, Given, Config, Rule, Surface, Actor, Contract, Invariant) and `items: Vec<BlockItem>`. Block items are the uniform representation for declaration bodies — fields, clauses, relationships, lets, enum variants, for/if blocks, path assignments, contracts clauses, annotations, invariant blocks, open questions.
 
 **Expressions** (`ast.rs`): The `Expr` enum has 35+ variants covering identifiers, literals, member access, calls, binary/comparison/logical ops, where/with filters, pipes, lambdas, conditionals, for-expressions, transitions_to/becomes, bindings, when-guards, type optionals, let-expressions, qualified names and blocks.
 
@@ -36,7 +36,7 @@ The validator should build a symbol table in a first pass, then check rules agai
    - Named enum map
    - Variant map (name → base entity, additional fields)
    - Rule map (name → triggers, requires, ensures)
-   - Surface map (name → facing, context, exposes, provides, expects, offers)
+   - Surface map (name → facing, context, exposes, provides, contracts, guarantees)
    - Actor map
    - Contract map
    - Config map (parameter names, types, defaults)
@@ -124,98 +124,80 @@ These are the foundation. Everything else depends on having accurate entity/fiel
 34. **For iterations over collection-typed fields.**
 35. **Timeout rule references valid temporal rules.** When a `when` condition is present, verify it matches the referenced rule's temporal trigger.
 
-### Tier 7: obligation block and contract validity (rules 36–47)
+### Tier 7: contract clause validity (rules 36–39)
 
-36. **Obligation blocks have PascalCase names and brace-delimited bodies.**
-37. **Obligation block bodies contain only typed signatures, invariant: declarations and guidance: blocks.** No entity/value/enum/variant declarations.
-38. **Obligation block names unique within surface** (across both expects and offers).
-39. **Types in obligation block signatures resolve.**
-40. **invariant: has PascalCase name and prose description.**
-41. **Invariant names unique within obligation block and across blocks in same surface.**
-42. **Same-named obligation blocks across composed surfaces error.** (E2)
-43. **Contract declarations have PascalCase names and brace bodies.**
-44. **Contract bodies contain only typed signatures, invariant: and guidance:.**
-45. **Contract names unique at module level.**
-46. **Contract references in expects/offers resolve.** (E3)
-47. **No inline block and contract reference with same name.** (E4)
+36. **`contracts:` entries must use `demands` or `fulfils` followed by a PascalCase contract name.**
+37. **Each contract name appears at most once per surface.**
+38. **Referenced contract names must resolve to a `contract` declaration in scope (local or imported via `use`).**
+39. **Same-named contracts from different modules on the same surface are a structural error.**
 
-### Tier 8: config reference and expression validity (rules 48–52)
+### Tier 8: contract validity (rules 40–45)
 
-48. **Qualified config references resolve.** (E5)
-49. **Type matches for config defaults.** (E6)
-50. **Config reference graph acyclic.**
-51. **Config default expressions use only arithmetic, literals, and config references.** (E7)
-52. **Arithmetic operands type-compatible.** (E8)
+40. **`contract` declarations must have a PascalCase name followed by a brace-delimited block body.**
+41. **Contract bodies may contain only typed signatures and annotations (`@invariant`, `@guidance`).** No entity/value/enum/variant declarations.
+42. **Types in contract signatures must be declared at module level or imported via `use`.**
+43. **Contract names must be unique at module level.**
+44. **`@invariant` annotations within contracts must have a PascalCase name and be followed by at least one indented comment line.**
+45. **`@invariant` names must be unique within their contract.**
 
-### Tier 9: invariant validity (rules 53–59)
+### Tier 9: config reference validity (rules 46–48)
 
-53. **Top-level invariant blocks have PascalCase name and expression body.**
-54. **Entity-level invariant blocks have PascalCase name and expression body.**
-55. **Invariant names unique within scope.**
-56. **Invariant expressions evaluate to boolean.** (E9)
-57. **Invariant expressions contain no side effects.** No `.add()`, `.remove()`, `.created()`, trigger emissions. (E10)
-58. **Invariant expressions do not reference `now`.** (E11)
-59. **Entity collection references in top-level invariants resolve.**
+46. **A qualified config reference in a default expression must resolve to a declared parameter in an imported module's config block.**
+47. **The declared type of a parameter with a qualified default must match the referenced parameter's type.**
+48. **The config reference graph must be acyclic.**
 
-### Tier 10: guidance validity (rules 60–61)
+### Tier 10: config expression validity (rules 49–50)
 
-60. **guidance: appears after all other clauses in a rule.**
-61. **guidance: content is opaque** — validate block boundary only, not content.
+49. **Expression-form config defaults must use only arithmetic operators (`+`, `-`, `*`, `/`), literal values, local config parameter references and qualified config references.**
+50. **Both sides of an arithmetic operator in a config default must resolve to type-compatible operands per the type compatibility table.**
 
-## Error catalogue
+### Tier 11: invariant validity (rules 51–57)
 
-Use these exact error codes and message templates. The code should appear in the diagnostic message.
+51. **Top-level `invariant` blocks must have a PascalCase name followed by a brace-delimited expression body.**
+52. **Entity-level `invariant` blocks must have a PascalCase name followed by a brace-delimited expression body.**
+53. **Invariant names must be unique within their scope** (module-level for top-level invariants, entity declaration for entity-level invariants).
+54. **Invariant expressions must evaluate to a boolean type.**
+55. **Invariant expressions must not contain side-effecting operations** (`.add()`, `.remove()`, `.created()`, trigger emissions).
+56. **Invariant expressions must not reference `now`** (volatile; stored timestamp fields are permitted).
+57. **Entity collection references in top-level invariants must correspond to declared entity types.**
 
-| Code | Condition | Message template |
-|------|-----------|-----------------|
-| E1 | Duplicate obligation block name in same surface | "Obligation block '{name}' is already declared in this surface. Obligation block names must be unique within a surface." |
-| E2 | Same-named obligation block across composed surfaces | "Obligation block '{name}' is declared in both {surface_a} and {surface_b}. Rename one to resolve the conflict." |
-| E3 | Unresolved expects/offers reference | "No contract or obligation block named '{name}' found. Declare it as `contract {name} {{ ... }}` at module level, or define it inline as `expects {name} {{ ... }}` in this surface." |
-| E4 | Both inline and contract reference with same name | "Surface declares both an inline obligation block and a contract reference named '{name}'. Use one or the other." |
-| E5 | Unresolved qualified config reference | "Config parameter '{param}' not found in module '{alias}'. Check that the parameter name matches and the module is imported via `use`." |
-| E6 | Config type mismatch | "Type mismatch: '{param}' is {type_a} in module '{module}', but declared as {type_b} here." |
-| E7 | Invalid config default expression | "Config default expressions support arithmetic operators and config references only. '{expr}' is not a valid config default expression." |
-| E8 | Incompatible arithmetic operands | "Cannot apply '{op}' to {type_a} and {type_b}. {hint}" |
-| E9 | Non-boolean invariant | "Invariant '{name}' must evaluate to a boolean. The expression evaluates to {type}." |
-| E10 | Side effect in invariant | "Invariant expressions must be pure assertions. '{construct}' is a side effect and cannot appear in an invariant." |
-| E11 | `now` in invariant | "Invariants assert state properties, not temporal conditions. Use a rule with a temporal trigger instead." |
+### Tier 12: annotation validity (rules 58–62)
 
-For structural violations without a catalogue code (rules 1–21, 22–35, 60–61), use descriptive messages. Examples:
+58. **`@invariant` requires a PascalCase name; names must be unique within their containing construct (contract or surface).**
+59. **`@guarantee` requires a PascalCase name; names must be unique within their surface.**
+60. **`@guidance` must not have a name; must appear after all structural clauses and after all other annotations in its containing construct.**
+61. **All annotations must be followed by at least one indented comment line; unindented comment lines after an annotation are not part of the annotation body.**
+62. **Within a construct, `@invariant` and `@guarantee` annotations may appear in any order relative to each other but must appear after all structural clauses; `@guidance` must appear last.**
 
-- "Unknown entity 'Foo'. No entity, external entity, value type or import matches this name."
-- "Rule 'Bar' has no ensures clause."
-- "Relationship 'slots' must include a `with` predicate referencing `this`."
-- "Status value 'archived' on User.status is unreachable: no rule transitions to it."
-- "Circular dependency in derived values: x → y → x."
-- "Inline enum fields cannot be compared. Extract a named enum to share values across fields."
+## Error codes
+
+Error codes and message templates will be defined by the validator implementation. The validation rules above (from the language reference) are the specification; the validator owns the diagnostic wording and code numbering.
 
 ## Warnings
 
-The validator should also emit warnings (not errors) for these conditions. Implement warnings after all error rules are working.
+The validator should also emit warnings (not errors) for these conditions. Implement warnings after all error rules are working. This list matches the language reference.
 
-- External entities without a governing specification comment
-- Open questions (flag their existence)
+- External entities without known governing specification
+- Open questions
 - Deferred specifications without location hints
 - Unused entities or fields
 - Rules that can never fire (preconditions always false)
 - Temporal rules without guards against re-firing
-- Surfaces referencing fields not used by any rule
-- Provides with when conditions that can never be true
-- Actor declarations never used in any surface
-- Rules whose ensures creates an entity where sibling rules on the same parent don't guard against that entity's existence
-- Surface provides when-guards weaker than the corresponding rule's requires
-- Rules with the same trigger and overlapping preconditions
-- Parameterised derived values referencing fields outside the entity
-- Actor identified_by expressions that are trivially always-true or always-false
-- Rules where all ensures clauses are conditional and at least one path produces no effects
-- Temporal triggers on optional fields
-- Surfaces using raw entity type in facing when actor declarations exist for that entity
-- transitions_to triggers on values that entities can be created with (consider becomes)
-- Multiple fields on same entity with identical inline enum literals
-- Obligation blocks with no invariants
-- Invariant descriptions resembling formal expressions (suggest expression-bearing syntax)
-- `expects:` or `offers:` with colon and no block name inside a surface
-- Config reference chains deeper than two levels
+- Surfaces that reference fields not used by any rule (may indicate dead code)
+- Items in `provides` with `when` conditions that can never be true
+- Actor declarations that are never used in any surface
+- Rules whose ensures creates an entity for a parent, where sibling rules on the same parent don't guard against that entity's existence
+- Surface `provides` when-guards weaker than the corresponding rule's requires
+- Rules with the same trigger and overlapping preconditions (spec ambiguity)
+- Parameterised derived values that reference fields outside the entity (scoping violation)
+- Actor `identified_by` expressions that are trivially always-true or always-false
+- Rules where all ensures clauses are conditional and at least one execution path produces no effects
+- Temporal triggers on optional fields (trigger will not fire when the field is null)
+- Surfaces that use a raw entity type in `facing` when actor declarations exist for that entity type (may indicate a missing access restriction)
+- `transitions_to` triggers on values that entities can be created with (the rule will not fire on creation; consider `becomes` if the rule should also fire on creation)
+- Multiple fields on the same entity with identical inline enum literals (suggests extraction to a named enum; will error if the fields are later compared)
+- `@invariant` prose that resembles a formal expression (informational: promote to expression-bearing `invariant Name { expression }` when the assertion is machine-readable)
+- Config reference chains deeper than two levels of indirection
 - Diamond dependency conflicts in config overrides
 
 ## Testing
@@ -226,7 +208,7 @@ Follow the testing principles in `AGENTS.md`: meaningful, behaviour-focused test
 - Write a helper that parses an Allium snippet and runs validation, returning diagnostics.
 - For each validation rule, write at least one test for the error case and one for the valid case.
 - Group tests by tier (structural, state machine, expression, etc.).
-- Test the error catalogue codes: verify E1–E11 messages appear with the correct code.
+- Test that diagnostics reference the correct rule violations with clear, actionable messages.
 
 **Integration tests** in `crates/allium-parser/tests/`:
 - Add fixture `.allium` files that exercise multiple validation rules together.
@@ -241,8 +223,9 @@ Follow the testing principles in `AGENTS.md`: meaningful, behaviour-focused test
 - For cross-entity checks (relationship backreferences, variant-base consistency, trigger signature matching), build indices during the collection pass.
 - Start with tier 1. Get entity/field resolution working and tested before moving to state machine or expression checks.
 - For type inference (rules 12, 49, 52, 56), start with a simple approach: known primitives (String, Integer, Boolean, Duration, Timestamp), entity types, value types, named enums, inline enums, optionals. Full type inference can be refined later.
-- The `BlockItemKind::Clause` variant is where keywords like `when`, `requires`, `ensures`, `facing`, `context`, `exposes`, `provides`, `related`, `timeout`, `guarantee`, `guidance` appear. Match on `keyword` string.
-- `BlockItemKind::Expects` and `BlockItemKind::Offers` have an optional `items` field: `Some(items)` is an inline obligation block, `None` is a contract reference.
+- The `BlockItemKind::Clause` variant is where keywords like `when`, `requires`, `ensures`, `facing`, `context`, `exposes`, `provides`, `related`, `timeout`, `contracts` appear. Match on `keyword` string.
+- `BlockItemKind::ContractsClause { entries }` holds contract bindings with `demands`/`fulfils` direction markers.
+- `BlockItemKind::Annotation(Annotation)` holds `@invariant`, `@guidance` and `@guarantee` prose annotations with comment bodies.
 - After completing the validator, update `docs/project/specs/` to reflect the new capability.
 
 ## Scope boundaries
