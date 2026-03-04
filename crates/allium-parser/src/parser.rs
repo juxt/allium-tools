@@ -717,23 +717,9 @@ impl<'s> Parser<'s> {
             });
         }
 
-        // Migration diagnostics: `expects` and `offers` are now plain idents
+        // Migration diagnostics: old colon-form prose constructs
         if self.peek_kind() == TokenKind::Ident {
             let word = self.text(self.peek().span);
-            if word == "expects" || word == "offers" {
-                let kw = word.to_string();
-                let direction = if kw == "expects" { "demands" } else { "fulfils" };
-                self.error(
-                    self.peek().span,
-                    format!(
-                        "The `{kw}` keyword was removed. Declare the contract at module level \
-                         and reference it via `contracts:\n    {direction} ContractName`."
-                    ),
-                );
-                self.advance();
-                return None;
-            }
-            // Migration diagnostics: old colon-form prose constructs
             if (word == "guidance" || word == "guarantee")
                 && self.peek_at(1).kind == TokenKind::Colon
             {
@@ -4524,28 +4510,6 @@ oauth/config {
         assert!(
             r.diagnostics.iter().any(|d| d.message.contains("Unknown direction")),
             "expected unknown direction error, got: {:?}",
-            r.diagnostics
-        );
-    }
-
-    #[test]
-    fn expects_keyword_migration_diagnostic() {
-        let src = "-- allium: 1\nsurface S {\n    expects Auditable\n}";
-        let r = parse(src);
-        assert!(
-            r.diagnostics.iter().any(|d| d.message.contains("`expects` keyword was removed")),
-            "expected migration diagnostic, got: {:?}",
-            r.diagnostics
-        );
-    }
-
-    #[test]
-    fn offers_keyword_migration_diagnostic() {
-        let src = "-- allium: 1\nsurface S {\n    offers Versioned\n}";
-        let r = parse(src);
-        assert!(
-            r.diagnostics.iter().any(|d| d.message.contains("`offers` keyword was removed")),
-            "expected migration diagnostic, got: {:?}",
             r.diagnostics
         );
     }
