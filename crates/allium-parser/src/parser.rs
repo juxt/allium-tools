@@ -667,6 +667,7 @@ impl<'s> Parser<'s> {
         while !self.at(TokenKind::RBrace) && !self.at_eof() {
             if let Some(item) = self.parse_block_item() {
                 items.push(item);
+                self.eat(TokenKind::Comma);
             } else {
                 // Recovery: skip one token
                 self.advance();
@@ -2233,7 +2234,33 @@ impl<'s> Parser<'s> {
     // -- parenthesised expression ---------------------------------------
 
     fn parse_paren_expr(&mut self) -> Option<Expr> {
-        self.advance(); // (
+        let start = self.advance().span; // (
+
+        // Detect `(name: expr, ...)` — typed signature parameters.
+        if self.peek_kind().is_word() && self.peek_at(1).kind == TokenKind::Colon {
+            let mut bindings = Vec::new();
+            while !self.at(TokenKind::RParen) && !self.at_eof() {
+                let name = self.parse_ident_in("parameter name")?;
+                self.expect(TokenKind::Colon)?;
+                let value = self.parse_expr(0)?;
+                bindings.push(Expr::Binding {
+                    span: name.span.merge(value.span()),
+                    name,
+                    value: Box::new(value),
+                });
+                self.eat(TokenKind::Comma);
+            }
+            self.expect(TokenKind::RParen)?;
+            if bindings.len() == 1 {
+                return Some(bindings.into_iter().next().unwrap());
+            }
+            let span = start.merge(bindings.last().unwrap().span());
+            return Some(Expr::Block {
+                span,
+                items: bindings,
+            });
+        }
+
         let expr = self.parse_expr(0)?;
         self.expect(TokenKind::RParen)?;
         Some(expr)
@@ -5038,5 +5065,48 @@ entity E {
         assert!(r.diagnostics.iter().any(|d|
             d.severity == Severity::Error && d.message.contains("unsupported")
         ));
+    }
+
+    #[test]
+    fn contract_typed_signature() {
+        let src = r#"contract Codec {
+    serialize: (value: Any) -> ByteArray
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.kind, BlockKind::Contract);
+        let BlockItemKind::Assignment { name, value } = &b.items[0].kind else { panic!() };
+        assert_eq!(name.name, "serialize");
+        assert!(matches!(value, Expr::ProjectionMap { .. }));
+    }
+
+    #[test]
+    fn contract_multi_param_signature() {
+        let src = r#"contract Codec {
+    serialize: (value: Any, format: String) -> ByteArray
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn comma_separated_entity_fields() {
+        let src = "entity Point { x: Decimal, y: Decimal }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.items.len(), 2);
+        assert!(matches!(&b.items[0].kind, BlockItemKind::Assignment { name, .. } if name.name == "x"));
+        assert!(matches!(&b.items[1].kind, BlockItemKind::Assignment { name, .. } if name.name == "y"));
+    }
+
+    #[test]
+    fn comma_separated_value_fields() {
+        let src = "value Coord { x: Integer, y: Integer }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.items.len(), 2);
     }
 }
