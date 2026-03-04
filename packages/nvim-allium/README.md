@@ -2,6 +2,8 @@
 
 Neovim integration for the Allium language, providing LSP and Tree-sitter support.
 
+**Compatibility:** Allium Tools core 2.x
+
 ## Installation
 
 ### Using lazy.nvim

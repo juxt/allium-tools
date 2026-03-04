@@ -1,6 +1,6 @@
 # Versioning policy
 
-The Allium language is at version 1. Tooling versions should align with the language where appropriate.
+The Allium language is at version 2. Tooling versions should align with the language where appropriate.
 
 ## Version tiers
 
@@ -40,18 +40,30 @@ Editor plugins should document which core version they're compatible with in the
 Use `scripts/version-bump.sh` to update core-tier versions:
 
 ```bash
-# Set all core-tier packages to 1.0.0
-./scripts/version-bump.sh 1.0.0
+# Set all core-tier packages to 2.0.0
+./scripts/version-bump.sh 2.0.0
 
 # Dry run — show what would change without writing
-./scripts/version-bump.sh --dry-run 1.0.0
+./scripts/version-bump.sh --dry-run 2.0.0
 ```
 
 Editor-tier packages are bumped manually as needed.
+
+## Major language version release checklist
+
+When the Allium language version changes (e.g. v1 → v2), the following steps are needed beyond a normal version bump.
+
+1. **Core tier.** Run `scripts/version-bump.sh <new-version>` to update all core-tier manifests.
+2. **This document.** Update the language version statement at the top of this file.
+3. **Editor plugins.** Check whether each editor plugin has changes on the release branch (`git diff main --stat -- extensions/ packages/allium-mode/ packages/nvim-allium/`). If a plugin has changed, bump its version:
+   - allium-vscode: `extensions/allium/package.json`
+   - allium-mode: `packages/allium-mode/allium-mode.el` and `allium-mode-pkg.el`
+   - nvim-allium: no declared version (skip)
+4. **Compatibility notes.** Update the "Compatibility" line in each editor plugin README to reference the new core version.
 
 ## Rules
 
 1. A grammar or language-level change bumps the core-tier minor (or major) version.
 2. A bugfix in a single core package bumps only that package's patch version.
-3. Editor plugins declare their own versions and note compatible core versions.
+3. Editor plugins declare their own versions and note compatible core versions in their README.
 4. The two canonical version sources (Cargo workspace, root package.json) must always share the same major.minor.
