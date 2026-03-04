@@ -34,7 +34,7 @@ rule missing {
         value: (identifier))
       (clause
         keyword: (clause_keyword
-          (MISSING "when"))
+          (MISSING "invariant"))
         value: (boolean_literal)))))
 
 ==================

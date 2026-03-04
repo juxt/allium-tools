@@ -172,3 +172,67 @@ variant Color: red | blue | green
         left: (identifier)
         right: (identifier))
       right: (identifier))))
+
+==================
+Contract Declaration
+==================
+contract PaymentTerms {
+  amount: Decimal,
+  currency: String
+}
+
+---
+
+(source_file
+  (contract_declaration
+    name: (identifier)
+    body: (block_body
+      (field_assignment
+        key: (identifier)
+        value: (identifier))
+      (field_assignment
+        key: (identifier)
+        value: (identifier)))))
+
+==================
+Invariant Declaration
+==================
+invariant PositiveBalance {
+  account.balance > 0
+}
+
+---
+
+(source_file
+  (invariant_declaration
+    name: (identifier)
+    body: (comparison_expression
+      left: (member_expression
+        object: (identifier)
+        property: (identifier))
+      right: (number_literal))))
+
+==================
+Comma-separated Entity Fields
+==================
+entity Item {
+  name: String,
+  price: Decimal,
+  active: Boolean
+}
+
+---
+
+(source_file
+  (entity_declaration
+    name: (identifier)
+    body: (block_body
+      (field_assignment
+        key: (identifier)
+        value: (identifier))
+      (field_assignment
+        key: (identifier)
+        value: (identifier))
+      (field_assignment
+        key: (identifier)
+        value: (identifier)))))

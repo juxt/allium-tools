@@ -10,6 +10,7 @@
     { "include": "#constants" },
     { "include": "#numbers" },
     { "include": "#events" },
+    { "include": "#annotations" },
     { "include": "#operators" }
   ],
   "repository": {
@@ -40,11 +41,11 @@
       "patterns": [
         {
           "name": "keyword.declaration.allium",
-          "match": "\\b(use|given|external|entity|value|variant|enum|config|default|rule|surface|actor|deferred|open\\s+question|module)\\b"
+          "match": "\\b(use|given|external|entity|value|variant|enum|config|default|rule|surface|actor|deferred|open\\s+question|module|contract|invariant)\\b"
         },
         {
           "name": "keyword.control.allium",
-          "match": "\\b(when|requires|ensures|let|facing|with|if|else|in|as|identified_by|exposes|provides|related|guidance|invariant|becomes|not|exists|and|or|where|within|guarantee|timeout|transitions_to|trigger|tags)\\b"
+          "match": "\\b(when|requires|ensures|let|facing|with|if|else|in|as|identified_by|exposes|provides|related|guidance|becomes|not|exists|and|or|where|within|guarantee|timeout|transitions_to|trigger|tags|contracts|demands|fulfils|implies)\\b"
         }
       ]
     },
@@ -88,11 +89,17 @@
         }
       ]
     },
+    "annotations": {
+      "patterns": [{
+        "name": "keyword.other.annotation.allium",
+        "match": "@(invariant|guidance|guarantee)\\b"
+      }]
+    },
     "operators": {
       "patterns": [
         {
           "name": "keyword.operator.allium",
-          "match": "(<=|>=|!=|=|<|>|\\+|-|\\*|\\/|\\?\\?|\\?\\.|=>)"
+          "match": "(<=|>=|!=|=|<|>|\\+|\\->|-|\\*|\\/|\\?\\?|\\?\\.|=>)"
         }
       ]
     }

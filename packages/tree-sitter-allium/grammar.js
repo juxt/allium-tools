@@ -11,19 +11,20 @@
 
 const PREC = {
   COMMA: 1,
-  LAMBDA: 2,
-  OR: 3,
-  NULLISH_COALESCE: 4,
-  AND: 5,
-  NOT: 6,
-  COMPARE: 7,
-  ADD: 8,
-  MULTIPLY: 9,
-  INFIX: 10,
-  PIPE: 11,
-  CALL: 12,
-  MEMBER: 13,
-  PRIMARY: 14,
+  IMPLIES: 2,
+  LAMBDA: 3,
+  OR: 4,
+  NULLISH_COALESCE: 5,
+  AND: 6,
+  NOT: 7,
+  COMPARE: 8,
+  ADD: 9,
+  MULTIPLY: 10,
+  INFIX: 11,
+  PIPE: 12,
+  CALL: 13,
+  MEMBER: 14,
+  PRIMARY: 15,
 };
 
 module.exports = grammar({
@@ -36,6 +37,7 @@ module.exports = grammar({
   conflicts: ($) => [
     [$.default_declaration],
     [$._expression, $.infix_predicate_expression],
+    [$.annotation],
   ],
 
   rules: {
@@ -107,6 +109,8 @@ module.exports = grammar({
         $.default_declaration,
         $.variant_declaration,
         $.deferred_declaration,
+        $.contract_declaration,
+        $.invariant_declaration,
       ),
 
     use_declaration: ($) =>
@@ -169,14 +173,22 @@ module.exports = grammar({
     deferred_declaration: ($) =>
       seq("deferred", field("path", $._expression)),
 
+    // "contract Name { ... }"
+    contract_declaration: ($) =>
+      seq("contract", field("name", $.identifier), field("body", $.block_body)),
+
+    // "invariant Name { expr }" — expression-bearing invariant
+    invariant_declaration: ($) =>
+      seq("invariant", field("name", $.identifier), "{", field("body", $._expression), "}"),
+
     // -----------------------------------------------------------------------
     // Block body
     // -----------------------------------------------------------------------
 
-    block_body: ($) => seq("{", repeat($._block_item), "}"),
+    block_body: ($) => seq("{", repeat(seq($._block_item, optional(","))), "}"),
 
     _block_item: ($) =>
-      choice($.clause, $.field_assignment, $.let_binding, $.open_question),
+      choice($.clause, $.field_assignment, $.let_binding, $.open_question, $.annotation),
 
     // Clause: reserved keyword followed by colon and an expression
     clause: ($) =>
@@ -207,6 +219,7 @@ module.exports = grammar({
         "guarantee",
         "timeout",
         "within",
+        "contracts",
       ),
 
     // Field assignment: plain identifier followed by colon and an expression
@@ -230,6 +243,12 @@ module.exports = grammar({
     open_question: ($) =>
       seq("open", "question", field("text", $.string_literal)),
 
+    // Annotation: @invariant Name, @guidance, @guarantee Name
+    annotation: ($) =>
+      seq("@", field("kind", $.annotation_keyword), optional(field("name", $.identifier))),
+
+    annotation_keyword: (_) => choice("invariant", "guidance", "guarantee"),
+
     // -----------------------------------------------------------------------
     // Expressions
     // -----------------------------------------------------------------------
@@ -237,6 +256,8 @@ module.exports = grammar({
     _expression: ($) =>
       choice(
         $.lambda_expression,
+        $.thin_arrow_expression,
+        $.implies_expression,
         $.or_expression,
         $.null_coalescing_expression,
         $.and_expression,
@@ -270,7 +291,29 @@ module.exports = grammar({
         ),
       ),
 
-    // Boolean OR: lowest precedence
+    // Implies: right-associative, below or
+    implies_expression: ($) =>
+      prec.right(
+        PREC.IMPLIES,
+        seq(
+          field("left", $._expression),
+          "implies",
+          field("right", $._expression),
+        ),
+      ),
+
+    // Thin arrow: typed signatures "(value: Any) -> ByteArray"
+    thin_arrow_expression: ($) =>
+      prec.left(
+        PREC.LAMBDA,
+        seq(
+          field("left", $._expression),
+          "->",
+          field("right", $._expression),
+        ),
+      ),
+
+    // Boolean OR
     or_expression: ($) =>
       prec.left(
         PREC.OR,

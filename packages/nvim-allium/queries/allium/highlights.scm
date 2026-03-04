@@ -18,9 +18,15 @@
   "not"
   "and"
   "or"
+  "contract"
+  "invariant"
+  "implies"
+  "deferred"
+  "given"
 ] @keyword
 
 (clause_keyword) @keyword
+(annotation_keyword) @keyword
 
 ; Types (Declarations)
 (rule_declaration name: (identifier) @type)
@@ -32,6 +38,8 @@
 (actor_declaration name: (identifier) @type)
 (default_declaration type: (identifier) @type)
 (variant_declaration name: (identifier) @type)
+(contract_declaration name: (identifier) @type)
+(invariant_declaration name: (identifier) @type)
 
 ; Variables / Fields
 (field_assignment key: (identifier) @variable)
@@ -68,6 +76,7 @@
   "<="
   ">="
   "=>"
+  "->"
   "+"
   "-"
   "*"
@@ -87,6 +96,8 @@
   ","
   "."
 ] @punctuation.delimiter
+
+"@" @punctuation.special
 
 ; Comments
 (comment) @comment

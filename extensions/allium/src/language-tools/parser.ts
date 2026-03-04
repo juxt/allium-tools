@@ -1,5 +1,5 @@
 export interface ParsedBlock {
-  kind: "rule" | "given" | "config" | "surface" | "actor" | "enum" | "use";
+  kind: "rule" | "given" | "config" | "surface" | "actor" | "enum" | "use" | "contract" | "invariant" | "entity" | "value";
   name: string;
   nameStartOffset: number;
   startOffset: number;
@@ -44,6 +44,34 @@ export function parseAlliumBlocks(text: string): ParsedBlock[] {
       text,
       /^\s*actor\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm,
       "actor",
+    ),
+  );
+  blocks.push(
+    ...findNamedBraceBlocks(
+      text,
+      /^\s*contract\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm,
+      "contract",
+    ),
+  );
+  blocks.push(
+    ...findNamedBraceBlocks(
+      text,
+      /^\s*invariant\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm,
+      "invariant",
+    ),
+  );
+  blocks.push(
+    ...findNamedBraceBlocks(
+      text,
+      /^\s*entity\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm,
+      "entity",
+    ),
+  );
+  blocks.push(
+    ...findNamedBraceBlocks(
+      text,
+      /^\s*value\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm,
+      "value",
     ),
   );
   blocks.push(...findUseStatements(text));
