@@ -44,7 +44,10 @@
     "*.{json,jsonc}": ["biome format --write"]
   },
   "overrides": {
-    "minimatch": ">=5.1.8"
+    "minimatch": ">=5.1.8",
+    "@vscode/vsce": {
+      "minimatch": "^3.0.3"
+    }
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
