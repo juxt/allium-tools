@@ -4,6 +4,8 @@
 //! bodies use direct recursive descent. Multi-line clause values are detected
 //! by comparing the line/column of the next token against the clause keyword.
 
+use serde::Serialize;
+
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::lexer::{lex, SourceMap, Token, TokenKind};
@@ -13,7 +15,7 @@ use crate::Span;
 // Public API
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ParseResult {
     pub module: Module,
     pub diagnostics: Vec<Diagnostic>,
@@ -224,8 +226,7 @@ fn is_clause_keyword(text: &str) -> bool {
             | "provides"
             | "related"
             | "timeout"
-            | "guarantee"
-            | "guidance"
+            | "contracts"
             | "identified_by"
             | "within"
     )
@@ -247,6 +248,7 @@ fn token_is_clause_keyword(kind: TokenKind) -> bool {
     matches!(
         kind,
         TokenKind::When | TokenKind::Requires | TokenKind::Ensures | TokenKind::Within
+            | TokenKind::Invariant
     )
 }
 
@@ -268,11 +270,11 @@ impl<'s> Parser<'s> {
                     "missing version marker; expected '-- allium: 1' as the first line",
                 ));
             }
-            Some(1) => {}
+            Some(1) | Some(2) => {}
             Some(v) => {
                 self.diagnostics.push(Diagnostic::error(
                     start,
-                    format!("unsupported allium version {v}; this parser supports version 1"),
+                    format!("unsupported allium version {v}; this parser supports versions 1 and 2"),
                 ));
             }
         }
@@ -338,6 +340,8 @@ impl<'s> Parser<'s> {
             TokenKind::Config => self.parse_anonymous_block(BlockKind::Config).map(Decl::Block),
             TokenKind::Surface => self.parse_block(BlockKind::Surface).map(Decl::Block),
             TokenKind::Actor => self.parse_block(BlockKind::Actor).map(Decl::Block),
+            TokenKind::Contract => self.parse_contract_decl().map(Decl::Block),
+            TokenKind::Invariant => self.parse_invariant_decl().map(Decl::Invariant),
             TokenKind::Default => self.parse_default_decl().map(Decl::Default),
             TokenKind::Variant => self.parse_variant_decl().map(Decl::Variant),
             TokenKind::Deferred => self.parse_deferred_decl().map(Decl::Deferred),
@@ -354,7 +358,7 @@ impl<'s> Parser<'s> {
                     self.peek().span,
                     format!(
                         "expected declaration (entity, rule, enum, value, config, surface, actor, \
-                         given, default, variant, deferred, use, open question), found {}",
+                         given, default, variant, deferred, use, open question, contract, invariant), found {}",
                         self.peek_kind(),
                     ),
                 );
@@ -558,8 +562,99 @@ impl<'s> Parser<'s> {
         })
     }
 
-    // -- guidance declaration ----------------------------------------------
+    // -- contract declaration -------------------------------------------
 
+    fn parse_contract_decl(&mut self) -> Option<BlockDecl> {
+        let start = self.advance().span; // consume `contract`
+        let name = self.parse_ident_in("contract name")?;
+
+        // Reject lowercase contract names
+        if name.name.chars().next().is_some_and(|c| c.is_lowercase()) {
+            self.diagnostics.push(Diagnostic::error(
+                name.span,
+                "contract name must start with an uppercase letter",
+            ));
+        }
+
+        // Reject colon-delimited body
+        if self.at(TokenKind::Colon) {
+            self.error(
+                self.peek().span,
+                "contract body must use braces { }, not a colon",
+            );
+            return None;
+        }
+
+        self.expect(TokenKind::LBrace)?;
+        let items = self.parse_block_items();
+        let end = self.expect(TokenKind::RBrace)?.span;
+        Some(BlockDecl {
+            span: start.merge(end),
+            kind: BlockKind::Contract,
+            name: Some(name),
+            items,
+        })
+    }
+
+    // -- invariant declaration ------------------------------------------
+
+    fn parse_invariant_decl(&mut self) -> Option<InvariantDecl> {
+        let start = self.advance().span; // consume `invariant`
+        let name = self.parse_ident_in("invariant name")?;
+
+        // Reject lowercase invariant names
+        if name.name.chars().next().is_some_and(|c| c.is_lowercase()) {
+            self.diagnostics.push(Diagnostic::error(
+                name.span,
+                "invariant name must start with an uppercase letter",
+            ));
+        }
+
+        self.expect(TokenKind::LBrace)?;
+        let body = self.parse_invariant_body()?;
+        let end = self.expect(TokenKind::RBrace)?.span;
+        Some(InvariantDecl {
+            span: start.merge(end),
+            name,
+            body,
+        })
+    }
+
+    /// Parse the body of an invariant block — a sequence of expressions and
+    /// let bindings, similar to a clause value block.
+    fn parse_invariant_body(&mut self) -> Option<Expr> {
+        let start = self.peek().span;
+        let mut items = Vec::new();
+
+        while !self.at(TokenKind::RBrace) && !self.at_eof() {
+            if self.at(TokenKind::Let) {
+                let let_start = self.advance().span;
+                let name = self.parse_ident_in("binding name")?;
+                self.expect(TokenKind::Eq)?;
+                let value = self.parse_expr(0)?;
+                items.push(Expr::LetExpr {
+                    span: let_start.merge(value.span()),
+                    name,
+                    value: Box::new(value),
+                });
+            } else if let Some(expr) = self.parse_expr(0) {
+                items.push(expr);
+            } else {
+                self.advance();
+                break;
+            }
+        }
+
+        if items.len() == 1 {
+            Some(items.pop().unwrap())
+        } else {
+            let end = items.last().map(|e| e.span()).unwrap_or(start);
+            Some(Expr::Block {
+                span: start.merge(end),
+                items,
+            })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -572,6 +667,7 @@ impl<'s> Parser<'s> {
         while !self.at(TokenKind::RBrace) && !self.at_eof() {
             if let Some(item) = self.parse_block_item() {
                 items.push(item);
+                self.eat(TokenKind::Comma);
             } else {
                 // Recovery: skip one token
                 self.advance();
@@ -598,6 +694,18 @@ impl<'s> Parser<'s> {
             return self.parse_if_block_item(start);
         }
 
+        // `@invariant`, `@guidance`, `@guarantee` — prose annotations
+        if self.at(TokenKind::At) {
+            return self.parse_annotation(start);
+        }
+
+        // `invariant Name { expr }` — expression-bearing invariant inside a block
+        if self.at(TokenKind::Invariant) && self.peek_at(1).kind.is_word()
+            && self.peek_at(2).kind != TokenKind::Colon
+        {
+            return self.parse_invariant_block_item(start);
+        }
+
         // `open question "text"` (inside a block)
         if self.at(TokenKind::Open) && self.peek_at(1).kind == TokenKind::Question {
             self.advance(); // open
@@ -609,9 +717,42 @@ impl<'s> Parser<'s> {
             });
         }
 
+        // Migration diagnostics: old colon-form prose constructs
+        if self.peek_kind() == TokenKind::Ident {
+            let word = self.text(self.peek().span);
+            if (word == "guidance" || word == "guarantee")
+                && self.peek_at(1).kind == TokenKind::Colon
+            {
+                let kw = word.to_string();
+                self.error(
+                    self.peek().span,
+                    format!(
+                        "`{kw}:` syntax was replaced by `@{kw}`. Use `@{kw}` followed by indented comment lines."
+                    ),
+                );
+                // Fall through to normal clause parsing so we don't lose the rest
+            }
+        }
+
+        // Migration diagnostic: old `invariant:` colon form
+        if self.at(TokenKind::Invariant) && self.peek_at(1).kind == TokenKind::Colon {
+            self.error(
+                self.peek().span,
+                "`invariant:` syntax was replaced by `@invariant`. Use `@invariant Name` followed by indented comment lines.",
+            );
+            // Fall through to normal clause parsing
+        }
+
         // Everything else: `name: value` or `keyword: value` or
         // `name(params): value`
         if self.peek_kind().is_word() {
+            // `contracts:` clause — dispatch before generic clause/assignment
+            if self.text(self.peek().span) == "contracts"
+                && self.peek_at(1).kind == TokenKind::Colon
+            {
+                return self.parse_contracts_clause(start);
+            }
+
             // `facing name: Type` / `context name: Type [where ...]` — binding
             // clause keywords that don't use `:` after the keyword itself.
             if is_binding_clause_keyword(self.text(self.peek().span))
@@ -822,6 +963,227 @@ impl<'s> Parser<'s> {
             }
             items
         }
+    }
+
+    /// Parse `contracts:` clause with indented `demands`/`fulfils` entries.
+    fn parse_contracts_clause(&mut self, start: Span) -> Option<BlockItem> {
+        self.advance(); // consume `contracts`
+        self.advance(); // consume `:`
+
+        let contracts_col = self.col_of(start);
+        let mut entries = Vec::new();
+
+        while !self.at_eof()
+            && !self.at(TokenKind::RBrace)
+            && self.col_of(self.peek().span) > contracts_col
+        {
+            if !self.peek_kind().is_word() {
+                break;
+            }
+
+            let entry_start = self.peek().span;
+            let direction_tok = self.advance();
+            let direction_text = self.text(direction_tok.span);
+
+            let direction = match direction_text {
+                "demands" => ContractDirection::Demands,
+                "fulfils" => ContractDirection::Fulfils,
+                other => {
+                    self.error(
+                        direction_tok.span,
+                        format!(
+                            "Unknown direction '{other}' in contracts clause. Use `demands` or `fulfils`."
+                        ),
+                    );
+                    // Skip the rest of this entry
+                    if self.peek_kind().is_word() {
+                        self.advance();
+                    }
+                    continue;
+                }
+            };
+
+            let name = self.parse_ident_in("contract name")?;
+
+            // Reject inline braced blocks
+            if self.at(TokenKind::LBrace) {
+                self.error(
+                    self.peek().span,
+                    "Inline contract blocks are not allowed in `contracts:`. Declare the contract at module level.",
+                );
+                return None;
+            }
+
+            let end = name.span;
+            entries.push(ContractBinding {
+                direction,
+                name,
+                span: entry_start.merge(end),
+            });
+        }
+
+        if entries.is_empty() {
+            self.error(
+                start,
+                "Empty `contracts:` clause. Add at least one `demands` or `fulfils` entry.",
+            );
+            return None;
+        }
+
+        let end = entries.last().unwrap().span;
+        Some(BlockItem {
+            span: start.merge(end),
+            kind: BlockItemKind::ContractsClause { entries },
+        })
+    }
+
+    /// Parse `@invariant Name`, `@guidance`, or `@guarantee Name` with comment body.
+    fn parse_annotation(&mut self, start: Span) -> Option<BlockItem> {
+        let at_tok = self.advance(); // consume `@`
+        let at_col = self.col_of(at_tok.span);
+
+        if !self.peek_kind().is_word() {
+            self.error(
+                self.peek().span,
+                format!("expected annotation keyword after `@`, found {}", self.peek_kind()),
+            );
+            return None;
+        }
+
+        let keyword_tok = self.advance();
+        let keyword_text = self.text(keyword_tok.span);
+
+        let kind = match keyword_text {
+            "invariant" => AnnotationKind::Invariant,
+            "guidance" => AnnotationKind::Guidance,
+            "guarantee" => AnnotationKind::Guarantee,
+            other => {
+                self.error(
+                    keyword_tok.span,
+                    format!(
+                        "Unknown annotation `@{other}`. Use `@invariant`, `@guidance` or `@guarantee`."
+                    ),
+                );
+                return None;
+            }
+        };
+
+        // Parse optional name
+        let name = match &kind {
+            AnnotationKind::Invariant | AnnotationKind::Guarantee => {
+                let n = self.parse_ident_in("annotation name")?;
+                if n.name.chars().next().is_some_and(|c| c.is_lowercase()) {
+                    self.diagnostics.push(Diagnostic::error(
+                        n.span,
+                        "Annotation names must be PascalCase.",
+                    ));
+                }
+                Some(n)
+            }
+            AnnotationKind::Guidance => {
+                // Reject name after @guidance
+                if self.peek_kind().is_word()
+                    && self.line_of(self.peek().span) == self.line_of(keyword_tok.span)
+                {
+                    self.error(
+                        self.peek().span,
+                        "`@guidance` does not take a name. Remove the name after `@guidance`.",
+                    );
+                    return None;
+                }
+                None
+            }
+        };
+
+        // Parse comment body from source lines.
+        // The last consumed token tells us which line the annotation header is on.
+        let last_header_span = name.as_ref().map(|n| n.span).unwrap_or(keyword_tok.span);
+        let header_line = self.line_of(last_header_span);
+        let body = self.parse_annotation_body(at_col, header_line);
+
+        if body.is_empty() {
+            self.error(
+                last_header_span,
+                "Annotations must be followed by at least one indented comment line.",
+            );
+            return None;
+        }
+
+        Some(BlockItem {
+            span: start.merge(last_header_span),
+            kind: BlockItemKind::Annotation(Annotation {
+                kind,
+                name,
+                body,
+                span: start.merge(last_header_span),
+            }),
+        })
+    }
+
+    /// Scan source lines for indented `-- ` comment lines forming an annotation body.
+    /// Starts from the line after `header_line` and collects lines indented deeper
+    /// than `at_col`.
+    fn parse_annotation_body(&self, at_col: u32, header_line: u32) -> Vec<String> {
+        let mut body = Vec::new();
+        let lines: Vec<&str> = self.source.lines().collect();
+        let mut line_idx = (header_line + 1) as usize;
+
+        while line_idx < lines.len() {
+            let line = lines[line_idx];
+            let trimmed = line.trim_start();
+
+            if trimmed.is_empty() {
+                if !body.is_empty() {
+                    body.push(String::new());
+                }
+                line_idx += 1;
+                continue;
+            }
+
+            let indent = (line.len() - trimmed.len()) as u32;
+            if indent <= at_col {
+                break;
+            }
+
+            if let Some(comment) = trimmed.strip_prefix("-- ") {
+                body.push(comment.to_string());
+            } else if trimmed == "--" {
+                body.push(String::new());
+            } else {
+                break;
+            }
+
+            line_idx += 1;
+        }
+
+        // Trim trailing blank lines
+        while body.last().is_some_and(|l| l.is_empty()) {
+            body.pop();
+        }
+
+        body
+    }
+
+    /// Parse `invariant Name { expr }` inside a block (entity-level).
+    fn parse_invariant_block_item(&mut self, start: Span) -> Option<BlockItem> {
+        self.advance(); // consume `invariant`
+        let name = self.parse_ident_in("invariant name")?;
+
+        // Reject lowercase invariant names
+        if name.name.chars().next().is_some_and(|c| c.is_lowercase()) {
+            self.diagnostics.push(Diagnostic::error(
+                name.span,
+                "invariant name must start with an uppercase letter",
+            ));
+        }
+
+        self.expect(TokenKind::LBrace)?;
+        let body = self.parse_invariant_body()?;
+        let end = self.expect(TokenKind::RBrace)?.span;
+        Some(BlockItem {
+            span: start.merge(end),
+            kind: BlockItemKind::InvariantBlock { name, body },
+        })
     }
 
     fn parse_assign_or_clause_item(&mut self, start: Span) -> Option<BlockItem> {
@@ -1079,6 +1441,7 @@ const BP_LAMBDA: u8 = 4;
 const BP_WHEN_GUARD: u8 = 5;
 const BP_PROJECTION: u8 = 6;
 const BP_WITH_WHERE: u8 = 7;
+const BP_IMPLIES: u8 = 8;
 const BP_OR: u8 = 10;
 const BP_AND: u8 = 20;
 const BP_COMPARE: u8 = 30;
@@ -1261,6 +1624,7 @@ impl<'s> Parser<'s> {
             // `when` as an inline guard on provides/related items
             TokenKind::When => Some((BP_WHEN_GUARD, BP_WHEN_GUARD + 1)),
             TokenKind::Pipe => Some((BP_PIPE, BP_PIPE + 1)),
+            TokenKind::Implies => Some((BP_IMPLIES, BP_IMPLIES - 1)), // right-assoc
             TokenKind::Or => Some((BP_OR, BP_OR + 1)),
             TokenKind::And => Some((BP_AND, BP_AND + 1)),
             TokenKind::Eq | TokenKind::BangEq => {
@@ -1313,6 +1677,15 @@ impl<'s> Parser<'s> {
                 Some(Expr::Pipe {
                     span: lhs.span().merge(rhs.span()),
                     left: Box::new(lhs),
+                    right: Box::new(rhs),
+                })
+            }
+            TokenKind::Implies => {
+                let rhs = self.parse_expr(r_bp)?;
+                Some(Expr::LogicalOp {
+                    span: lhs.span().merge(rhs.span()),
+                    left: Box::new(lhs),
+                    op: LogicalOp::Implies,
                     right: Box::new(rhs),
                 })
             }
@@ -1847,7 +2220,33 @@ impl<'s> Parser<'s> {
     // -- parenthesised expression ---------------------------------------
 
     fn parse_paren_expr(&mut self) -> Option<Expr> {
-        self.advance(); // (
+        let start = self.advance().span; // (
+
+        // Detect `(name: expr, ...)` — typed signature parameters.
+        if self.peek_kind().is_word() && self.peek_at(1).kind == TokenKind::Colon {
+            let mut bindings = Vec::new();
+            while !self.at(TokenKind::RParen) && !self.at_eof() {
+                let name = self.parse_ident_in("parameter name")?;
+                self.expect(TokenKind::Colon)?;
+                let value = self.parse_expr(0)?;
+                bindings.push(Expr::Binding {
+                    span: name.span.merge(value.span()),
+                    name,
+                    value: Box::new(value),
+                });
+                self.eat(TokenKind::Comma);
+            }
+            self.expect(TokenKind::RParen)?;
+            if bindings.len() == 1 {
+                return Some(bindings.into_iter().next().unwrap());
+            }
+            let span = start.merge(bindings.last().unwrap().span());
+            return Some(Expr::Block {
+                span,
+                items: bindings,
+            });
+        }
+
         let expr = self.parse_expr(0)?;
         self.expect(TokenKind::RParen)?;
         Some(expr)
@@ -2689,19 +3088,15 @@ rule ProcessDigests {
     }
 
     #[test]
-    fn guidance_clause_comment_only_value() {
-        let src = r#"rule R {
-    guidance: -- just a comment
-    ensures: Done()
-}"#;
-        let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        assert_eq!(b.items.len(), 2);
-        // guidance clause should have an empty block value
-        let BlockItemKind::Clause { keyword, value } = &b.items[0].kind else { panic!() };
-        assert_eq!(keyword, "guidance");
-        assert!(matches!(value, Expr::Block { items, .. } if items.is_empty()));
+    fn guidance_clause_comment_only_value_migration() {
+        // Old `guidance:` colon form should emit a migration diagnostic
+        let src = "-- allium: 1\nrule R {\n    ensures: Done()\n    guidance: -- just a comment\n}";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("`guidance:` syntax was replaced")),
+            "expected migration diagnostic, got: {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]
@@ -2941,14 +3336,15 @@ rule ProcessDigests {
     // -- Finding 12: `guarantee`/`timeout` in rules is not in the spec --------
 
     #[test]
-    fn spec_guarantee_in_surface() {
-        // The spec defines `guarantee:` as a surface clause.
-        let src = r#"surface S {
-    facing viewer: User
-    guarantee: DataIntegrity
-}"#;
-        let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0, "guarantee: in surface should parse cleanly");
+    fn spec_guarantee_in_surface_migration() {
+        // Old `guarantee:` colon form should emit a migration diagnostic
+        let src = "-- allium: 1\nsurface S {\n    facing viewer: User\n    guarantee: DataIntegrity\n}";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("`guarantee:` syntax was replaced")),
+            "expected migration diagnostic, got: {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]
@@ -3825,5 +4221,856 @@ oauth/config {
 }"#;
         let r = parse_ok(src);
         assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // ALP-11: implies operator
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn implies_basic() {
+        let src = "rule R { requires: a implies b }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Clause { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::LogicalOp { op, .. } = value else { panic!("expected LogicalOp, got {value:?}") };
+        assert_eq!(*op, LogicalOp::Implies);
+    }
+
+    #[test]
+    fn implies_precedence_and_binds_tighter() {
+        // `a and b implies c` → `(a and b) implies c`
+        let src = "rule R { v: a and b implies c }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::LogicalOp { op, left, .. } = value else { panic!() };
+        assert_eq!(*op, LogicalOp::Implies);
+        assert!(matches!(left.as_ref(), Expr::LogicalOp { op: LogicalOp::And, .. }));
+    }
+
+    #[test]
+    fn implies_precedence_or_binds_tighter() {
+        // `a or b implies c` → `(a or b) implies c`
+        let src = "rule R { v: a or b implies c }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::LogicalOp { op, left, .. } = value else { panic!() };
+        assert_eq!(*op, LogicalOp::Implies);
+        assert!(matches!(left.as_ref(), Expr::LogicalOp { op: LogicalOp::Or, .. }));
+    }
+
+    #[test]
+    fn implies_precedence_implies_above_or() {
+        // `a implies b or c` → `a implies (b or c)`
+        let src = "rule R { v: a implies b or c }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::LogicalOp { op, right, .. } = value else { panic!() };
+        assert_eq!(*op, LogicalOp::Implies);
+        assert!(matches!(right.as_ref(), Expr::LogicalOp { op: LogicalOp::Or, .. }));
+    }
+
+    #[test]
+    fn implies_precedence_not_binds_tighter() {
+        // `not a implies b` → `(not a) implies b`
+        let src = "rule R { v: not a implies b }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::LogicalOp { op, left, .. } = value else { panic!() };
+        assert_eq!(*op, LogicalOp::Implies);
+        assert!(matches!(left.as_ref(), Expr::Not { .. }));
+    }
+
+    #[test]
+    fn implies_right_associative() {
+        // `a implies b implies c` → `a implies (b implies c)`
+        let src = "rule R { v: a implies b implies c }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::LogicalOp { op, right, .. } = value else { panic!() };
+        assert_eq!(*op, LogicalOp::Implies);
+        assert!(matches!(right.as_ref(), Expr::LogicalOp { op: LogicalOp::Implies, .. }));
+    }
+
+    #[test]
+    fn implies_is_keyword_parsed_as_operator() {
+        // `implies` is a keyword — in infix position it's the operator, not an ident.
+        // `a implies b` parses as LogicalOp, never as two adjacent identifiers.
+        let src = "entity E { v: a implies b }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        assert!(matches!(value, Expr::LogicalOp { op: LogicalOp::Implies, .. }));
+    }
+
+    #[test]
+    fn implies_in_ensures() {
+        let src = r#"rule R {
+    when: X()
+    ensures: a implies b
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn implies_in_derived_value() {
+        let src = "entity E { v: a implies b }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        assert!(matches!(value, Expr::LogicalOp { op: LogicalOp::Implies, .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // ALP-7: guidance clause ordering
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn guidance_ordering_tests_removed() {
+        // Guidance ordering validation was moved to the structural validator.
+        // The old `guidance:` colon form now emits migration diagnostics.
+        // See guidance_colon_form_migration and annotation_guidance_in_rule tests.
+    }
+
+    // -----------------------------------------------------------------------
+    // ALP-9: contract declarations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn contract_signatures_only() {
+        let src = r#"contract Auditable {
+    last_modified_by: Actor
+    last_modified_at: Timestamp
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.kind, BlockKind::Contract);
+        assert_eq!(b.name.as_ref().unwrap().name, "Auditable");
+        assert_eq!(b.items.len(), 2);
+    }
+
+    #[test]
+    fn contract_with_annotations() {
+        let src = r#"contract Versioned {
+    version: Integer
+    @invariant Monotonic
+        -- versions must increase
+    @guidance
+        -- use semantic versioning
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.kind, BlockKind::Contract);
+        assert_eq!(b.items.len(), 3);
+    }
+
+    #[test]
+    fn contract_with_any_type() {
+        let src = r#"contract Identifiable {
+    id: Any
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn contract_lowercase_name_rejected() {
+        let src = "-- allium: 1\ncontract bad {}";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("uppercase")),
+            "expected uppercase error, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn contract_colon_body_rejected() {
+        let src = "-- allium: 1\ncontract Bad: something";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("braces")),
+            "expected braces error, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ALP-15: contracts clause
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn contracts_clause_single_demands() {
+        let src = "surface S {\n    contracts:\n        demands Auditable\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::ContractsClause { entries } = &b.items[0].kind else {
+            panic!("expected ContractsClause, got {:?}", b.items[0].kind)
+        };
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0].direction, ContractDirection::Demands));
+        assert_eq!(entries[0].name.name, "Auditable");
+    }
+
+    #[test]
+    fn contracts_clause_single_fulfils() {
+        let src = "surface S {\n    contracts:\n        fulfils EventSubmitter\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::ContractsClause { entries } = &b.items[0].kind else {
+            panic!("expected ContractsClause")
+        };
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0].direction, ContractDirection::Fulfils));
+        assert_eq!(entries[0].name.name, "EventSubmitter");
+    }
+
+    #[test]
+    fn contracts_clause_mixed() {
+        let src = "surface S {\n    contracts:\n        demands Auditable\n        fulfils EventSubmitter\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::ContractsClause { entries } = &b.items[0].kind else {
+            panic!("expected ContractsClause")
+        };
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(entries[0].direction, ContractDirection::Demands));
+        assert!(matches!(entries[1].direction, ContractDirection::Fulfils));
+    }
+
+    #[test]
+    fn contracts_with_other_clauses() {
+        let src = r#"surface S {
+    facing user: User
+    contracts:
+        demands Auditable
+    exposes:
+        user.name
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.items.len(), 3);
+    }
+
+    #[test]
+    fn contracts_only_surface() {
+        let src = "surface S {\n    contracts:\n        demands Foo\n        fulfils Bar\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.items.len(), 1);
+    }
+
+    #[test]
+    fn contracts_empty_rejected() {
+        let src = "-- allium: 1\nsurface S {\n    contracts:\n}";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("Empty `contracts:`")),
+            "expected empty contracts error, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn contracts_inline_block_rejected() {
+        let src = "-- allium: 1\nsurface S {\n    contracts:\n        demands Foo {\n        }\n}";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("Inline contract blocks")),
+            "expected inline block error, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn contracts_unknown_direction_rejected() {
+        let src = "-- allium: 1\nsurface S {\n    contracts:\n        requires Foo\n}";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("Unknown direction")),
+            "expected unknown direction error, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ALP-16: annotations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn annotation_invariant() {
+        let src = "contract C {\n    @invariant Determinism\n        -- all evaluations must be deterministic\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Annotation(ann) = &b.items[0].kind else {
+            panic!("expected Annotation, got {:?}", b.items[0].kind)
+        };
+        assert!(matches!(ann.kind, AnnotationKind::Invariant));
+        assert_eq!(ann.name.as_ref().unwrap().name, "Determinism");
+        assert_eq!(ann.body.len(), 1);
+        assert_eq!(ann.body[0], "all evaluations must be deterministic");
+    }
+
+    #[test]
+    fn annotation_multiple_invariants() {
+        let src = "contract C {\n    @invariant A\n        -- first\n    @invariant B\n        -- second\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.items.len(), 2);
+        assert!(matches!(&b.items[0].kind, BlockItemKind::Annotation(_)));
+        assert!(matches!(&b.items[1].kind, BlockItemKind::Annotation(_)));
+    }
+
+    #[test]
+    fn annotation_invariant_then_guidance() {
+        let src = "contract C {\n    @invariant Safety\n        -- must be safe\n    @guidance\n        -- implementation notes\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.items.len(), 2);
+    }
+
+    #[test]
+    fn annotation_guidance_in_rule() {
+        let src = "rule R {\n    when: Event.created\n    ensures: something\n    @guidance\n        -- do it this way\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let last = b.items.last().unwrap();
+        let BlockItemKind::Annotation(ann) = &last.kind else { panic!() };
+        assert!(matches!(ann.kind, AnnotationKind::Guidance));
+        assert!(ann.name.is_none());
+    }
+
+    #[test]
+    fn annotation_guarantee() {
+        let src = "surface S {\n    @guarantee ResponseTime\n        -- must respond within 100ms\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Annotation(ann) = &b.items[0].kind else { panic!() };
+        assert!(matches!(ann.kind, AnnotationKind::Guarantee));
+        assert_eq!(ann.name.as_ref().unwrap().name, "ResponseTime");
+    }
+
+    #[test]
+    fn annotation_guarantee_then_guidance() {
+        let src = "surface S {\n    @guarantee Fast\n        -- sub-second\n    @guidance\n        -- cache aggressively\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.items.len(), 2);
+    }
+
+    #[test]
+    fn annotation_contracts_guarantee_guidance() {
+        let src = r#"surface S {
+    contracts:
+        demands Auditable
+    @guarantee ResponseTime
+        -- fast
+    @guidance
+        -- notes
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.items.len(), 3);
+    }
+
+    #[test]
+    fn annotation_multiline_body() {
+        let src = "contract C {\n    @invariant Multi\n        -- line one\n        -- line two\n        -- line three\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Annotation(ann) = &b.items[0].kind else { panic!() };
+        assert_eq!(ann.body.len(), 3);
+        assert_eq!(ann.body[0], "line one");
+        assert_eq!(ann.body[2], "line three");
+    }
+
+    #[test]
+    fn annotation_empty_body_rejected() {
+        let src = "-- allium: 1\ncontract C {\n    @invariant NoBody\n}";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("at least one indented comment line")),
+            "expected empty body error, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn annotation_unknown_keyword_rejected() {
+        let src = "-- allium: 1\ncontract C {\n    @note Something\n        -- text\n}";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("Unknown annotation")),
+            "expected unknown annotation error, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn expression_invariant_still_works() {
+        let src = r#"entity E {
+    status: pending | active
+    invariant AllValid {
+        this.status = active
+    }
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        // Find the invariant block item
+        let inv = b.items.iter().find(|i| matches!(&i.kind, BlockItemKind::InvariantBlock { .. }));
+        assert!(inv.is_some(), "expression-bearing invariant should still parse");
+    }
+
+    #[test]
+    fn invariant_colon_form_migration() {
+        let src = "-- allium: 1\ncontract C {\n    invariant: SomeName\n}";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("`invariant:` syntax was replaced")),
+            "expected migration diagnostic, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn guidance_colon_form_migration() {
+        let src = "-- allium: 1\nrule R {\n    when: Event.created\n    ensures: something\n    guidance: \"do it\"\n}";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("`guidance:` syntax was replaced")),
+            "expected migration diagnostic, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn guarantee_colon_form_migration() {
+        let src = "-- allium: 1\nsurface S {\n    guarantee: \"fast\"\n}";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("`guarantee:` syntax was replaced")),
+            "expected migration diagnostic, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn annotation_guidance_with_name_rejected() {
+        let src = "-- allium: 1\ncontract C {\n    @guidance Named\n        -- text\n}";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("does not take a name")),
+            "expected guidance name error, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ALP-11 part 2: expression-bearing invariants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn invariant_top_level_simple() {
+        let src = r#"invariant PositiveBalance {
+    this.balance > 0
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Invariant(inv) = &r.module.declarations[0] else {
+            panic!("expected Invariant, got {:?}", r.module.declarations[0])
+        };
+        assert_eq!(inv.name.name, "PositiveBalance");
+    }
+
+    #[test]
+    fn invariant_top_level_for_quantifier() {
+        let src = r#"invariant AllPositive {
+    for item in items: item.value > 0
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Invariant(inv) = &r.module.declarations[0] else { panic!() };
+        assert!(matches!(inv.body, Expr::For { .. }));
+    }
+
+    #[test]
+    fn invariant_top_level_nested_for() {
+        let src = r#"invariant NestedFor {
+    for a in items: for b in a.children: b.valid = true
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn invariant_top_level_implies() {
+        let src = r#"invariant ImpliesTest {
+    this.active implies this.balance > 0
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Invariant(inv) = &r.module.declarations[0] else { panic!() };
+        assert!(matches!(inv.body, Expr::LogicalOp { op: LogicalOp::Implies, .. }));
+    }
+
+    #[test]
+    fn invariant_top_level_let_binding() {
+        let src = r#"invariant WithLet {
+    let total = this.items.count()
+    total > 0
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn invariant_top_level_collection_ops() {
+        let src = r#"invariant CollectionOps {
+    this.items where active = true
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn invariant_top_level_exists() {
+        let src = r#"invariant ExistsCheck {
+    exists this.primary_contact
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn invariant_top_level_not_exists() {
+        let src = r#"invariant NotExistsCheck {
+    not exists this.deleted_at
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn invariant_top_level_optional_navigation() {
+        let src = r#"invariant OptionalNav {
+    this.owner?.email ?? "none" != "none"
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn invariant_top_level_lowercase_rejected() {
+        let src = "-- allium: 1\ninvariant bad { true }";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("uppercase")),
+            "expected uppercase error, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn invariant_entity_level() {
+        let src = r#"entity Account {
+    balance: Decimal
+    invariant NonNegative { this.balance >= 0 }
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::InvariantBlock { name, body: _ } = &b.items[1].kind else {
+            panic!("expected InvariantBlock, got {:?}", b.items[1].kind)
+        };
+        assert_eq!(name.name, "NonNegative");
+    }
+
+    #[test]
+    fn invariant_entity_level_this_ref() {
+        let src = r#"entity Order {
+    total: Decimal
+    invariant PositiveTotal { this.total > 0 }
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn invariant_entity_level_implies() {
+        let src = r#"entity Subscription {
+    active: Boolean
+    balance: Decimal
+    invariant ActiveMeansPositive { this.active implies this.balance > 0 }
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn invariant_entity_level_lowercase_rejected() {
+        let src = "-- allium: 1\nentity E { invariant bad { true } }";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("uppercase")),
+            "expected uppercase error, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn invariant_colon_form_in_entity_migration() {
+        // Old `invariant:` colon form should emit migration diagnostic
+        let src = "-- allium: 1\nentity E {\n    invariant: -- must be valid\n}";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("`invariant:` syntax was replaced")),
+            "expected migration diagnostic, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn invariant_top_level_colon_rejected() {
+        // Colon-delimited body at top level is wrong syntax
+        let src = "-- allium: 1\ninvariant Bad: some text";
+        let r = parse(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for colon-delimited invariant at top level, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn invariant_same_name_different_scopes() {
+        // Top-level and entity-level invariants with same name are valid (parser doesn't check)
+        let src = r#"invariant SameName { true }
+entity E {
+    invariant SameName { true }
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // ALP-10: cross-module config references
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn config_qualified_reference() {
+        // `core/config.max_batch_size` should parse as MemberAccess(QualifiedName, field)
+        let src = r#"config {
+    param: Integer = core/config.max_batch_size
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn config_multiple_qualified_refs() {
+        let src = r#"config {
+    param_a: Integer = core/config.max_batch_size
+    param_b: Duration = core/config.default_delay
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn config_qualified_ref_with_type() {
+        let src = r#"config {
+    publish_delay: Duration = core/config.default_delay
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn config_qualified_chain() {
+        // Parameter with qualified default that itself could have a qualified default
+        let src = r#"config {
+    first: Integer = core/config.base
+    second: Integer = first
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn config_renamed_param_with_qualified_ref() {
+        let src = r#"config {
+    my_timeout: Duration = core/config.base_timeout
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // ALP-13: expression-form config defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn config_default_arithmetic() {
+        let src = r#"config {
+    param: Integer = other_param + 1
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn config_default_qualified_arithmetic() {
+        let src = r#"config {
+    param: Duration = core/config.timeout * 2
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn config_default_parenthesised() {
+        let src = r#"config {
+    param: Integer = (base + 1) * factor
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn config_default_two_qualified_refs() {
+        let src = r#"config {
+    param: Duration = core/config.a + core/config.b
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn config_default_literal_only() {
+        let src = r#"config {
+    param: Integer = 5
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn config_default_decimal_literal() {
+        let src = r#"config {
+    param: Decimal = price * 1.5
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn config_default_mixed_operators() {
+        let src = r#"config {
+    param: Duration = timeout * 2 + 1.minute
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn config_default_operator_precedence() {
+        // a + b * c should be Add(a, Mul(b, c))
+        let src = r#"config {
+    param: Integer = a + b * c
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Version 2 marker
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn version_2_accepted() {
+        let r = parse("-- allium: 2\nentity User {}");
+        assert_eq!(r.module.version, Some(2));
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn version_99_still_rejected() {
+        let r = parse("-- allium: 99\nentity User {}");
+        assert!(r.diagnostics.iter().any(|d|
+            d.severity == Severity::Error && d.message.contains("unsupported")
+        ));
+    }
+
+    #[test]
+    fn contract_typed_signature() {
+        let src = r#"contract Codec {
+    serialize: (value: Any) -> ByteArray
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.kind, BlockKind::Contract);
+        let BlockItemKind::Assignment { name, value } = &b.items[0].kind else { panic!() };
+        assert_eq!(name.name, "serialize");
+        assert!(matches!(value, Expr::ProjectionMap { .. }));
+    }
+
+    #[test]
+    fn contract_multi_param_signature() {
+        let src = r#"contract Codec {
+    serialize: (value: Any, format: String) -> ByteArray
+}"#;
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn comma_separated_entity_fields() {
+        let src = "entity Point { x: Decimal, y: Decimal }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.items.len(), 2);
+        assert!(matches!(&b.items[0].kind, BlockItemKind::Assignment { name, .. } if name.name == "x"));
+        assert!(matches!(&b.items[1].kind, BlockItemKind::Assignment { name, .. } if name.name == "y"));
+    }
+
+    #[test]
+    fn comma_separated_value_fields() {
+        let src = "value Coord { x: Integer, y: Integer }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.items.len(), 2);
     }
 }

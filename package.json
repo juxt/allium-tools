@@ -1,7 +1,7 @@
 {
   "name": "allium-tools",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "license": "MIT",
   "workspaces": [
     "extensions/allium",
@@ -42,6 +42,9 @@
   "lint-staged": {
     "*.{ts,tsx,js,cjs,mjs}": ["biome format --write", "eslint --fix"],
     "*.{json,jsonc}": ["biome format --write"]
+  },
+  "overrides": {
+    "minimatch": ">=5.1.8"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

@@ -53,6 +53,14 @@ pub enum TokenKind {
     TransitionsTo,
     Becomes,
 
+    // Contract and invariant keywords
+    Implies,
+    Contract,
+    Invariant,
+
+    // Sigil
+    At,              // @
+
     // Context-sensitive identifiers treated as keywords
     Now,
     This,
@@ -136,6 +144,10 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Exists => write!(f, "'exists'"),
             TokenKind::TransitionsTo => write!(f, "'transitions_to'"),
             TokenKind::Becomes => write!(f, "'becomes'"),
+            TokenKind::Implies => write!(f, "'implies'"),
+            TokenKind::Contract => write!(f, "'contract'"),
+            TokenKind::Invariant => write!(f, "'invariant'"),
+            TokenKind::At => write!(f, "'@'"),
             TokenKind::Now => write!(f, "'now'"),
             TokenKind::This => write!(f, "'this'"),
             TokenKind::Within => write!(f, "'within'"),
@@ -211,6 +223,9 @@ impl TokenKind {
                 | TokenKind::Exists
                 | TokenKind::TransitionsTo
                 | TokenKind::Becomes
+                | TokenKind::Implies
+                | TokenKind::Contract
+                | TokenKind::Invariant
                 | TokenKind::Now
                 | TokenKind::This
                 | TokenKind::Within
@@ -507,6 +522,7 @@ impl<'s> Lexer<'s> {
             (b']', _) => (TokenKind::RBracket, 1),
             (b':', _) => (TokenKind::Colon, 1),
             (b',', _) => (TokenKind::Comma, 1),
+            (b'@', _) => (TokenKind::At, 1),
             _ => (TokenKind::Error, 1),
         };
 
@@ -562,6 +578,9 @@ fn classify_keyword(text: &str) -> TokenKind {
         "and" => TokenKind::And,
         "or" => TokenKind::Or,
         "exists" => TokenKind::Exists,
+        "implies" => TokenKind::Implies,
+        "contract" => TokenKind::Contract,
+        "invariant" => TokenKind::Invariant,
         "transitions_to" => TokenKind::TransitionsTo,
         "becomes" => TokenKind::Becomes,
         "true" => TokenKind::True,

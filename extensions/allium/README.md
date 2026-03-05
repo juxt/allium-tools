@@ -2,6 +2,8 @@
 
 Rich language support for the **Allium** specification language, powered by the Allium Language Server.
 
+**Compatibility:** Allium Tools core 2.x
+
 ## Features
 
 ### 🌈 Syntax Highlighting & Snippets

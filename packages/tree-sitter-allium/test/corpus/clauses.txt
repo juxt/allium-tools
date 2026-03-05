@@ -66,3 +66,54 @@ rule AllClauses {
       (clause
         keyword: (clause_keyword)
         value: (identifier)))))
+
+==================
+Contracts Clause
+==================
+surface API {
+  contracts: demands PaymentTerms, fulfils DeliveryGuarantee
+}
+
+---
+
+(source_file
+  (surface_declaration
+    name: (identifier)
+    body: (block_body
+      (clause
+        keyword: (clause_keyword)
+        value: (tuple_expression
+          left: (infix_predicate_expression
+            subject: (identifier)
+            predicate: (identifier))
+          right: (infix_predicate_expression
+            subject: (identifier)
+            predicate: (identifier)))))))
+
+==================
+Annotations
+==================
+entity Account {
+  balance: Decimal
+  @invariant PositiveBalance
+  @guidance
+  @guarantee Uptime
+}
+
+---
+
+(source_file
+  (entity_declaration
+    name: (identifier)
+    body: (block_body
+      (field_assignment
+        key: (identifier)
+        value: (identifier))
+      (annotation
+        kind: (annotation_keyword)
+        name: (identifier))
+      (annotation
+        kind: (annotation_keyword))
+      (annotation
+        kind: (annotation_keyword)
+        name: (identifier)))))

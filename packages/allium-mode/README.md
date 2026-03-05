@@ -2,6 +2,8 @@
 
 Emacs major mode for the Allium specification language.
 
+**Compatibility:** Allium Tools core 2.x
+
 ## Installation
 
 ### Using straight.el

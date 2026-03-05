@@ -1,6 +1,6 @@
 ;;; allium-mode.el --- Major mode for Allium specifications  -*- lexical-binding: t; -*-
 
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Author: JUXT
 ;; Keywords: languages, allium
 ;; Package-Requires: ((emacs "28.1"))
@@ -38,22 +38,26 @@
 (defvar allium-font-lock-keywords
   (let* ((keywords '("module" "use" "as" "rule" "entity" "external" "value" "enum"
                      "context" "config" "surface" "actor" "default" "variant"
-                     "let" "not" "and" "or"))
+                     "let" "not" "and" "or" "contract" "invariant" "implies"))
          (keyword-regexp (regexp-opt keywords 'symbols))
          (clause-keywords '("when" "requires" "ensures" "trigger" "provides" "tags"
-                            "guidance" "invariant" "becomes" "related" "exposes"
-                            "identified_by" "for"))
+                            "guidance" "becomes" "related" "exposes"
+                            "identified_by" "contracts" "demands" "fulfils"
+                            "guarantee" "timeout" "within" "transitions_to"
+                            "facing"))
          (clause-regexp (concat "\\_<" (regexp-opt clause-keywords) ":")))
     `((,keyword-regexp . font-lock-keyword-face)
       (,clause-regexp . font-lock-keyword-face)
       ("\\_<\\(true\\|false\\|null\\)\\_>" . font-lock-constant-face)
       ("\\_<[0-9]+\\(\\.[0-9]+\\)?\\(?:\\.\\(?:seconds\\|minutes\\|hours\\|days\\)\\)?\\_>" . font-lock-constant-face)
       ;; Declarations: kind Name
-      (,(concat "\\_<" (regexp-opt '("rule" "entity" "value" "enum" "surface" "actor" "variant") 'symbols)
+      (,(concat "\\_<" (regexp-opt '("rule" "entity" "value" "enum" "surface" "actor" "variant" "contract" "invariant") 'symbols)
                 "\\s-+\\([A-Za-z_][A-Za-z0-9_]*\\)")
        2 font-lock-type-face)
       ;; Field assignments: key:
-      ("\\([A-Za-z_][A-Za-z0-9_]*\\):" 1 font-lock-variable-name-face)))
+      ("\\([A-Za-z_][A-Za-z0-9_]*\\):" 1 font-lock-variable-name-face)
+      ;; Annotations: @invariant, @guidance, @guarantee
+      ("@\\(invariant\\|guidance\\|guarantee\\)\\b" . font-lock-keyword-face)))
   "Font lock keywords for `allium-mode'.")
 
 (defun allium-indent-line ()
@@ -99,9 +103,10 @@
      '([
         "module" "use" "as" "rule" "entity" "external" "value" "enum"
         "context" "config" "surface" "actor" "default" "variant"
-        "let" "not" "and" "or"
+        "let" "not" "and" "or" "contract" "invariant" "implies"
        ] @font-lock-keyword-face
-       (clause_keyword) @font-lock-keyword-face)
+       (clause_keyword) @font-lock-keyword-face
+       (annotation_keyword) @font-lock-keyword-face)
 
      :language 'allium
      :feature 'definition
@@ -113,7 +118,9 @@
        (surface_declaration name: (identifier) @font-lock-type-face)
        (actor_declaration name: (identifier) @font-lock-type-face)
        (default_declaration type: (identifier) @font-lock-type-face)
-       (variant_declaration name: (identifier) @font-lock-type-face))
+       (variant_declaration name: (identifier) @font-lock-type-face)
+       (contract_declaration name: (identifier) @font-lock-type-face)
+       (invariant_declaration name: (identifier) @font-lock-type-face))
 
      :language 'allium
      :feature 'variable
@@ -147,13 +154,13 @@
      :language 'allium
      :feature 'operator
      '([
-        "=" "==" "!=" "<" ">" "<=" ">=" "=>"
+        "=" "==" "!=" "<" ">" "<=" ">=" "=>" "->"
         "+" "-" "*" "/" "|"
        ] @font-lock-warning-face)
 
      :language 'allium
      :feature 'punctuation
-     '([ "(" ")" "{" "}" ":" "," "." ] @font-lock-punctuation-face))))
+     '([ "(" ")" "{" "}" ":" "," "." "@" ] @font-lock-punctuation-face))))
 
 (defvar allium--treesit-defun-type-regexp
   (rx (or "rule_declaration"
@@ -166,14 +173,17 @@
           "context_block"
           "config_block"
           "default_declaration"
-          "variant_declaration")))
+          "variant_declaration"
+          "contract_declaration"
+          "invariant_declaration")))
 
 (defun allium--treesit-defun-name (node)
   "Return the name of the defun NODE."
   (pcase (treesit-node-type node)
     ((or "rule_declaration" "entity_declaration" "external_entity_declaration"
          "value_declaration" "enum_declaration" "surface_declaration"
-         "actor_declaration" "variant_declaration")
+         "actor_declaration" "variant_declaration"
+         "contract_declaration" "invariant_declaration")
      (treesit-node-text (treesit-node-child-by-field-name node "name") t))
     ("default_declaration"
      (treesit-node-text (treesit-node-child-by-field-name node "name") t))
@@ -186,7 +196,9 @@
     ("Value" "\\`value_declaration\\'" nil nil)
     ("Enum" "\\`enum_declaration\\'" nil nil)
     ("Config" "\\`config_block\\'" nil nil)
-    ("Context" "\\`context_block\\'" nil nil)))
+    ("Context" "\\`context_block\\'" nil nil)
+    ("Contract" "\\`contract_declaration\\'" nil nil)
+    ("Invariant" "\\`invariant_declaration\\'" nil nil)))
 
 ;;;###autoload
 (define-derived-mode allium-mode prog-mode "Allium"

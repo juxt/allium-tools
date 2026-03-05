@@ -66,6 +66,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -111,6 +115,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -166,6 +174,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -211,6 +223,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -258,6 +274,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -303,6 +323,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -344,6 +368,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -390,10 +418,45 @@
           {
             "type": "string_literal",
             "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
+            "named": true
           }
         ]
       }
     }
+  },
+  {
+    "type": "annotation",
+    "named": true,
+    "fields": {
+      "kind": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "annotation_keyword",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "annotation_keyword",
+    "named": true,
+    "fields": {}
   },
   {
     "type": "argument_list",
@@ -433,6 +496,10 @@
         },
         {
           "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "implies_expression",
           "named": true
         },
         {
@@ -486,6 +553,10 @@
         {
           "type": "string_literal",
           "named": true
+        },
+        {
+          "type": "thin_arrow_expression",
+          "named": true
         }
       ]
     }
@@ -498,6 +569,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "annotation",
+          "named": true
+        },
         {
           "type": "clause",
           "named": true
@@ -588,6 +663,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -633,6 +712,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -690,6 +773,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -735,6 +822,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           },
           {
@@ -791,6 +882,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -836,6 +931,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -911,6 +1010,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -957,6 +1060,10 @@
           {
             "type": "string_literal",
             "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
+            "named": true
           }
         ]
       }
@@ -972,6 +1079,32 @@
         "types": [
           {
             "type": "block_body",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "contract_declaration",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block_body",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
             "named": true
           }
         ]
@@ -1039,6 +1172,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -1084,6 +1221,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -1131,6 +1272,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -1176,6 +1321,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -1311,6 +1460,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -1357,6 +1510,10 @@
           {
             "type": "string_literal",
             "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
+            "named": true
           }
         ]
       }
@@ -1372,6 +1529,200 @@
         "types": [
           {
             "type": "block_body",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "implies_expression",
+    "named": true,
+    "fields": {
+      "left": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "additive_expression",
+            "named": true
+          },
+          {
+            "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "block_expression",
+            "named": true
+          },
+          {
+            "type": "boolean_literal",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "comparison_expression",
+            "named": true
+          },
+          {
+            "type": "duration_literal",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
+            "type": "infix_predicate_expression",
+            "named": true
+          },
+          {
+            "type": "lambda_expression",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "not_expression",
+            "named": true
+          },
+          {
+            "type": "null_coalescing_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
+            "named": true
+          },
+          {
+            "type": "number_literal",
+            "named": true
+          },
+          {
+            "type": "optional_member_expression",
+            "named": true
+          },
+          {
+            "type": "or_expression",
+            "named": true
+          },
+          {
+            "type": "pipe_expression",
+            "named": true
+          },
+          {
+            "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
+            "named": true
+          }
+        ]
+      },
+      "right": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "additive_expression",
+            "named": true
+          },
+          {
+            "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "block_expression",
+            "named": true
+          },
+          {
+            "type": "boolean_literal",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "comparison_expression",
+            "named": true
+          },
+          {
+            "type": "duration_literal",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
+            "type": "infix_predicate_expression",
+            "named": true
+          },
+          {
+            "type": "lambda_expression",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "not_expression",
+            "named": true
+          },
+          {
+            "type": "null_coalescing_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
+            "named": true
+          },
+          {
+            "type": "number_literal",
+            "named": true
+          },
+          {
+            "type": "optional_member_expression",
+            "named": true
+          },
+          {
+            "type": "or_expression",
+            "named": true
+          },
+          {
+            "type": "pipe_expression",
+            "named": true
+          },
+          {
+            "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -1429,6 +1780,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -1474,6 +1829,120 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "invariant_declaration",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "additive_expression",
+            "named": true
+          },
+          {
+            "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "block_expression",
+            "named": true
+          },
+          {
+            "type": "boolean_literal",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "comparison_expression",
+            "named": true
+          },
+          {
+            "type": "duration_literal",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
+            "type": "infix_predicate_expression",
+            "named": true
+          },
+          {
+            "type": "lambda_expression",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "not_expression",
+            "named": true
+          },
+          {
+            "type": "null_coalescing_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
+            "named": true
+          },
+          {
+            "type": "number_literal",
+            "named": true
+          },
+          {
+            "type": "optional_member_expression",
+            "named": true
+          },
+          {
+            "type": "or_expression",
+            "named": true
+          },
+          {
+            "type": "pipe_expression",
+            "named": true
+          },
+          {
+            "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
             "named": true
           }
         ]
@@ -1521,6 +1990,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -1566,6 +2039,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -1607,6 +2084,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -1652,6 +2133,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -1709,6 +2194,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -1754,6 +2243,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -1801,6 +2294,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -1846,6 +2343,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -1919,6 +2420,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -1964,6 +2469,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -2019,6 +2528,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -2064,6 +2577,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -2121,6 +2638,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -2166,6 +2687,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -2213,6 +2738,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -2258,6 +2787,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -2305,6 +2838,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -2350,6 +2887,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -2391,6 +2932,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -2436,6 +2981,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -2499,6 +3048,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -2544,6 +3097,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -2601,6 +3158,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -2646,6 +3207,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -2687,6 +3252,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -2732,6 +3301,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -2779,6 +3352,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -2824,6 +3401,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -2865,6 +3446,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -2910,6 +3495,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           }
         ]
@@ -2960,6 +3549,10 @@
           "named": true
         },
         {
+          "type": "contract_declaration",
+          "named": true
+        },
+        {
           "type": "default_declaration",
           "named": true
         },
@@ -2981,6 +3574,10 @@
         },
         {
           "type": "given_block",
+          "named": true
+        },
+        {
+          "type": "invariant_declaration",
           "named": true
         },
         {
@@ -3071,7 +3668,7 @@
     }
   },
   {
-    "type": "tuple_expression",
+    "type": "thin_arrow_expression",
     "named": true,
     "fields": {
       "left": {
@@ -3108,6 +3705,10 @@
           },
           {
             "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "implies_expression",
             "named": true
           },
           {
@@ -3156,6 +3757,204 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
+            "named": true
+          }
+        ]
+      },
+      "right": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "additive_expression",
+            "named": true
+          },
+          {
+            "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "block_expression",
+            "named": true
+          },
+          {
+            "type": "boolean_literal",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "comparison_expression",
+            "named": true
+          },
+          {
+            "type": "duration_literal",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
+            "type": "infix_predicate_expression",
+            "named": true
+          },
+          {
+            "type": "lambda_expression",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "not_expression",
+            "named": true
+          },
+          {
+            "type": "null_coalescing_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
+            "named": true
+          },
+          {
+            "type": "number_literal",
+            "named": true
+          },
+          {
+            "type": "optional_member_expression",
+            "named": true
+          },
+          {
+            "type": "or_expression",
+            "named": true
+          },
+          {
+            "type": "pipe_expression",
+            "named": true
+          },
+          {
+            "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "tuple_expression",
+    "named": true,
+    "fields": {
+      "left": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "additive_expression",
+            "named": true
+          },
+          {
+            "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "block_expression",
+            "named": true
+          },
+          {
+            "type": "boolean_literal",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "comparison_expression",
+            "named": true
+          },
+          {
+            "type": "duration_literal",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
+            "type": "infix_predicate_expression",
+            "named": true
+          },
+          {
+            "type": "lambda_expression",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "not_expression",
+            "named": true
+          },
+          {
+            "type": "null_coalescing_expression",
+            "named": true
+          },
+          {
+            "type": "null_literal",
+            "named": true
+          },
+          {
+            "type": "number_literal",
+            "named": true
+          },
+          {
+            "type": "optional_member_expression",
+            "named": true
+          },
+          {
+            "type": "or_expression",
+            "named": true
+          },
+          {
+            "type": "pipe_expression",
+            "named": true
+          },
+          {
+            "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           },
           {
@@ -3201,6 +4000,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -3246,6 +4049,10 @@
           },
           {
             "type": "string_literal",
+            "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
             "named": true
           },
           {
@@ -3359,6 +4166,10 @@
             "named": true
           },
           {
+            "type": "implies_expression",
+            "named": true
+          },
+          {
             "type": "infix_predicate_expression",
             "named": true
           },
@@ -3405,6 +4216,10 @@
           {
             "type": "string_literal",
             "named": true
+          },
+          {
+            "type": "thin_arrow_expression",
+            "named": true
           }
         ]
       }
@@ -3440,6 +4255,10 @@
   },
   {
     "type": "-",
+    "named": false
+  },
+  {
+    "type": "->",
     "named": false
   },
   {
@@ -3491,6 +4310,10 @@
     "named": false
   },
   {
+    "type": "@",
+    "named": false
+  },
+  {
     "type": "actor",
     "named": false
   },
@@ -3513,6 +4336,14 @@
   },
   {
     "type": "config",
+    "named": false
+  },
+  {
+    "type": "contract",
+    "named": false
+  },
+  {
+    "type": "contracts",
     "named": false
   },
   {
@@ -3578,6 +4409,10 @@
   {
     "type": "identifier",
     "named": true
+  },
+  {
+    "type": "implies",
+    "named": false
   },
   {
     "type": "invariant",

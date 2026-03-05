@@ -110,3 +110,41 @@ rule d {
       (field_assignment
         key: (identifier)
         value: (duration_literal)))))
+
+==================
+Implies Expression
+==================
+rule p {
+  check: valid implies allowed
+}
+
+---
+
+(source_file
+  (rule_declaration
+    name: (identifier)
+    body: (block_body
+      (field_assignment
+        key: (identifier)
+        value: (implies_expression
+          left: (identifier)
+          right: (identifier))))))
+
+==================
+Thin Arrow Expression
+==================
+rule t {
+  sig: value -> ByteArray
+}
+
+---
+
+(source_file
+  (rule_declaration
+    name: (identifier)
+    body: (block_body
+      (field_assignment
+        key: (identifier)
+        value: (thin_arrow_expression
+          left: (identifier)
+          right: (identifier))))))
