@@ -60,6 +60,7 @@ When the Allium language version changes (e.g. v1 → v2), the following steps a
    - allium-mode: `packages/allium-mode/allium-mode.el` and `allium-mode-pkg.el`
    - nvim-allium: no declared version (skip)
 4. **Compatibility notes.** Update the "Compatibility" line in each editor plugin README to reference the new core version.
+5. **Homebrew.** After CI publishes the release, run `scripts/update-homebrew-formula.sh <version>` and push the tap repo. See `docs/releasing.md` for the full steps.
 
 ## Rules
 

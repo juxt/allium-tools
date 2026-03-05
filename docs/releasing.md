@@ -18,14 +18,16 @@ Not every artifact needs manual follow-up. The Homebrew formula is the only piec
 1. **Bump versions** with `scripts/version-bump.sh`:
 
    ```bash
-   ./scripts/version-bump.sh 1.0.0
+   ./scripts/version-bump.sh 2.0.0
    ```
+
+   For major language version bumps, also follow the checklist in `docs/versioning.md`.
 
 2. **Commit, tag and push:**
 
    ```bash
-   git add -A && git commit -m "v1.0.0"
-   git tag v1.0.0
+   git add -A && git commit -m "v2.0.0"
+   git tag v2.0.0
    git push origin main --tags
    ```
 
@@ -34,7 +36,7 @@ Not every artifact needs manual follow-up. The Homebrew formula is the only piec
 4. **Update the Homebrew tap:**
 
    ```bash
-   ./scripts/update-homebrew-formula.sh 1.0.0
+   ./scripts/update-homebrew-formula.sh 2.0.0
    ```
 
    This downloads the four platform tarballs, computes SHA256 checksums and rewrites the formula. Pass `--dry-run` to preview without modifying the file.
@@ -43,7 +45,7 @@ Not every artifact needs manual follow-up. The Homebrew formula is the only piec
 
    ```bash
    cd ~/Code/homebrew-allium
-   git add -A && git commit -m "allium 1.0.0"
+   git add -A && git commit -m "allium 2.0.0"
    git push
    ```
 
