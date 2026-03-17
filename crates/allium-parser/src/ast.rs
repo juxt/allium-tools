@@ -114,6 +114,27 @@ pub struct InvariantDecl {
 }
 
 // ---------------------------------------------------------------------------
+// Transition graphs (v3)
+// ---------------------------------------------------------------------------
+
+/// A directed edge in a transition graph: `from -> to`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TransitionEdge {
+    pub span: Span,
+    pub from: Ident,
+    pub to: Ident,
+}
+
+/// A transition graph block: `transitions field_name { edges..., terminal: states }`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TransitionGraph {
+    pub span: Span,
+    pub field: Ident,
+    pub edges: Vec<TransitionEdge>,
+    pub terminal: Vec<Ident>,
+}
+
+// ---------------------------------------------------------------------------
 // Block items — uniform representation for declaration bodies
 // ---------------------------------------------------------------------------
 
@@ -137,8 +158,8 @@ pub enum BlockItemKind {
     },
     /// `let name = value`
     Let { name: Ident, value: Expr },
-    /// Bare name inside an enum body — `pending`, `shipped`, etc.
-    EnumVariant { name: Ident },
+    /// Bare name inside an enum body — `pending`, `shipped`, `` `de-CH-1996` ``, etc.
+    EnumVariant { name: Ident, backtick_quoted: bool },
     /// `for binding in collection [where filter]: ...` at block level (rule iteration)
     ForBlock {
         binding: ForBinding,
@@ -163,6 +184,12 @@ pub enum BlockItemKind {
     Annotation(Annotation),
     /// `invariant Name { expr }` inside an entity/value block
     InvariantBlock { name: Ident, body: Expr },
+    /// `transitions field { ... }` — transition graph declaration inside an entity
+    TransitionsBlock(TransitionGraph),
+    /// `produces: field1, field2` — fields guaranteed non-null after rule execution
+    ProducesClause { fields: Vec<Ident> },
+    /// `consumes: field1, field2` — fields this rule reads
+    ConsumesClause { fields: Vec<Ident> },
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +243,9 @@ pub enum Expr {
 
     /// `"text"` possibly with `{interpolation}`
     StringLiteral(StringLiteral),
+
+    /// `` `de-CH-1996` `` — backtick-quoted enum literal
+    BacktickLiteral { span: Span, value: String },
 
     /// `42`, `100_000`, `3.14`
     NumberLiteral { span: Span, value: String },
@@ -438,7 +468,8 @@ impl Expr {
         match self {
             Expr::Ident(id) => id.span,
             Expr::StringLiteral(s) => s.span,
-            Expr::NumberLiteral { span, .. }
+            Expr::BacktickLiteral { span, .. }
+            | Expr::NumberLiteral { span, .. }
             | Expr::BoolLiteral { span, .. }
             | Expr::Null { span }
             | Expr::Now { span }

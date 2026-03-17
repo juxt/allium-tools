@@ -4,17 +4,19 @@ version = 4
 
 [[package]]
 name = "allium-cli"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "allium-parser",
+ "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "allium-parser"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
