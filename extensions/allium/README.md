@@ -2,12 +2,12 @@
 
 Rich language support for the **Allium** specification language, powered by the Allium Language Server.
 
-**Compatibility:** Allium Tools core 2.x
+**Compatibility:** Allium language versions 1, 2 and 3
 
 ## Features
 
 ### 🌈 Syntax Highlighting & Snippets
-Intelligent colorization for all Allium constructs: rules, entities, enums, and clauses. Includes a suite of snippets to quickly scaffold your specifications.
+Intelligent colorization for all Allium constructs including v3 features: transition graphs, when-qualified fields, backtick-quoted enum literals and expression-bearing invariants. Includes snippets to quickly scaffold specifications.
 
 ### 🔍 Navigation & Discovery
 - **Go to Definition**: Jump instantly to any declared symbol or imported module.
