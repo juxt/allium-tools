@@ -39,31 +39,21 @@ export function parseDeclarationAst(text: string): DeclarationAst[] {
         requires: collectClause(block.body, "requires"),
         ensures: collectClause(block.body, "ensures"),
       });
-      continue;
-    }
-    if (block.kind === "enum") {
+    } else if (block.kind === "entity") {
+      declarations.push({
+        kind: "entity",
+        name: block.name,
+        startOffset: block.startOffset,
+        endOffset: block.endOffset,
+      });
+    } else if (block.kind === "enum") {
       declarations.push({
         kind: "enum",
         name: block.name,
         startOffset: block.startOffset,
         endOffset: block.endOffset,
       });
-      continue;
     }
-  }
-  const entityPattern =
-    /^\s*(?:external\s+)?entity\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm;
-  for (
-    let match = entityPattern.exec(text);
-    match;
-    match = entityPattern.exec(text)
-  ) {
-    declarations.push({
-      kind: "entity",
-      name: match[1],
-      startOffset: match.index,
-      endOffset: match.index + match[0].length,
-    });
   }
   return declarations.sort((a, b) => a.startOffset - b.startOffset);
 }

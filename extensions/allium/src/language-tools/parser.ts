@@ -1,7 +1,7 @@
 import { parseAllium } from "./wasm-ast";
 import { wasmBlocksToParsedBlocks } from "./wasm-adapter";
 
-let useWasmParser = false;
+let useWasmParser = true;
 
 /** Enable or disable the WASM parser backend. */
 export function setUseWasmParser(enabled: boolean): void {
