@@ -1,0 +1,13 @@
+{
+  "name": "allium-parser-wasm",
+  "description": "WASM bindings for the Allium parser",
+  "version": "3.0.0",
+  "license": "MIT",
+  "files": [
+    "allium_wasm_bg.wasm",
+    "allium_wasm.js",
+    "allium_wasm.d.ts"
+  ],
+  "main": "allium_wasm.js",
+  "types": "allium_wasm.d.ts"
+}
