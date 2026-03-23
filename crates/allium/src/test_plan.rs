@@ -8,6 +8,12 @@ use allium_parser::{Module, Span};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
+pub struct SourceSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub struct TestPlan {
     pub version: Option<u32>,
     pub obligations: Vec<Obligation>,
@@ -24,7 +30,7 @@ pub struct Obligation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expression: Option<String>,
     /// Byte offset range in the source file.
-    pub source_span: (usize, usize),
+    pub source_span: SourceSpan,
     /// Category-specific data.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<ObligationDetail>,
@@ -42,26 +48,24 @@ pub enum ObligationCategory {
     ValueEquality,
     EnumComparable,
     SumTypeVariant,
-    DerivedValue,
+    Derived,
     Projection,
     ConfigDefault,
-    InvariantProperty,
+    Invariant,
     RuleSuccess,
     RuleFailure,
     RuleEntityCreation,
     TransitionEdge,
     TransitionRejected,
     TransitionTerminal,
-    WhenFieldPresence,
-    WhenPresenceObligation,
-    WhenAbsenceObligation,
-    TemporalTrigger,
+    WhenPresence,
+    WhenSet,
+    WhenClear,
+    Temporal,
     SurfaceExposure,
     SurfaceProvides,
     SurfaceActor,
     ContractSignature,
-    #[allow(dead_code)]
-    ScenarioHappyPath,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,11 +111,17 @@ pub enum TriggerSource {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuleDependencies {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub entities_read: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub entities_written: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub entities_created: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub entities_removed: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub deferred_specs: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub trigger_emissions: Vec<String>,
     pub trigger_source: TriggerSource,
 }
@@ -314,8 +324,8 @@ fn emit_when_crossing_obligations(plan: &mut TestPlan, declarations: &[Decl]) {
                                 if !source_in_set && target_in_set && !emitted_presence {
                                     emitted_presence = true;
                                     plan.obligations.push(Obligation {
-                                        id: format!("when-set-{}-{}-{}", rule_name, wf.entity, wf.field),
-                                        category: ObligationCategory::WhenPresenceObligation,
+                                        id: format!("when-set.{}.{}.{}", rule_name, wf.entity, wf.field),
+                                        category: ObligationCategory::WhenSet,
                                         description: format!(
                                             "Verify rule {} sets {}.{} when transitioning {} from {} to {} (entering when set {{{}}})",
                                             rule_name, wf.entity, wf.field, wf.status_field,
@@ -324,7 +334,7 @@ fn emit_when_crossing_obligations(plan: &mut TestPlan, declarations: &[Decl]) {
                                         ),
                                         source_construct: rule_name.clone(),
                                         expression: None,
-                                        source_span: (rule_span.start, rule_span.end),
+                                        source_span: SourceSpan { start: rule_span.start, end: rule_span.end },
                                         detail: Some(ObligationDetail::WhenPresence {
                                             rule: rule_name.clone(),
                                             entity: wf.entity.clone(),
@@ -338,8 +348,8 @@ fn emit_when_crossing_obligations(plan: &mut TestPlan, declarations: &[Decl]) {
                                 } else if source_in_set && !target_in_set && !emitted_absence {
                                     emitted_absence = true;
                                     plan.obligations.push(Obligation {
-                                        id: format!("when-clear-{}-{}-{}", rule_name, wf.entity, wf.field),
-                                        category: ObligationCategory::WhenAbsenceObligation,
+                                        id: format!("when-clear.{}.{}.{}", rule_name, wf.entity, wf.field),
+                                        category: ObligationCategory::WhenClear,
                                         description: format!(
                                             "Verify rule {} clears {}.{} when transitioning {} from {} to {} (leaving when set {{{}}})",
                                             rule_name, wf.entity, wf.field, wf.status_field,
@@ -348,7 +358,7 @@ fn emit_when_crossing_obligations(plan: &mut TestPlan, declarations: &[Decl]) {
                                         ),
                                         source_construct: rule_name.clone(),
                                         expression: None,
-                                        source_span: (rule_span.start, rule_span.end),
+                                        source_span: SourceSpan { start: rule_span.start, end: rule_span.end },
                                         detail: Some(ObligationDetail::WhenAbsence {
                                             rule: rule_name.clone(),
                                             entity: wf.entity.clone(),
@@ -367,8 +377,8 @@ fn emit_when_crossing_obligations(plan: &mut TestPlan, declarations: &[Decl]) {
                                 continue;
                             }
                             plan.obligations.push(Obligation {
-                                id: format!("when-set-{}-{}-{}", rule_name, wf.entity, wf.field),
-                                category: ObligationCategory::WhenPresenceObligation,
+                                id: format!("when-set.{}.{}.{}", rule_name, wf.entity, wf.field),
+                                category: ObligationCategory::WhenSet,
                                 description: format!(
                                     "Verify rule {} sets {}.{} when transitioning {} to {} (entering when set {{{}}})",
                                     rule_name, wf.entity, wf.field, wf.status_field,
@@ -377,7 +387,7 @@ fn emit_when_crossing_obligations(plan: &mut TestPlan, declarations: &[Decl]) {
                                 ),
                                 source_construct: rule_name.clone(),
                                 expression: None,
-                                source_span: (rule_span.start, rule_span.end),
+                                source_span: SourceSpan { start: rule_span.start, end: rule_span.end },
                                 detail: Some(ObligationDetail::WhenPresence {
                                     rule: rule_name.clone(),
                                     entity: wf.entity.clone(),
@@ -547,8 +557,8 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
                 // Emit when-field-presence obligation
                 let states: Vec<String> = when_clause.qualifying_states.iter().map(|s| s.name.clone()).collect();
                 plan.obligations.push(Obligation {
-                    id: format!("when-presence-{}-{}", name, field_name.name),
-                    category: ObligationCategory::WhenFieldPresence,
+                    id: format!("when-presence.{}.{}", name, field_name.name),
+                    category: ObligationCategory::WhenPresence,
                     description: format!(
                         "Verify {}.{} is present when {} in {{{}}} and absent otherwise",
                         name, field_name.name, when_clause.status_field.name,
@@ -556,7 +566,7 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
                     ),
                     source_construct: format!("{}.{}", name, field_name.name),
                     expression: None,
-                    source_span: (item.span.start, item.span.end),
+                    source_span: SourceSpan { start: item.span.start, end: item.span.end },
                     detail: Some(ObligationDetail::WhenFieldPresence {
                         entity: name.clone(),
                         field: field_name.name.clone(),
@@ -571,15 +581,15 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
             }
             BlockItemKind::InvariantBlock { name: inv_name, body } => {
                 plan.obligations.push(Obligation {
-                    id: format!("invariant-entity-{}-{}", name, inv_name.name),
-                    category: ObligationCategory::InvariantProperty,
+                    id: format!("invariant.{}.{}", name, inv_name.name),
+                    category: ObligationCategory::Invariant,
                     description: format!(
                         "Verify invariant {} holds after any field mutation on {}",
                         inv_name.name, name
                     ),
                     source_construct: format!("{}.{}", name, inv_name.name),
                     expression: Some(span_text(source, body.span())),
-                    source_span: (item.span.start, item.span.end),
+                    source_span: SourceSpan { start: item.span.start, end: item.span.end },
                     detail: None,
                     dependencies: None,
                 });
@@ -590,12 +600,12 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
 
     if !fields.is_empty() {
         plan.obligations.push(Obligation {
-            id: format!("entity-fields-{}", name),
+            id: format!("entity-fields.{}", name),
             category: ObligationCategory::EntityFields,
             description: format!("Verify all declared fields on {} are present with correct types", name),
             source_construct: name.clone(),
             expression: None,
-            source_span: (block.span.start, block.span.end),
+            source_span: SourceSpan { start: block.span.start, end: block.span.end },
             detail: Some(ObligationDetail::Fields { fields: fields.clone() }),
             dependencies: None,
         });
@@ -603,12 +613,12 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
 
     for f in &optional_fields {
         plan.obligations.push(Obligation {
-            id: format!("entity-optional-{}-{}", name, f),
+            id: format!("entity-optional.{}.{}", name, f),
             category: ObligationCategory::EntityOptional,
             description: format!("Verify optional field {}.{} accepts null and non-null values", name, f),
             source_construct: format!("{}.{}", name, f),
             expression: None,
-            source_span: (block.span.start, block.span.end),
+            source_span: SourceSpan { start: block.span.start, end: block.span.end },
             detail: None,
             dependencies: None,
         });
@@ -616,12 +626,12 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
 
     for r in &relationships {
         plan.obligations.push(Obligation {
-            id: format!("entity-relationship-{}-{}", name, r),
+            id: format!("entity-relationship.{}.{}", name, r),
             category: ObligationCategory::EntityRelationship,
             description: format!("Verify relationship {}.{} navigates to the correct related entities", name, r),
             source_construct: format!("{}.{}", name, r),
             expression: None,
-            source_span: (block.span.start, block.span.end),
+            source_span: SourceSpan { start: block.span.start, end: block.span.end },
             detail: None,
             dependencies: None,
         });
@@ -629,12 +639,12 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
 
     for p in &projections {
         plan.obligations.push(Obligation {
-            id: format!("projection-{}-{}", name, p),
+            id: format!("projection.{}.{}", name, p),
             category: ObligationCategory::Projection,
             description: format!("Verify projection {}.{} filters correctly", name, p),
             source_construct: format!("{}.{}", name, p),
             expression: None,
-            source_span: (block.span.start, block.span.end),
+            source_span: SourceSpan { start: block.span.start, end: block.span.end },
             detail: None,
             dependencies: None,
         });
@@ -642,12 +652,12 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
 
     for d in &derived_values {
         plan.obligations.push(Obligation {
-            id: format!("derived-{}-{}", name, d),
-            category: ObligationCategory::DerivedValue,
+            id: format!("derived.{}.{}", name, d),
+            category: ObligationCategory::Derived,
             description: format!("Verify derived value {}.{} computes correctly", name, d),
             source_construct: format!("{}.{}", name, d),
             expression: None,
-            source_span: (block.span.start, block.span.end),
+            source_span: SourceSpan { start: block.span.start, end: block.span.end },
             detail: None,
             dependencies: None,
         });
@@ -660,7 +670,7 @@ fn emit_transition_obligations(plan: &mut TestPlan, entity: &str, graph: &Transi
     // One obligation per declared edge
     for edge in &graph.edges {
         plan.obligations.push(Obligation {
-            id: format!("transition-edge-{}-{}-{}", entity, edge.from.name, edge.to.name),
+            id: format!("transition-edge.{}.{}.{}", entity, edge.from.name, edge.to.name),
             category: ObligationCategory::TransitionEdge,
             description: format!(
                 "Verify transition {} -> {} on {}.{} is reachable via a witnessing rule",
@@ -668,7 +678,7 @@ fn emit_transition_obligations(plan: &mut TestPlan, entity: &str, graph: &Transi
             ),
             source_construct: format!("{}.{}", entity, field),
             expression: None,
-            source_span: (edge.span.start, edge.span.end),
+            source_span: SourceSpan { start: edge.span.start, end: edge.span.end },
             detail: Some(ObligationDetail::Transition {
                 entity: entity.to_string(),
                 field: field.clone(),
@@ -681,7 +691,7 @@ fn emit_transition_obligations(plan: &mut TestPlan, entity: &str, graph: &Transi
 
     // Obligation: undeclared transitions are rejected
     plan.obligations.push(Obligation {
-        id: format!("transition-rejected-{}", entity),
+        id: format!("transition-rejected.{}.{}", entity, field),
         category: ObligationCategory::TransitionRejected,
         description: format!(
             "Verify undeclared transitions on {}.{} are rejected",
@@ -689,7 +699,7 @@ fn emit_transition_obligations(plan: &mut TestPlan, entity: &str, graph: &Transi
         ),
         source_construct: format!("{}.{}", entity, field),
         expression: None,
-        source_span: (graph.span.start, graph.span.end),
+        source_span: SourceSpan { start: graph.span.start, end: graph.span.end },
         detail: None,
         dependencies: None,
     });
@@ -697,7 +707,7 @@ fn emit_transition_obligations(plan: &mut TestPlan, entity: &str, graph: &Transi
     // Obligation per terminal state: no outbound transitions
     if !graph.terminal.is_empty() {
         plan.obligations.push(Obligation {
-            id: format!("transition-terminal-{}", entity),
+            id: format!("transition-terminal.{}.{}", entity, field),
             category: ObligationCategory::TransitionTerminal,
             description: format!(
                 "Verify terminal states on {}.{} have no outbound transitions",
@@ -705,7 +715,7 @@ fn emit_transition_obligations(plan: &mut TestPlan, entity: &str, graph: &Transi
             ),
             source_construct: format!("{}.{}", entity, field),
             expression: None,
-            source_span: (graph.span.start, graph.span.end),
+            source_span: SourceSpan { start: graph.span.start, end: graph.span.end },
             detail: Some(ObligationDetail::Terminal {
                 entity: entity.to_string(),
                 field: field.clone(),
@@ -719,12 +729,12 @@ fn emit_transition_obligations(plan: &mut TestPlan, entity: &str, graph: &Transi
 fn emit_value_obligations(plan: &mut TestPlan, block: &BlockDecl) {
     let name = block_name(block);
     plan.obligations.push(Obligation {
-        id: format!("value-equality-{}", name),
+        id: format!("value-equality.{}", name),
         category: ObligationCategory::ValueEquality,
         description: format!("Verify value type {} has structural equality", name),
         source_construct: name.clone(),
         expression: None,
-        source_span: (block.span.start, block.span.end),
+        source_span: SourceSpan { start: block.span.start, end: block.span.end },
         detail: None,
         dependencies: None,
     });
@@ -739,12 +749,12 @@ fn emit_value_obligations(plan: &mut TestPlan, block: &BlockDecl) {
 
     if !fields.is_empty() {
         plan.obligations.push(Obligation {
-            id: format!("entity-fields-{}", name),
+            id: format!("entity-fields.{}", name),
             category: ObligationCategory::EntityFields,
             description: format!("Verify all declared fields on {} are present with correct types", name),
             source_construct: name,
             expression: None,
-            source_span: (block.span.start, block.span.end),
+            source_span: SourceSpan { start: block.span.start, end: block.span.end },
             detail: Some(ObligationDetail::Fields { fields }),
             dependencies: None,
         });
@@ -754,12 +764,12 @@ fn emit_value_obligations(plan: &mut TestPlan, block: &BlockDecl) {
 fn emit_enum_obligations(plan: &mut TestPlan, block: &BlockDecl) {
     let name = block_name(block);
     plan.obligations.push(Obligation {
-        id: format!("enum-comparable-{}", name),
+        id: format!("enum-comparable.{}", name),
         category: ObligationCategory::EnumComparable,
         description: format!("Verify fields typed with enum {} are comparable", name),
         source_construct: name,
         expression: None,
-        source_span: (block.span.start, block.span.end),
+        source_span: SourceSpan { start: block.span.start, end: block.span.end },
         detail: None,
         dependencies: None,
     });
@@ -771,12 +781,12 @@ fn emit_rule_obligations(plan: &mut TestPlan, block: &BlockDecl, ctx: &ModuleCon
 
     // Success case
     plan.obligations.push(Obligation {
-        id: format!("rule-success-{}", name),
+        id: format!("rule-success.{}", name),
         category: ObligationCategory::RuleSuccess,
         description: format!("Verify rule {} succeeds when all preconditions are met", name),
         source_construct: name.clone(),
         expression: None,
-        source_span: (block.span.start, block.span.end),
+        source_span: SourceSpan { start: block.span.start, end: block.span.end },
         detail: None,
         dependencies: Some(deps.clone()),
     });
@@ -786,11 +796,16 @@ fn emit_rule_obligations(plan: &mut TestPlan, block: &BlockDecl, ctx: &ModuleCon
 }
 
 fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _block_span: Span, deps: &RuleDependencies) {
+    walk_rule_items_inner(plan, rule_name, items, _block_span, deps, &mut 0, &mut 0);
+}
+
+fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _block_span: Span, deps: &RuleDependencies, failure_ordinal: &mut u32, creation_ordinal: &mut u32) {
     for item in items {
         match &item.kind {
             BlockItemKind::Clause { keyword, .. } if keyword == "requires" => {
+                *failure_ordinal += 1;
                 plan.obligations.push(Obligation {
-                    id: format!("rule-failure-{}-{}", rule_name, plan.obligations.len()),
+                    id: format!("rule-failure.{}.{}", rule_name, failure_ordinal),
                     category: ObligationCategory::RuleFailure,
                     description: format!(
                         "Verify rule {} is rejected when requires clause fails",
@@ -798,7 +813,7 @@ fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _b
                     ),
                     source_construct: rule_name.to_string(),
                     expression: None,
-                    source_span: (item.span.start, item.span.end),
+                    source_span: SourceSpan { start: item.span.start, end: item.span.end },
                     detail: None,
                     dependencies: Some(deps.clone()),
                 });
@@ -807,23 +822,24 @@ fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _b
                 // Check for temporal triggers
                 if contains_temporal(value) {
                     plan.obligations.push(Obligation {
-                        id: format!("temporal-{}", rule_name),
-                        category: ObligationCategory::TemporalTrigger,
+                        id: format!("temporal.{}", rule_name),
+                        category: ObligationCategory::Temporal,
                         description: format!(
                             "Verify temporal trigger in {} fires at deadline, not before, and does not re-fire",
                             rule_name
                         ),
                         source_construct: rule_name.to_string(),
                         expression: None,
-                        source_span: (item.span.start, item.span.end),
+                        source_span: SourceSpan { start: item.span.start, end: item.span.end },
                         detail: None,
                         dependencies: Some(deps.clone()),
                     });
                 }
                 // Check for entity creation triggers
                 if contains_entity_creation(value) {
+                    *creation_ordinal += 1;
                     plan.obligations.push(Obligation {
-                        id: format!("rule-entity-creation-{}", rule_name),
+                        id: format!("rule-entity-creation.{}.{}", rule_name, creation_ordinal),
                         category: ObligationCategory::RuleEntityCreation,
                         description: format!(
                             "Verify entity creation in rule {} produces the specified fields",
@@ -831,7 +847,7 @@ fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _b
                         ),
                         source_construct: rule_name.to_string(),
                         expression: None,
-                        source_span: (item.span.start, item.span.end),
+                        source_span: SourceSpan { start: item.span.start, end: item.span.end },
                         detail: None,
                         dependencies: Some(deps.clone()),
                     });
@@ -839,8 +855,9 @@ fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _b
             }
             BlockItemKind::Clause { keyword, value } if keyword == "ensures" => {
                 if contains_entity_creation(value) {
+                    *creation_ordinal += 1;
                     plan.obligations.push(Obligation {
-                        id: format!("rule-entity-creation-{}-{}", rule_name, plan.obligations.len()),
+                        id: format!("rule-entity-creation.{}.{}", rule_name, creation_ordinal),
                         category: ObligationCategory::RuleEntityCreation,
                         description: format!(
                             "Verify entity creation in rule {} ensures clause produces the specified fields",
@@ -848,21 +865,21 @@ fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _b
                         ),
                         source_construct: rule_name.to_string(),
                         expression: None,
-                        source_span: (item.span.start, item.span.end),
+                        source_span: SourceSpan { start: item.span.start, end: item.span.end },
                         detail: None,
                         dependencies: Some(deps.clone()),
                     });
                 }
             }
             BlockItemKind::ForBlock { items, .. } => {
-                walk_rule_items(plan, rule_name, items, _block_span, deps);
+                walk_rule_items_inner(plan, rule_name, items, _block_span, deps, failure_ordinal, creation_ordinal);
             }
             BlockItemKind::IfBlock { branches, else_items } => {
                 for branch in branches {
-                    walk_rule_items(plan, rule_name, &branch.items, _block_span, deps);
+                    walk_rule_items_inner(plan, rule_name, &branch.items, _block_span, deps, failure_ordinal, creation_ordinal);
                 }
                 if let Some(else_items) = else_items {
-                    walk_rule_items(plan, rule_name, else_items, _block_span, deps);
+                    walk_rule_items_inner(plan, rule_name, else_items, _block_span, deps, failure_ordinal, creation_ordinal);
                 }
             }
             _ => {}
@@ -875,12 +892,12 @@ fn emit_surface_obligations(plan: &mut TestPlan, block: &BlockDecl) {
 
     // Actor restriction
     plan.obligations.push(Obligation {
-        id: format!("surface-actor-{}", name),
+        id: format!("surface-actor.{}", name),
         category: ObligationCategory::SurfaceActor,
         description: format!("Verify surface {} is accessible only to the specified actor", name),
         source_construct: name.clone(),
         expression: None,
-        source_span: (block.span.start, block.span.end),
+        source_span: SourceSpan { start: block.span.start, end: block.span.end },
         detail: None,
         dependencies: None,
     });
@@ -890,12 +907,12 @@ fn emit_surface_obligations(plan: &mut TestPlan, block: &BlockDecl) {
             BlockItemKind::Clause { keyword, value } if keyword == "exposes" => {
                 let items = collect_exposed_names(value);
                 plan.obligations.push(Obligation {
-                    id: format!("surface-exposure-{}", name),
+                    id: format!("surface-exposure.{}", name),
                     category: ObligationCategory::SurfaceExposure,
                     description: format!("Verify each exposed item on {} is accessible", name),
                     source_construct: name.clone(),
                     expression: None,
-                    source_span: (item.span.start, item.span.end),
+                    source_span: SourceSpan { start: item.span.start, end: item.span.end },
                     detail: if items.is_empty() { None } else {
                         Some(ObligationDetail::Surface { surface: name.clone(), items })
                     },
@@ -904,7 +921,7 @@ fn emit_surface_obligations(plan: &mut TestPlan, block: &BlockDecl) {
             }
             BlockItemKind::Clause { keyword, .. } if keyword == "provides" => {
                 plan.obligations.push(Obligation {
-                    id: format!("surface-provides-{}", name),
+                    id: format!("surface-provides.{}", name),
                     category: ObligationCategory::SurfaceProvides,
                     description: format!(
                         "Verify provided operations on {} appear/hide based on when conditions",
@@ -912,7 +929,7 @@ fn emit_surface_obligations(plan: &mut TestPlan, block: &BlockDecl) {
                     ),
                     source_construct: name.clone(),
                     expression: None,
-                    source_span: (item.span.start, item.span.end),
+                    source_span: SourceSpan { start: item.span.start, end: item.span.end },
                     detail: None,
                     dependencies: None,
                 });
@@ -926,12 +943,12 @@ fn emit_config_obligations(plan: &mut TestPlan, block: &BlockDecl) {
     for item in &block.items {
         if let BlockItemKind::Assignment { name, .. } = &item.kind {
             plan.obligations.push(Obligation {
-                id: format!("config-default-{}", name.name),
+                id: format!("config-default.{}", name.name),
                 category: ObligationCategory::ConfigDefault,
                 description: format!("Verify config parameter {} has its declared default", name.name),
                 source_construct: format!("config.{}", name.name),
                 expression: None,
-                source_span: (item.span.start, item.span.end),
+                source_span: SourceSpan { start: item.span.start, end: item.span.end },
                 detail: None,
                 dependencies: None,
             });
@@ -944,7 +961,7 @@ fn emit_contract_obligations(plan: &mut TestPlan, block: &BlockDecl) {
     for item in &block.items {
         if let BlockItemKind::Assignment { name: sig_name, .. } = &item.kind {
             plan.obligations.push(Obligation {
-                id: format!("contract-sig-{}-{}", name, sig_name.name),
+                id: format!("contract-signature.{}.{}", name, sig_name.name),
                 category: ObligationCategory::ContractSignature,
                 description: format!(
                     "Verify implementation satisfies contract {}.{}",
@@ -952,7 +969,7 @@ fn emit_contract_obligations(plan: &mut TestPlan, block: &BlockDecl) {
                 ),
                 source_construct: format!("{}.{}", name, sig_name.name),
                 expression: None,
-                source_span: (item.span.start, item.span.end),
+                source_span: SourceSpan { start: item.span.start, end: item.span.end },
                 detail: None,
                 dependencies: None,
             });
@@ -962,7 +979,7 @@ fn emit_contract_obligations(plan: &mut TestPlan, block: &BlockDecl) {
 
 fn emit_variant_obligations(plan: &mut TestPlan, v: &VariantDecl) {
     plan.obligations.push(Obligation {
-        id: format!("sum-type-variant-{}", v.name.name),
+        id: format!("sum-type-variant.{}", v.name.name),
         category: ObligationCategory::SumTypeVariant,
         description: format!(
             "Verify variant {} has its specific fields accessible within a type guard",
@@ -970,7 +987,7 @@ fn emit_variant_obligations(plan: &mut TestPlan, v: &VariantDecl) {
         ),
         source_construct: v.name.name.clone(),
         expression: None,
-        source_span: (v.span.start, v.span.end),
+        source_span: SourceSpan { start: v.span.start, end: v.span.end },
         detail: None,
         dependencies: None,
     });
@@ -978,15 +995,15 @@ fn emit_variant_obligations(plan: &mut TestPlan, v: &VariantDecl) {
 
 fn emit_invariant_obligation(plan: &mut TestPlan, inv: &InvariantDecl, source: &str) {
     plan.obligations.push(Obligation {
-        id: format!("invariant-{}", inv.name.name),
-        category: ObligationCategory::InvariantProperty,
+        id: format!("invariant.{}", inv.name.name),
+        category: ObligationCategory::Invariant,
         description: format!(
             "Verify invariant {} holds after every state-changing rule that touches constrained entities",
             inv.name.name
         ),
         source_construct: inv.name.name.clone(),
         expression: Some(span_text(source, inv.body.span())),
-        source_span: (inv.span.start, inv.span.end),
+        source_span: SourceSpan { start: inv.span.start, end: inv.span.end },
         detail: None,
         dependencies: None,
     });
@@ -1699,7 +1716,7 @@ mod tests {
     fn entity_fields_obligation_lists_fields() {
         let source = "-- allium: 3\nentity Order {\n  name: String\n  total: Integer\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "entity-fields-Order");
+        let ob = find_obligation(&plan, "entity-fields.Order");
         assert!(matches!(ob.category, ObligationCategory::EntityFields));
         if let Some(ObligationDetail::Fields { fields }) = &ob.detail {
             assert_eq!(fields, &["name", "total"]);
@@ -1712,14 +1729,14 @@ mod tests {
     fn entity_fields_source_construct() {
         let source = "-- allium: 3\nentity Widget { size: Integer }";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "entity-fields-Widget");
+        let ob = find_obligation(&plan, "entity-fields.Widget");
         assert_eq!(ob.source_construct, "Widget");
     }
 
     #[test]
     fn empty_entity_no_fields_obligation() {
         let plan = parse_plan("-- allium: 3\nentity Empty {}");
-        let matching = obligations_matching(&plan, "entity-fields-Empty");
+        let matching = obligations_matching(&plan, "entity-fields.Empty");
         assert!(matching.is_empty());
     }
 
@@ -1729,7 +1746,7 @@ mod tests {
     fn optional_field_obligation() {
         let source = "-- allium: 3\nentity User {\n  bio: String?\n  name: String\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "entity-optional-User-bio");
+        let ob = find_obligation(&plan, "entity-optional.User.bio");
         assert!(matches!(ob.category, ObligationCategory::EntityOptional));
         assert!(ob.description.contains("bio"));
     }
@@ -1748,7 +1765,7 @@ mod tests {
     fn relationship_obligation() {
         let source = "-- allium: 3\nentity Order { items: OrderItem with order }";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "entity-relationship-Order-items");
+        let ob = find_obligation(&plan, "entity-relationship.Order.items");
         assert!(matches!(ob.category, ObligationCategory::EntityRelationship));
     }
 
@@ -1758,7 +1775,7 @@ mod tests {
     fn projection_obligation() {
         let source = "-- allium: 3\nentity Order {\n  items: OrderItem with order\n  active_items: items where active = true\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "projection-Order-active_items");
+        let ob = find_obligation(&plan, "projection.Order.active_items");
         assert!(matches!(ob.category, ObligationCategory::Projection));
     }
 
@@ -1768,8 +1785,8 @@ mod tests {
     fn derived_value_obligation() {
         let source = "-- allium: 3\nentity Order {\n  a: Integer\n  b: Integer\n  total: a + b\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "derived-Order-total");
-        assert!(matches!(ob.category, ObligationCategory::DerivedValue));
+        let ob = find_obligation(&plan, "derived.Order.total");
+        assert!(matches!(ob.category, ObligationCategory::Derived));
         assert!(ob.expression.is_none());
     }
 
@@ -1779,7 +1796,7 @@ mod tests {
     fn transition_edge_obligations() {
         let source = "-- allium: 3\nentity Order {\n  status: pending | shipped | done\n  transitions status {\n    pending -> shipped\n    shipped -> done\n    terminal: done\n  }\n}";
         let plan = parse_plan(source);
-        let edge1 = find_obligation(&plan, "transition-edge-Order-pending-shipped");
+        let edge1 = find_obligation(&plan, "transition-edge.Order.pending.shipped");
         assert!(matches!(edge1.category, ObligationCategory::TransitionEdge));
         if let Some(ObligationDetail::Transition { from, to, .. }) = &edge1.detail {
             assert_eq!(from, "pending");
@@ -1787,14 +1804,14 @@ mod tests {
         } else {
             panic!("expected Transition detail");
         }
-        find_obligation(&plan, "transition-edge-Order-shipped-done");
+        find_obligation(&plan, "transition-edge.Order.shipped.done");
     }
 
     #[test]
     fn transition_rejected_obligation() {
         let source = "-- allium: 3\nentity Order {\n  status: pending | done\n  transitions status {\n    pending -> done\n    terminal: done\n  }\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "transition-rejected-Order");
+        let ob = find_obligation(&plan, "transition-rejected.Order.status");
         assert!(matches!(ob.category, ObligationCategory::TransitionRejected));
     }
 
@@ -1802,7 +1819,7 @@ mod tests {
     fn transition_terminal_obligation() {
         let source = "-- allium: 3\nentity Order {\n  status: pending | done\n  transitions status {\n    pending -> done\n    terminal: done\n  }\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "transition-terminal-Order");
+        let ob = find_obligation(&plan, "transition-terminal.Order.status");
         assert!(matches!(ob.category, ObligationCategory::TransitionTerminal));
         if let Some(ObligationDetail::Terminal { states, .. }) = &ob.detail {
             assert_eq!(states, &["done"]);
@@ -1825,8 +1842,8 @@ mod tests {
     fn when_field_presence_obligation() {
         let source = "-- allium: 3\nentity Order {\n  status: pending | shipped\n  tracking: String when status = shipped\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "when-presence-Order-tracking");
-        assert!(matches!(ob.category, ObligationCategory::WhenFieldPresence));
+        let ob = find_obligation(&plan, "when-presence.Order.tracking");
+        assert!(matches!(ob.category, ObligationCategory::WhenPresence));
         if let Some(ObligationDetail::WhenFieldPresence { entity, field, status_field, qualifying_states }) = &ob.detail {
             assert_eq!(entity, "Order");
             assert_eq!(field, "tracking");
@@ -1843,7 +1860,7 @@ mod tests {
     fn value_type_equality_obligation() {
         let source = "-- allium: 3\nvalue Address {\n  street: String\n  city: String\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "value-equality-Address");
+        let ob = find_obligation(&plan, "value-equality.Address");
         assert!(matches!(ob.category, ObligationCategory::ValueEquality));
     }
 
@@ -1851,7 +1868,7 @@ mod tests {
     fn value_type_fields_obligation() {
         let source = "-- allium: 3\nvalue Address {\n  street: String\n  city: String\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "entity-fields-Address");
+        let ob = find_obligation(&plan, "entity-fields.Address");
         if let Some(ObligationDetail::Fields { fields }) = &ob.detail {
             assert_eq!(fields, &["street", "city"]);
         } else {
@@ -1865,7 +1882,7 @@ mod tests {
     fn enum_comparable_obligation() {
         let source = "-- allium: 3\nenum Colour {\n  red\n  green\n  blue\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "enum-comparable-Colour");
+        let ob = find_obligation(&plan, "enum-comparable.Colour");
         assert!(matches!(ob.category, ObligationCategory::EnumComparable));
     }
 
@@ -1875,7 +1892,7 @@ mod tests {
     fn rule_success_obligation() {
         let source = "-- allium: 3\nrule DoThing {\n  requires: x = 1\n  ensures: x = 2\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "rule-success-DoThing");
+        let ob = find_obligation(&plan, "rule-success.DoThing");
         assert!(matches!(ob.category, ObligationCategory::RuleSuccess));
         assert!(ob.expression.is_none());
     }
@@ -1884,7 +1901,7 @@ mod tests {
     fn rule_failure_obligation_from_requires() {
         let source = "-- allium: 3\nrule DoThing {\n  requires: x = 1\n  ensures: x = 2\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "rule-failure-DoThing");
+        let ob = find_obligation(&plan, "rule-failure.DoThing.1");
         assert!(matches!(ob.category, ObligationCategory::RuleFailure));
     }
 
@@ -1902,7 +1919,7 @@ mod tests {
     fn surface_actor_obligation() {
         let source = "-- allium: 3\nsurface Dashboard {\n  facing: admin\n  exposes: Order.status\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "surface-actor-Dashboard");
+        let ob = find_obligation(&plan, "surface-actor.Dashboard");
         assert!(matches!(ob.category, ObligationCategory::SurfaceActor));
     }
 
@@ -1910,7 +1927,7 @@ mod tests {
     fn surface_exposure_obligation() {
         let source = "-- allium: 3\nsurface Dashboard {\n  facing: admin\n  exposes: Order.status\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "surface-exposure-Dashboard");
+        let ob = find_obligation(&plan, "surface-exposure.Dashboard");
         assert!(matches!(ob.category, ObligationCategory::SurfaceExposure));
     }
 
@@ -1918,7 +1935,7 @@ mod tests {
     fn surface_provides_obligation() {
         let source = "-- allium: 3\nsurface Dashboard {\n  facing: admin\n  provides: Order.cancel\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "surface-provides-Dashboard");
+        let ob = find_obligation(&plan, "surface-provides.Dashboard");
         assert!(matches!(ob.category, ObligationCategory::SurfaceProvides));
     }
 
@@ -1928,7 +1945,7 @@ mod tests {
     fn config_default_obligation() {
         let source = "-- allium: 3\nconfig {\n  max_retries: Integer = 3\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "config-default-max_retries");
+        let ob = find_obligation(&plan, "config-default.max_retries");
         assert!(matches!(ob.category, ObligationCategory::ConfigDefault));
         assert_eq!(ob.source_construct, "config.max_retries");
     }
@@ -1937,8 +1954,8 @@ mod tests {
     fn config_multiple_params() {
         let source = "-- allium: 3\nconfig {\n  max_retries: Integer = 3\n  batch_size: Integer = 10\n}";
         let plan = parse_plan(source);
-        find_obligation(&plan, "config-default-max_retries");
-        find_obligation(&plan, "config-default-batch_size");
+        find_obligation(&plan, "config-default.max_retries");
+        find_obligation(&plan, "config-default.batch_size");
     }
 
     // --- Contract obligations ---
@@ -1947,7 +1964,7 @@ mod tests {
     fn contract_signature_obligation() {
         let source = "-- allium: 3\ncontract PaymentGateway {\n  charge: Amount -> Result\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "contract-sig-PaymentGateway-charge");
+        let ob = find_obligation(&plan, "contract-signature.PaymentGateway.charge");
         assert!(matches!(ob.category, ObligationCategory::ContractSignature));
         assert_eq!(ob.source_construct, "PaymentGateway.charge");
     }
@@ -1958,7 +1975,7 @@ mod tests {
     fn variant_obligation() {
         let source = "-- allium: 3\nvariant NetworkError : Error {\n  code: Integer\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "sum-type-variant-NetworkError");
+        let ob = find_obligation(&plan, "sum-type-variant.NetworkError");
         assert!(matches!(ob.category, ObligationCategory::SumTypeVariant));
     }
 
@@ -1968,7 +1985,7 @@ mod tests {
     fn entity_invariant_obligation_includes_expression() {
         let source = "-- allium: 3\nentity Order {\n  total: Integer\n  invariant NonNeg { this.total >= 0 }\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "invariant-entity-Order-NonNeg");
+        let ob = find_obligation(&plan, "invariant.Order.NonNeg");
         assert_eq!(ob.expression.as_deref(), Some("this.total >= 0"));
     }
 
@@ -1976,8 +1993,8 @@ mod tests {
     fn entity_invariant_obligation_category_and_description() {
         let source = "-- allium: 3\nentity Foo {\n  x: Integer\n  invariant XPos { this.x >= 0 }\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "invariant-entity-Foo-XPos");
-        assert!(matches!(ob.category, ObligationCategory::InvariantProperty));
+        let ob = find_obligation(&plan, "invariant.Foo.XPos");
+        assert!(matches!(ob.category, ObligationCategory::Invariant));
         assert!(ob.description.contains("XPos"));
         assert!(ob.description.contains("Foo"));
     }
@@ -1986,7 +2003,7 @@ mod tests {
     fn entity_invariant_source_construct() {
         let source = "-- allium: 3\nentity Foo {\n  x: Integer\n  invariant XPos { this.x >= 0 }\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "invariant-entity-Foo-XPos");
+        let ob = find_obligation(&plan, "invariant.Foo.XPos");
         assert_eq!(ob.source_construct, "Foo.XPos");
     }
 
@@ -1996,7 +2013,7 @@ mod tests {
     fn top_level_invariant_obligation_includes_expression() {
         let source = "-- allium: 3\nentity Order {\n  status: pending | done\n}\ninvariant AllDone {\n  for o in Orders: o.status = done\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "invariant-AllDone");
+        let ob = find_obligation(&plan, "invariant.AllDone");
         assert!(ob.expression.is_some());
         let expr = ob.expression.as_deref().unwrap();
         assert!(expr.contains("for o in Orders"), "expression was: {}", expr);
@@ -2006,7 +2023,7 @@ mod tests {
     fn top_level_invariant_complex_expression_preserved() {
         let source = "-- allium: 3\nentity Account {\n  balance: Decimal\n}\ninvariant AllSolvent {\n  for a in Accounts: a.balance >= 0\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "invariant-AllSolvent");
+        let ob = find_obligation(&plan, "invariant.AllSolvent");
         let expr = ob.expression.as_deref().unwrap();
         assert!(expr.contains("a.balance >= 0"), "expression was: {}", expr);
     }
@@ -2015,7 +2032,7 @@ mod tests {
     fn top_level_invariant_source_construct() {
         let source = "-- allium: 3\ninvariant GlobalCheck {\n  true\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "invariant-GlobalCheck");
+        let ob = find_obligation(&plan, "invariant.GlobalCheck");
         assert_eq!(ob.source_construct, "GlobalCheck");
     }
 
@@ -2025,7 +2042,7 @@ mod tests {
     fn entity_fields_obligation_omits_expression() {
         let source = "-- allium: 3\nentity Order {\n  total: Integer\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "entity-fields-Order");
+        let ob = find_obligation(&plan, "entity-fields.Order");
         assert!(ob.expression.is_none());
     }
 
@@ -2046,7 +2063,7 @@ mod tests {
         let plan = parse_plan(source);
         let json = to_json(&plan);
         let ob = json["obligations"].as_array().unwrap()
-            .iter().find(|o| o["id"].as_str().unwrap().contains("invariant-entity"))
+            .iter().find(|o| o["id"].as_str().unwrap().contains("invariant."))
             .unwrap();
         assert_eq!(ob["expression"].as_str().unwrap(), "this.x >= 0");
     }
@@ -2055,7 +2072,7 @@ mod tests {
     fn rule_obligation_omits_expression() {
         let source = "-- allium: 3\nentity Order {\n  status: pending | done\n}\nrule Confirm {\n  requires: status = pending\n  ensures: status = done\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "rule-success-Confirm");
+        let ob = find_obligation(&plan, "rule-success.Confirm");
         assert!(ob.expression.is_none());
     }
 
@@ -2078,8 +2095,7 @@ mod tests {
         let source = "-- allium: 3\nentity Order {\n  total: Integer\n  invariant NonNeg { this.total >= 0 }\n}";
         let plan = parse_plan(source);
         for ob in &plan.obligations {
-            let (start, end) = ob.source_span;
-            assert!(end > start, "obligation {} has zero-width span", ob.id);
+            assert!(ob.source_span.end > ob.source_span.start, "obligation {} has zero-width span", ob.id);
         }
     }
 
@@ -2089,8 +2105,8 @@ mod tests {
     fn temporal_trigger_obligation() {
         let source = "-- allium: 3\nrule Timeout {\n  when: o: Order.created_at + 48.hours <= now\n  ensures: o.status = cancelled\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "temporal-Timeout");
-        assert!(matches!(ob.category, ObligationCategory::TemporalTrigger));
+        let ob = find_obligation(&plan, "temporal.Timeout");
+        assert!(matches!(ob.category, ObligationCategory::Temporal));
     }
 
     // --- Entity creation obligations ---
@@ -2099,7 +2115,7 @@ mod tests {
     fn entity_creation_obligation_from_ensures() {
         let source = "-- allium: 3\nrule Notify {\n  when: order: Order.status transitions_to shipped\n  ensures: Email.created(to: order.customer.email)\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "rule-entity-creation-Notify");
+        let ob = find_obligation(&plan, "rule-entity-creation.Notify.1");
         assert!(matches!(ob.category, ObligationCategory::RuleEntityCreation));
     }
 
@@ -2112,8 +2128,8 @@ mod tests {
             transitions status {\n    pending -> shipped\n    terminal: shipped\n  }\n}\n\
             rule Ship {\n  when: Ship(order)\n  requires: order.status = pending\n  ensures: order.status = shipped\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "when-set-Ship-Order-tracking");
-        assert!(matches!(ob.category, ObligationCategory::WhenPresenceObligation));
+        let ob = find_obligation(&plan, "when-set.Ship.Order.tracking");
+        assert!(matches!(ob.category, ObligationCategory::WhenSet));
         if let Some(ObligationDetail::WhenPresence { rule, entity, field, source_state, target_state, qualifying_states }) = &ob.detail {
             assert_eq!(rule, "Ship");
             assert_eq!(entity, "Order");
@@ -2133,8 +2149,8 @@ mod tests {
             transitions status {\n    active -> shipped\n    shipped -> cancelled\n    terminal: cancelled\n  }\n}\n\
             rule Cancel {\n  when: Cancel(order)\n  requires: order.status = shipped\n  ensures: order.status = cancelled\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "when-clear-Cancel-Order-tracking");
-        assert!(matches!(ob.category, ObligationCategory::WhenAbsenceObligation));
+        let ob = find_obligation(&plan, "when-clear.Cancel.Order.tracking");
+        assert!(matches!(ob.category, ObligationCategory::WhenClear));
         if let Some(ObligationDetail::WhenAbsence { rule, entity, field, source_state, target_state, .. }) = &ob.detail {
             assert_eq!(rule, "Cancel");
             assert_eq!(entity, "Order");
@@ -2152,7 +2168,7 @@ mod tests {
     fn external_entity_emits_field_obligations() {
         let source = "-- allium: 3\nexternal entity Customer {\n  email: String\n  name: String\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "entity-fields-Customer");
+        let ob = find_obligation(&plan, "entity-fields.Customer");
         if let Some(ObligationDetail::Fields { fields }) = &ob.detail {
             assert_eq!(fields, &["email", "name"]);
         } else {
@@ -2166,7 +2182,7 @@ mod tests {
     fn surface_exposure_detail_lists_items() {
         let source = "-- allium: 3\nsurface Dashboard {\n  facing: admin\n  exposes:\n    Order.status\n    Order.tracking_number\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "surface-exposure-Dashboard");
+        let ob = find_obligation(&plan, "surface-exposure.Dashboard");
         if let Some(ObligationDetail::Surface { surface, items }) = &ob.detail {
             assert_eq!(surface, "Dashboard");
             assert_eq!(items, &["status", "tracking_number"]);
@@ -2181,7 +2197,7 @@ mod tests {
     fn when_field_multiple_qualifying_states() {
         let source = "-- allium: 3\nentity Order {\n  status: pending | shipped | delivered\n  tracking: String when status = shipped | delivered\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "when-presence-Order-tracking");
+        let ob = find_obligation(&plan, "when-presence.Order.tracking");
         if let Some(ObligationDetail::WhenFieldPresence { qualifying_states, .. }) = &ob.detail {
             assert_eq!(qualifying_states, &["shipped", "delivered"]);
         } else {
@@ -2195,7 +2211,7 @@ mod tests {
     fn for_block_entity_creation_in_rule() {
         let source = "-- allium: 3\nrule NotifyAll {\n  when: NotifyAll(orders)\n  for order in orders:\n    ensures: Email.created(to: order.email)\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "rule-entity-creation-NotifyAll");
+        let ob = find_obligation(&plan, "rule-entity-creation.NotifyAll.1");
         assert!(matches!(ob.category, ObligationCategory::RuleEntityCreation));
     }
 
@@ -2203,7 +2219,7 @@ mod tests {
     fn if_block_entity_creation_in_rule() {
         let source = "-- allium: 3\nrule Process {\n  when: Process(order, express)\n  if express:\n    ensures: Express.created(order: order)\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "rule-entity-creation-Process");
+        let ob = find_obligation(&plan, "rule-entity-creation.Process.1");
         assert!(matches!(ob.category, ObligationCategory::RuleEntityCreation));
     }
 
@@ -2216,8 +2232,8 @@ mod tests {
             transitions status {\n    pending -> shipped\n    terminal: shipped\n  }\n}\n\
             rule AutoShip {\n  when: AutoShip(order)\n  ensures: order.status = shipped\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "when-set-AutoShip-Order-tracking");
-        assert!(matches!(ob.category, ObligationCategory::WhenPresenceObligation));
+        let ob = find_obligation(&plan, "when-set.AutoShip.Order.tracking");
+        assert!(matches!(ob.category, ObligationCategory::WhenSet));
         if let Some(ObligationDetail::WhenPresence { source_state, .. }) = &ob.detail {
             assert_eq!(source_state, "unknown");
         } else {
@@ -2234,8 +2250,8 @@ mod tests {
             transitions status {\n    pending -> shipped\n    confirmed -> shipped\n    terminal: shipped\n  }\n}\n\
             rule Ship {\n  when: Ship(order)\n  requires: order.status in {pending, confirmed}\n  ensures: order.status = shipped\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "when-set-Ship-Order-tracking");
-        assert!(matches!(ob.category, ObligationCategory::WhenPresenceObligation));
+        let ob = find_obligation(&plan, "when-set.Ship.Order.tracking");
+        assert!(matches!(ob.category, ObligationCategory::WhenSet));
     }
 
     // --- Transition rejected: verify source_construct ---
@@ -2244,7 +2260,7 @@ mod tests {
     fn transition_rejected_describes_field() {
         let source = "-- allium: 3\nentity Order {\n  status: a | b\n  transitions status {\n    a -> b\n  }\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "transition-rejected-Order");
+        let ob = find_obligation(&plan, "transition-rejected.Order.status");
         assert_eq!(ob.source_construct, "Order.status");
         assert!(ob.description.contains("Order") && ob.description.contains("status"));
     }
@@ -2255,7 +2271,7 @@ mod tests {
     fn multiple_requires_produce_multiple_failure_obligations() {
         let source = "-- allium: 3\nrule DoThing {\n  requires: x = 1\n  requires: y = 2\n  ensures: z = 3\n}";
         let plan = parse_plan(source);
-        let failures = obligations_matching(&plan, "rule-failure-DoThing");
+        let failures = obligations_matching(&plan, "rule-failure.DoThing");
         assert_eq!(failures.len(), 2);
     }
 
@@ -2265,7 +2281,7 @@ mod tests {
     fn entity_creation_in_block_ensures() {
         let source = "-- allium: 3\nrule Notify {\n  when: Notify(order)\n  ensures:\n    order.status = shipped\n    Email.created(to: order.email)\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "rule-entity-creation-Notify");
+        let ob = find_obligation(&plan, "rule-entity-creation.Notify.1");
         assert!(matches!(ob.category, ObligationCategory::RuleEntityCreation));
     }
 
@@ -2284,14 +2300,14 @@ mod tests {
     fn param_assignment_excluded_from_fields_and_derived() {
         let source = "-- allium: 3\nentity Order {\n  subtotal: Decimal\n  total(tax_rate): subtotal * tax_rate\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "entity-fields-Order");
+        let ob = find_obligation(&plan, "entity-fields.Order");
         if let Some(ObligationDetail::Fields { fields }) = &ob.detail {
             assert!(fields.contains(&"subtotal".to_string()));
             assert!(!fields.contains(&"total".to_string()));
         } else {
             panic!("expected Fields detail");
         }
-        let derived = obligations_matching(&plan, "derived-Order-total");
+        let derived = obligations_matching(&plan, "derived.Order.total");
         assert!(derived.is_empty());
     }
 
@@ -2317,21 +2333,21 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
         let plan = parse_plan(source);
 
         // Spot-check that each category is present
-        find_obligation(&plan, "entity-fields-Order");
-        find_obligation(&plan, "transition-edge-Order-pending-done");
-        find_obligation(&plan, "transition-rejected-Order");
-        find_obligation(&plan, "transition-terminal-Order");
-        find_obligation(&plan, "invariant-entity-Order-NonNeg");
-        find_obligation(&plan, "enum-comparable-Priority");
-        find_obligation(&plan, "value-equality-Money");
-        find_obligation(&plan, "config-default-max_retries");
-        find_obligation(&plan, "invariant-GlobalCheck");
+        find_obligation(&plan, "entity-fields.Order");
+        find_obligation(&plan, "transition-edge.Order.pending.done");
+        find_obligation(&plan, "transition-rejected.Order.status");
+        find_obligation(&plan, "transition-terminal.Order.status");
+        find_obligation(&plan, "invariant.Order.NonNeg");
+        find_obligation(&plan, "enum-comparable.Priority");
+        find_obligation(&plan, "value-equality.Money");
+        find_obligation(&plan, "config-default.max_retries");
+        find_obligation(&plan, "invariant.GlobalCheck");
 
         // Invariants have expressions, others don't
-        assert!(find_obligation(&plan, "invariant-entity-Order-NonNeg").expression.is_some());
-        assert!(find_obligation(&plan, "invariant-GlobalCheck").expression.is_some());
-        assert!(find_obligation(&plan, "entity-fields-Order").expression.is_none());
-        assert!(find_obligation(&plan, "config-default-max_retries").expression.is_none());
+        assert!(find_obligation(&plan, "invariant.Order.NonNeg").expression.is_some());
+        assert!(find_obligation(&plan, "invariant.GlobalCheck").expression.is_some());
+        assert!(find_obligation(&plan, "entity-fields.Order").expression.is_none());
+        assert!(find_obligation(&plan, "config-default.max_retries").expression.is_none());
     }
 
     // --- Rule dependency analysis ---
@@ -2342,7 +2358,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: pending | done }\n\
             rule Confirm {\n  when: Confirm(order)\n  requires: order.status = pending\n  ensures: order.status = done\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "rule-success-Confirm");
+        let ob = find_obligation(&plan, "rule-success.Confirm");
         let deps = ob.dependencies.as_ref().expect("rule should have dependencies");
         assert!(matches!(deps.trigger_source, TriggerSource::External));
     }
@@ -2353,7 +2369,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: pending | done }\n\
             rule Confirm {\n  when: Confirm(order)\n  requires: order.status = pending\n  ensures: order.status = done\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Confirm").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Confirm").dependencies.as_ref().unwrap();
         assert!(deps.entities_read.contains(&"Order".to_string()));
     }
 
@@ -2363,7 +2379,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: pending | done }\n\
             rule Confirm {\n  when: Confirm(order)\n  requires: order.status = pending\n  ensures: order.status = done\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Confirm").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Confirm").dependencies.as_ref().unwrap();
         assert!(deps.entities_written.contains(&"Order".to_string()));
     }
 
@@ -2373,7 +2389,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: pending | shipped }\n\
             rule Ship {\n  when: order: Order.status transitions_to shipped\n  ensures: order.status = shipped\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Ship").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Ship").dependencies.as_ref().unwrap();
         assert!(matches!(deps.trigger_source, TriggerSource::StateTransition));
         assert!(deps.entities_read.contains(&"Order".to_string()));
     }
@@ -2384,7 +2400,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: pending | cancelled, created_at: Timestamp }\n\
             rule Timeout {\n  when: o: Order.created_at + 48.hours <= now\n  ensures: o.status = cancelled\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Timeout").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Timeout").dependencies.as_ref().unwrap();
         assert!(matches!(deps.trigger_source, TriggerSource::Temporal));
     }
 
@@ -2395,7 +2411,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Email { to: String }\n\
             rule Notify {\n  when: order: Order.created()\n  ensures: Email.created(to: order.to)\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Notify").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Notify").dependencies.as_ref().unwrap();
         assert!(matches!(deps.trigger_source, TriggerSource::Creation));
     }
 
@@ -2406,7 +2422,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             rule First {\n  when: Start(order)\n  ensures:\n    order.status = done\n    Notify(order)\n}\n\
             rule Second {\n  when: Notify(order)\n  ensures: order.status = done\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Second").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Second").dependencies.as_ref().unwrap();
         assert!(matches!(deps.trigger_source, TriggerSource::Chained));
     }
 
@@ -2417,7 +2433,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Email { to: String }\n\
             rule Ship {\n  when: Ship(order)\n  ensures:\n    order.status = shipped\n    Email.created(to: order.to)\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Ship").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Ship").dependencies.as_ref().unwrap();
         assert!(deps.entities_created.contains(&"Email".to_string()));
         assert!(deps.entities_written.contains(&"Order".to_string()));
     }
@@ -2428,7 +2444,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: pending | done }\n\
             rule Process {\n  when: Process(order)\n  ensures:\n    order.status = done\n    Notify(order)\n    Alert(order)\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Process").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Process").dependencies.as_ref().unwrap();
         assert!(deps.trigger_emissions.contains(&"Notify".to_string()));
         assert!(deps.trigger_emissions.contains(&"Alert".to_string()));
     }
@@ -2440,7 +2456,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             deferred Evaluate\n\
             rule Process {\n  when: Process(order)\n  ensures: order.total = Evaluate(order)\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Process").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Process").dependencies.as_ref().unwrap();
         assert!(deps.deferred_specs.contains(&"Evaluate".to_string()));
     }
 
@@ -2450,7 +2466,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: pending | done }\n\
             rule Confirm {\n  requires: order.status = pending\n  ensures: order.status = done\n}";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "rule-failure-Confirm");
+        let ob = find_obligation(&plan, "rule-failure.Confirm.1");
         assert!(ob.dependencies.is_some());
     }
 
@@ -2458,7 +2474,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
     fn rule_dependencies_absent_on_non_rule_obligations() {
         let source = "-- allium: 3\nentity Order { total: Integer }";
         let plan = parse_plan(source);
-        let ob = find_obligation(&plan, "entity-fields-Order");
+        let ob = find_obligation(&plan, "entity-fields.Order");
         assert!(ob.dependencies.is_none());
     }
 
@@ -2467,7 +2483,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
         let source = "-- allium: 3\n\
             rule Simple {\n  ensures: true\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Simple").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Simple").dependencies.as_ref().unwrap();
         assert!(deps.entities_read.is_empty());
         assert!(deps.entities_written.is_empty());
         assert!(deps.entities_created.is_empty());
@@ -2484,7 +2500,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
         let plan = parse_plan(source);
         let json = to_json(&plan);
         let ob = json["obligations"].as_array().unwrap()
-            .iter().find(|o| o["id"].as_str().unwrap() == "rule-success-Confirm")
+            .iter().find(|o| o["id"].as_str().unwrap() == "rule-success.Confirm")
             .unwrap();
         let deps = &ob["dependencies"];
         assert!(deps.is_object());
@@ -2510,7 +2526,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: pending | shipped }\n\
             rule Ship {\n  when: order: Order.status transitions_to shipped\n  ensures: order.status = shipped\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Ship").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Ship").dependencies.as_ref().unwrap();
         assert!(deps.entities_read.contains(&"Order".to_string()));
         assert!(deps.entities_written.contains(&"Order".to_string()));
     }
@@ -2522,7 +2538,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Customer { email: String }\n\
             rule Process {\n  when: Process(order)\n  requires: order.status = pending\n  ensures:\n    order.status = done\n    customer.email = order.email\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Process").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Process").dependencies.as_ref().unwrap();
         assert!(deps.entities_read.contains(&"Order".to_string()));
         assert!(deps.entities_written.contains(&"Order".to_string()));
         assert!(deps.entities_written.contains(&"Customer".to_string()));
@@ -2536,7 +2552,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: shipped | delivered }\n\
             rule Archive {\n  when: order: Order.status becomes delivered\n  ensures: AuditLog.created(action: delivered, order: order)\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Archive").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Archive").dependencies.as_ref().unwrap();
         assert!(matches!(deps.trigger_source, TriggerSource::StateTransition));
         assert!(deps.entities_read.contains(&"Order".to_string()));
     }
@@ -2549,7 +2565,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: pending | confirmed }\n\
             rule BulkConfirm {\n  when: BulkConfirm(batch)\n  for order in batch.orders where order.status = pending:\n    ensures: order.status = confirmed\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-BulkConfirm").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.BulkConfirm").dependencies.as_ref().unwrap();
         assert!(deps.entities_written.contains(&"Order".to_string()));
     }
 
@@ -2560,7 +2576,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Customer { name: String }\n\
             rule Cancel {\n  when: Cancel(order, reason)\n  ensures:\n    order.status = cancelled\n    if reason = customer_request:\n      order.cancelled_by = order.customer.name\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Cancel").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Cancel").dependencies.as_ref().unwrap();
         assert!(deps.entities_written.contains(&"Order".to_string()));
     }
 
@@ -2572,7 +2588,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: picking | shipped, tracking_number: String, shipped_at: Timestamp }\n\
             rule ShipOrder {\n  when: ShipOrder(order, tracking)\n  requires: order.status = picking\n  ensures:\n    order.status = shipped\n    order.tracking_number = tracking\n    order.shipped_at = now\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-ShipOrder").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.ShipOrder").dependencies.as_ref().unwrap();
         assert!(deps.entities_read.contains(&"Order".to_string()));
         assert!(deps.entities_written.contains(&"Order".to_string()));
     }
@@ -2586,7 +2602,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Email { to: String }\n\
             rule Notify {\n  when: order: Order.status transitions_to shipped\n  ensures: Email.created(to: order.customer.email, template: order_shipped)\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Notify").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Notify").dependencies.as_ref().unwrap();
         assert!(deps.entities_created.contains(&"Email".to_string()));
         assert!(deps.entities_read.contains(&"Order".to_string()));
         // .created() is entity creation, not a write
@@ -2601,7 +2617,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: pending | confirmed | cancelled }\n\
             rule Cancel {\n  when: Cancel(order)\n  requires: order.status in {pending, confirmed}\n  ensures: order.status = cancelled\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Cancel").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Cancel").dependencies.as_ref().unwrap();
         assert!(deps.entities_read.contains(&"Order".to_string()));
     }
 
@@ -2613,7 +2629,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             external entity Customer { email: String }\n\
             rule Notify {\n  when: Notify(customer)\n  ensures: customer.email = null\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Notify").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Notify").dependencies.as_ref().unwrap();
         assert!(deps.entities_written.contains(&"Customer".to_string()));
     }
 
@@ -2626,7 +2642,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             deferred Order.fraud_check\n\
             rule Check {\n  when: Check(order)\n  ensures: order.total = fraud_check(order)\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Check").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Check").dependencies.as_ref().unwrap();
         assert!(deps.deferred_specs.contains(&"fraud_check".to_string()));
     }
 
@@ -2638,7 +2654,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: pending | done }\n\
             rule Confirm {\n  when: Confirm(order)\n  requires: order.status = pending\n  ensures: order.status = done\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Confirm").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Confirm").dependencies.as_ref().unwrap();
         assert!(deps.entities_read.contains(&"Order".to_string()));
         assert!(deps.entities_written.contains(&"Order".to_string()));
     }
@@ -2652,7 +2668,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Email { to: String }\n\
             rule Process {\n  when: Process(order)\n  ensures:\n    order.status = done\n    Email.created(to: order.email)\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Process").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Process").dependencies.as_ref().unwrap();
         // Email.created() is entity creation, not a trigger emission
         assert!(!deps.trigger_emissions.contains(&"Email".to_string()));
         assert!(deps.entities_created.contains(&"Email".to_string()));
@@ -2666,7 +2682,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: pending | done }\n\
             rule Update {\n  requires: order.status = pending\n  ensures: order.status = done\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Update").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Update").dependencies.as_ref().unwrap();
         assert!(matches!(deps.trigger_source, TriggerSource::External));
         assert!(deps.entities_read.contains(&"Order".to_string()));
         assert!(deps.entities_written.contains(&"Order".to_string()));
@@ -2680,9 +2696,9 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Order { status: pending | cancelled, created_at: Timestamp }\n\
             rule Timeout {\n  when: o: Order.created_at + 48.hours <= now\n  requires: o.status = pending\n  ensures: o.status = cancelled\n}";
         let plan = parse_plan(source);
-        let success_deps = find_obligation(&plan, "rule-success-Timeout").dependencies.as_ref().unwrap();
-        let failure_deps = find_obligation(&plan, "rule-failure-Timeout").dependencies.as_ref().unwrap();
-        let temporal_deps = find_obligation(&plan, "temporal-Timeout").dependencies.as_ref().unwrap();
+        let success_deps = find_obligation(&plan, "rule-success.Timeout").dependencies.as_ref().unwrap();
+        let failure_deps = find_obligation(&plan, "rule-failure.Timeout.1").dependencies.as_ref().unwrap();
+        let temporal_deps = find_obligation(&plan, "temporal.Timeout").dependencies.as_ref().unwrap();
         // All three should carry the same dependency info
         assert_eq!(success_deps.entities_read, failure_deps.entities_read);
         assert_eq!(success_deps.entities_read, temporal_deps.entities_read);
@@ -2700,7 +2716,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
         let plan = parse_plan(source);
         let json = to_json(&plan);
         let ob = json["obligations"].as_array().unwrap()
-            .iter().find(|o| o["id"].as_str().unwrap() == "rule-success-Ship")
+            .iter().find(|o| o["id"].as_str().unwrap() == "rule-success.Ship")
             .unwrap();
         assert_eq!(ob["dependencies"]["trigger_source"].as_str().unwrap(), "state_transition");
     }
@@ -2714,7 +2730,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
         let plan = parse_plan(source);
         let json = to_json(&plan);
         let ob = json["obligations"].as_array().unwrap()
-            .iter().find(|o| o["id"].as_str().unwrap() == "rule-success-B")
+            .iter().find(|o| o["id"].as_str().unwrap() == "rule-success.B")
             .unwrap();
         assert_eq!(ob["dependencies"]["trigger_source"].as_str().unwrap(), "chained");
     }
@@ -2729,7 +2745,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity Middle { x: Integer }\n\
             rule Foo {\n  when: Foo(zebra, alpha, middle)\n  requires: zebra.x = 1 and alpha.x = 2 and middle.x = 3\n  ensures: zebra.x = 4\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Foo").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Foo").dependencies.as_ref().unwrap();
         assert_eq!(deps.entities_read, vec!["Alpha", "Middle", "Zebra"]);
     }
 
@@ -2741,7 +2757,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity AuditLog { action: String }\n\
             rule Log {\n  when: Log(x)\n  ensures: AuditLog.created(action: x)\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Log").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Log").dependencies.as_ref().unwrap();
         assert!(deps.entities_created.contains(&"AuditLog".to_string()));
         assert!(deps.entities_written.is_empty());
     }
@@ -2756,7 +2772,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             entity AuditLog { action: String }\n\
             rule Ship {\n  when: Ship(order)\n  ensures:\n    order.status = shipped\n    Email.created(to: order.email)\n    AuditLog.created(action: shipped)\n}";
         let plan = parse_plan(source);
-        let deps = find_obligation(&plan, "rule-success-Ship").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.Ship").dependencies.as_ref().unwrap();
         assert_eq!(deps.entities_created, vec!["AuditLog", "Email"]);
     }
 
@@ -2769,8 +2785,8 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
             rule First {\n  when: Start(order)\n  ensures:\n    order.status = done\n    Notify(order)\n}\n\
             rule Second {\n  when: Notify(order)\n  ensures: order.status = done\n}";
         let plan = parse_plan(source);
-        let first_deps = find_obligation(&plan, "rule-success-First").dependencies.as_ref().unwrap();
-        let second_deps = find_obligation(&plan, "rule-success-Second").dependencies.as_ref().unwrap();
+        let first_deps = find_obligation(&plan, "rule-success.First").dependencies.as_ref().unwrap();
+        let second_deps = find_obligation(&plan, "rule-success.Second").dependencies.as_ref().unwrap();
         // First emits Notify — its trigger_source is external (Start is not emitted by any rule)
         assert!(matches!(first_deps.trigger_source, TriggerSource::External));
         // Second listens on Notify — chained
@@ -2789,14 +2805,14 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
         let plan = parse_plan(source);
         let json = to_json(&plan);
         let ob = json["obligations"].as_array().unwrap()
-            .iter().find(|o| o["id"].as_str().unwrap() == "rule-success-Process")
+            .iter().find(|o| o["id"].as_str().unwrap() == "rule-success.Process")
             .unwrap();
         let deps = &ob["dependencies"];
-        // All seven keys present
+        // Populated fields present, empty fields omitted
         assert!(deps["entities_read"].is_array());
         assert!(deps["entities_written"].is_array());
         assert!(deps["entities_created"].is_array());
-        assert!(deps["entities_removed"].is_array());
+        assert!(deps["entities_removed"].is_null(), "empty entities_removed should be omitted");
         assert!(deps["deferred_specs"].is_array());
         assert!(deps["trigger_emissions"].is_array());
         assert!(deps["trigger_source"].is_string());
@@ -2815,7 +2831,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
     fn fixture_confirm_order_dependencies() {
         let source = std::fs::read_to_string("../allium-parser/tests/fixtures/v3-lifecycle.allium").unwrap();
         let plan = parse_plan(&source);
-        let deps = find_obligation(&plan, "rule-success-ConfirmOrder").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.ConfirmOrder").dependencies.as_ref().unwrap();
         assert!(matches!(deps.trigger_source, TriggerSource::External));
         assert!(deps.entities_read.contains(&"Order".to_string()));
         assert!(deps.entities_written.contains(&"Order".to_string()));
@@ -2827,7 +2843,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
     fn fixture_cancel_by_timeout_dependencies() {
         let source = std::fs::read_to_string("../allium-parser/tests/fixtures/v3-lifecycle.allium").unwrap();
         let plan = parse_plan(&source);
-        let deps = find_obligation(&plan, "rule-success-CancelByTimeout").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.CancelByTimeout").dependencies.as_ref().unwrap();
         assert!(matches!(deps.trigger_source, TriggerSource::Temporal));
         assert!(deps.entities_read.contains(&"Order".to_string()));
         assert!(deps.entities_written.contains(&"Order".to_string()));
@@ -2837,7 +2853,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
     fn fixture_notify_on_shipment_dependencies() {
         let source = std::fs::read_to_string("../allium-parser/tests/fixtures/v3-lifecycle.allium").unwrap();
         let plan = parse_plan(&source);
-        let deps = find_obligation(&plan, "rule-success-NotifyOnShipment").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.NotifyOnShipment").dependencies.as_ref().unwrap();
         assert!(matches!(deps.trigger_source, TriggerSource::StateTransition));
         assert!(deps.entities_read.contains(&"Order".to_string()));
         assert!(deps.entities_created.contains(&"Email".to_string()));
@@ -2848,7 +2864,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
     fn fixture_archive_delivered_dependencies() {
         let source = std::fs::read_to_string("../allium-parser/tests/fixtures/v3-lifecycle.allium").unwrap();
         let plan = parse_plan(&source);
-        let deps = find_obligation(&plan, "rule-success-ArchiveDelivered").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.ArchiveDelivered").dependencies.as_ref().unwrap();
         assert!(matches!(deps.trigger_source, TriggerSource::StateTransition));
         assert!(deps.entities_created.contains(&"AuditLog".to_string()));
     }
@@ -2857,7 +2873,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
     fn fixture_bulk_confirm_dependencies() {
         let source = std::fs::read_to_string("../allium-parser/tests/fixtures/v3-lifecycle.allium").unwrap();
         let plan = parse_plan(&source);
-        let deps = find_obligation(&plan, "rule-success-BulkConfirm").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.BulkConfirm").dependencies.as_ref().unwrap();
         assert!(matches!(deps.trigger_source, TriggerSource::External));
         assert!(deps.entities_written.contains(&"Order".to_string()));
     }
@@ -2866,7 +2882,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
     fn fixture_process_cancellation_dependencies() {
         let source = std::fs::read_to_string("../allium-parser/tests/fixtures/v3-lifecycle.allium").unwrap();
         let plan = parse_plan(&source);
-        let deps = find_obligation(&plan, "rule-success-ProcessCancellation").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.ProcessCancellation").dependencies.as_ref().unwrap();
         assert!(matches!(deps.trigger_source, TriggerSource::External));
         assert!(deps.entities_read.contains(&"Order".to_string()));
         assert!(deps.entities_written.contains(&"Order".to_string()));
@@ -2876,7 +2892,7 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
     fn fixture_ship_order_dependencies() {
         let source = std::fs::read_to_string("../allium-parser/tests/fixtures/v3-lifecycle.allium").unwrap();
         let plan = parse_plan(&source);
-        let deps = find_obligation(&plan, "rule-success-ShipOrder").dependencies.as_ref().unwrap();
+        let deps = find_obligation(&plan, "rule-success.ShipOrder").dependencies.as_ref().unwrap();
         assert!(deps.entities_read.contains(&"Order".to_string()));
         assert!(deps.entities_written.contains(&"Order".to_string()));
         assert!(deps.entities_created.is_empty());
