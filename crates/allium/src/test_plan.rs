@@ -28,6 +28,9 @@ pub struct Obligation {
     /// Category-specific data.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<ObligationDetail>,
+    /// Rule dependency analysis, present on rule obligations only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<RuleDependencies>,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,11 +95,42 @@ pub enum ObligationDetail {
     Surface { surface: String, items: Vec<String> },
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerSource {
+    External,
+    StateTransition,
+    Temporal,
+    Creation,
+    Chained,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleDependencies {
+    pub entities_read: Vec<String>,
+    pub entities_written: Vec<String>,
+    pub entities_created: Vec<String>,
+    pub entities_removed: Vec<String>,
+    pub deferred_specs: Vec<String>,
+    pub trigger_emissions: Vec<String>,
+    pub trigger_source: TriggerSource,
+}
+
+/// Module-level context for dependency analysis.
+struct ModuleContext {
+    entity_names: std::collections::BTreeSet<String>,
+    deferred_names: std::collections::BTreeSet<String>,
+    /// Trigger names emitted in ensures clauses across all rules.
+    emitted_triggers: std::collections::BTreeSet<String>,
+}
+
 pub fn generate_test_plan(module: &Module, source: &str) -> TestPlan {
     let mut plan = TestPlan {
         version: module.version,
         obligations: Vec::new(),
     };
+
+    let ctx = build_module_context(module);
 
     for decl in &module.declarations {
         match decl {
@@ -111,7 +145,7 @@ pub fn generate_test_plan(module: &Module, source: &str) -> TestPlan {
                     emit_enum_obligations(&mut plan, block);
                 }
                 BlockKind::Rule => {
-                    emit_rule_obligations(&mut plan, block);
+                    emit_rule_obligations(&mut plan, block, &ctx);
                 }
                 BlockKind::Surface => {
                     emit_surface_obligations(&mut plan, block);
@@ -299,6 +333,7 @@ fn emit_when_crossing_obligations(plan: &mut TestPlan, declarations: &[Decl]) {
                                             target_state: target_value.clone(),
                                             qualifying_states: wf.qualifying_states.clone(),
                                         }),
+                                        dependencies: None,
                                     });
                                 } else if source_in_set && !target_in_set && !emitted_absence {
                                     emitted_absence = true;
@@ -322,6 +357,7 @@ fn emit_when_crossing_obligations(plan: &mut TestPlan, declarations: &[Decl]) {
                                             target_state: target_value.clone(),
                                             qualifying_states: wf.qualifying_states.clone(),
                                         }),
+                                        dependencies: None,
                                     });
                                 }
                             }
@@ -350,6 +386,7 @@ fn emit_when_crossing_obligations(plan: &mut TestPlan, declarations: &[Decl]) {
                                     target_state: target_value.clone(),
                                     qualifying_states: wf.qualifying_states.clone(),
                                 }),
+                                dependencies: None,
                             });
                         }
                     }
@@ -526,6 +563,7 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
                         status_field: when_clause.status_field.name.clone(),
                         qualifying_states: states,
                     }),
+                    dependencies: None,
                 });
             }
             BlockItemKind::TransitionsBlock(graph) => {
@@ -543,6 +581,7 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
                     expression: Some(span_text(source, body.span())),
                     source_span: (item.span.start, item.span.end),
                     detail: None,
+                    dependencies: None,
                 });
             }
             _ => {}
@@ -558,6 +597,7 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
             expression: None,
             source_span: (block.span.start, block.span.end),
             detail: Some(ObligationDetail::Fields { fields: fields.clone() }),
+            dependencies: None,
         });
     }
 
@@ -570,6 +610,7 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
             expression: None,
             source_span: (block.span.start, block.span.end),
             detail: None,
+            dependencies: None,
         });
     }
 
@@ -582,6 +623,7 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
             expression: None,
             source_span: (block.span.start, block.span.end),
             detail: None,
+            dependencies: None,
         });
     }
 
@@ -594,6 +636,7 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
             expression: None,
             source_span: (block.span.start, block.span.end),
             detail: None,
+            dependencies: None,
         });
     }
 
@@ -606,6 +649,7 @@ fn emit_entity_obligations(plan: &mut TestPlan, block: &BlockDecl, source: &str)
             expression: None,
             source_span: (block.span.start, block.span.end),
             detail: None,
+            dependencies: None,
         });
     }
 }
@@ -631,6 +675,7 @@ fn emit_transition_obligations(plan: &mut TestPlan, entity: &str, graph: &Transi
                 from: edge.from.name.clone(),
                 to: edge.to.name.clone(),
             }),
+            dependencies: None,
         });
     }
 
@@ -646,6 +691,7 @@ fn emit_transition_obligations(plan: &mut TestPlan, entity: &str, graph: &Transi
         expression: None,
         source_span: (graph.span.start, graph.span.end),
         detail: None,
+        dependencies: None,
     });
 
     // Obligation per terminal state: no outbound transitions
@@ -665,6 +711,7 @@ fn emit_transition_obligations(plan: &mut TestPlan, entity: &str, graph: &Transi
                 field: field.clone(),
                 states: graph.terminal.iter().map(|t| t.name.clone()).collect(),
             }),
+            dependencies: None,
         });
     }
 }
@@ -679,6 +726,7 @@ fn emit_value_obligations(plan: &mut TestPlan, block: &BlockDecl) {
         expression: None,
         source_span: (block.span.start, block.span.end),
         detail: None,
+        dependencies: None,
     });
 
     let fields: Vec<String> = block.items.iter().filter_map(|item| {
@@ -698,6 +746,7 @@ fn emit_value_obligations(plan: &mut TestPlan, block: &BlockDecl) {
             expression: None,
             source_span: (block.span.start, block.span.end),
             detail: Some(ObligationDetail::Fields { fields }),
+            dependencies: None,
         });
     }
 }
@@ -712,11 +761,13 @@ fn emit_enum_obligations(plan: &mut TestPlan, block: &BlockDecl) {
         expression: None,
         source_span: (block.span.start, block.span.end),
         detail: None,
+        dependencies: None,
     });
 }
 
-fn emit_rule_obligations(plan: &mut TestPlan, block: &BlockDecl) {
+fn emit_rule_obligations(plan: &mut TestPlan, block: &BlockDecl, ctx: &ModuleContext) {
     let name = block_name(block);
+    let deps = extract_rule_dependencies(block, ctx);
 
     // Success case
     plan.obligations.push(Obligation {
@@ -727,13 +778,14 @@ fn emit_rule_obligations(plan: &mut TestPlan, block: &BlockDecl) {
         expression: None,
         source_span: (block.span.start, block.span.end),
         detail: None,
+        dependencies: Some(deps.clone()),
     });
 
     // Walk items for specific obligations
-    walk_rule_items(plan, &name, &block.items, block.span);
+    walk_rule_items(plan, &name, &block.items, block.span, &deps);
 }
 
-fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _block_span: Span) {
+fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _block_span: Span, deps: &RuleDependencies) {
     for item in items {
         match &item.kind {
             BlockItemKind::Clause { keyword, .. } if keyword == "requires" => {
@@ -748,6 +800,7 @@ fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _b
                     expression: None,
                     source_span: (item.span.start, item.span.end),
                     detail: None,
+                    dependencies: Some(deps.clone()),
                 });
             }
             BlockItemKind::Clause { keyword, value } if keyword == "when" => {
@@ -764,6 +817,7 @@ fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _b
                         expression: None,
                         source_span: (item.span.start, item.span.end),
                         detail: None,
+                        dependencies: Some(deps.clone()),
                     });
                 }
                 // Check for entity creation triggers
@@ -779,6 +833,7 @@ fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _b
                         expression: None,
                         source_span: (item.span.start, item.span.end),
                         detail: None,
+                        dependencies: Some(deps.clone()),
                     });
                 }
             }
@@ -795,18 +850,19 @@ fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _b
                         expression: None,
                         source_span: (item.span.start, item.span.end),
                         detail: None,
+                        dependencies: Some(deps.clone()),
                     });
                 }
             }
             BlockItemKind::ForBlock { items, .. } => {
-                walk_rule_items(plan, rule_name, items, _block_span);
+                walk_rule_items(plan, rule_name, items, _block_span, deps);
             }
             BlockItemKind::IfBlock { branches, else_items } => {
                 for branch in branches {
-                    walk_rule_items(plan, rule_name, &branch.items, _block_span);
+                    walk_rule_items(plan, rule_name, &branch.items, _block_span, deps);
                 }
                 if let Some(else_items) = else_items {
-                    walk_rule_items(plan, rule_name, else_items, _block_span);
+                    walk_rule_items(plan, rule_name, else_items, _block_span, deps);
                 }
             }
             _ => {}
@@ -826,6 +882,7 @@ fn emit_surface_obligations(plan: &mut TestPlan, block: &BlockDecl) {
         expression: None,
         source_span: (block.span.start, block.span.end),
         detail: None,
+        dependencies: None,
     });
 
     for item in &block.items {
@@ -842,6 +899,7 @@ fn emit_surface_obligations(plan: &mut TestPlan, block: &BlockDecl) {
                     detail: if items.is_empty() { None } else {
                         Some(ObligationDetail::Surface { surface: name.clone(), items })
                     },
+                    dependencies: None,
                 });
             }
             BlockItemKind::Clause { keyword, .. } if keyword == "provides" => {
@@ -856,6 +914,7 @@ fn emit_surface_obligations(plan: &mut TestPlan, block: &BlockDecl) {
                     expression: None,
                     source_span: (item.span.start, item.span.end),
                     detail: None,
+                    dependencies: None,
                 });
             }
             _ => {}
@@ -874,6 +933,7 @@ fn emit_config_obligations(plan: &mut TestPlan, block: &BlockDecl) {
                 expression: None,
                 source_span: (item.span.start, item.span.end),
                 detail: None,
+                dependencies: None,
             });
         }
     }
@@ -894,6 +954,7 @@ fn emit_contract_obligations(plan: &mut TestPlan, block: &BlockDecl) {
                 expression: None,
                 source_span: (item.span.start, item.span.end),
                 detail: None,
+                dependencies: None,
             });
         }
     }
@@ -911,6 +972,7 @@ fn emit_variant_obligations(plan: &mut TestPlan, v: &VariantDecl) {
         expression: None,
         source_span: (v.span.start, v.span.end),
         detail: None,
+        dependencies: None,
     });
 }
 
@@ -926,6 +988,7 @@ fn emit_invariant_obligation(plan: &mut TestPlan, inv: &InvariantDecl, source: &
         expression: Some(span_text(source, inv.body.span())),
         source_span: (inv.span.start, inv.span.end),
         detail: None,
+        dependencies: None,
     });
 }
 
@@ -974,6 +1037,621 @@ fn collect_exposed_names(expr: &Expr) -> Vec<String> {
         Expr::Block { items, .. } => items.iter().flat_map(collect_exposed_names).collect(),
         Expr::WhenGuard { action, .. } => collect_exposed_names(action),
         _ => Vec::new(),
+    }
+}
+
+// --- Module context and dependency extraction ---
+
+fn build_module_context(module: &Module) -> ModuleContext {
+    let mut entity_names = std::collections::BTreeSet::new();
+    let mut deferred_names = std::collections::BTreeSet::new();
+    let mut emitted_triggers = std::collections::BTreeSet::new();
+
+    for decl in &module.declarations {
+        match decl {
+            Decl::Block(block) => {
+                match block.kind {
+                    BlockKind::Entity | BlockKind::ExternalEntity => {
+                        if let Some(name) = &block.name {
+                            entity_names.insert(name.name.clone());
+                        }
+                    }
+                    BlockKind::Rule => {
+                        // Scan ensures clauses for trigger emissions
+                        for item in &block.items {
+                            if let BlockItemKind::Clause { keyword, value } = &item.kind {
+                                if keyword == "ensures" {
+                                    collect_trigger_emissions(value, &mut emitted_triggers);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Decl::Deferred(d) => {
+                if let Some(name) = deferred_leaf_name(&d.path) {
+                    deferred_names.insert(name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    ModuleContext { entity_names, deferred_names, emitted_triggers }
+}
+
+/// Extract the leaf name from a deferred spec path expression.
+fn deferred_leaf_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Ident(id) => Some(id.name.clone()),
+        Expr::MemberAccess { field, .. } => Some(field.name.clone()),
+        Expr::QualifiedName(q) => Some(q.name.clone()),
+        _ => None,
+    }
+}
+
+/// Collect trigger emission names from an ensures expression.
+/// A trigger emission is `TriggerName(args)` — a call with an uppercase bare ident function.
+fn collect_trigger_emissions(expr: &Expr, out: &mut std::collections::BTreeSet<String>) {
+    match expr {
+        Expr::Call { function, args, .. } => {
+            if let Expr::Ident(id) = function.as_ref() {
+                if id.name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    // Check it's not Entity.created() — bare Ident means it's a trigger, not a method
+                    out.insert(id.name.clone());
+                }
+            }
+            // Recurse into args
+            for arg in args {
+                match arg {
+                    CallArg::Positional(e) => collect_trigger_emissions(e, out),
+                    CallArg::Named(na) => collect_trigger_emissions(&na.value, out),
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_trigger_emissions(item, out);
+            }
+        }
+        Expr::Binding { value, .. } | Expr::LetExpr { value, .. } => {
+            collect_trigger_emissions(value, out);
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_trigger_emissions(&b.body, out);
+            }
+            if let Some(eb) = else_body {
+                collect_trigger_emissions(eb, out);
+            }
+        }
+        Expr::For { body, .. } => collect_trigger_emissions(body, out),
+        _ => {}
+    }
+}
+
+fn extract_rule_dependencies(block: &BlockDecl, ctx: &ModuleContext) -> RuleDependencies {
+    let mut entities_read = std::collections::BTreeSet::new();
+    let mut entities_written = std::collections::BTreeSet::new();
+    let mut entities_created = std::collections::BTreeSet::new();
+    let mut entities_removed = std::collections::BTreeSet::new();
+    let mut deferred_specs = std::collections::BTreeSet::new();
+    let mut trigger_emissions = std::collections::BTreeSet::new();
+    let mut trigger_source = TriggerSource::External;
+
+    for item in &block.items {
+        if let BlockItemKind::Clause { keyword, value } = &item.kind {
+            match keyword.as_str() {
+                "when" => {
+                    trigger_source = classify_trigger_source(value, &ctx.emitted_triggers);
+                    collect_entity_refs(value, &ctx.entity_names, &mut entities_read);
+                    collect_deferred_refs(value, &ctx.deferred_names, &mut deferred_specs);
+                }
+                "requires" => {
+                    collect_entity_refs(value, &ctx.entity_names, &mut entities_read);
+                    collect_deferred_refs(value, &ctx.deferred_names, &mut deferred_specs);
+                }
+                "ensures" => {
+                    collect_written_entities(value, &ctx.entity_names, &mut entities_written);
+                    collect_created_entities(value, &mut entities_created);
+                    collect_removed_entities(value, &mut entities_removed);
+                    collect_ensures_trigger_emissions(value, &ctx.entity_names, &mut trigger_emissions);
+                    collect_deferred_refs(value, &ctx.deferred_names, &mut deferred_specs);
+                }
+                _ => {}
+            }
+        }
+        // Also walk ForBlock/IfBlock items for nested clauses
+        if let BlockItemKind::ForBlock { items, .. } = &item.kind {
+            extract_deps_from_items(items, ctx, &mut entities_read, &mut entities_written,
+                &mut entities_created, &mut entities_removed, &mut deferred_specs, &mut trigger_emissions);
+        }
+        if let BlockItemKind::IfBlock { branches, else_items } = &item.kind {
+            for branch in branches {
+                extract_deps_from_items(&branch.items, ctx, &mut entities_read, &mut entities_written,
+                    &mut entities_created, &mut entities_removed, &mut deferred_specs, &mut trigger_emissions);
+            }
+            if let Some(items) = else_items {
+                extract_deps_from_items(items, ctx, &mut entities_read, &mut entities_written,
+                    &mut entities_created, &mut entities_removed, &mut deferred_specs, &mut trigger_emissions);
+            }
+        }
+    }
+
+    RuleDependencies {
+        entities_read: entities_read.into_iter().collect(),
+        entities_written: entities_written.into_iter().collect(),
+        entities_created: entities_created.into_iter().collect(),
+        entities_removed: entities_removed.into_iter().collect(),
+        deferred_specs: deferred_specs.into_iter().collect(),
+        trigger_emissions: trigger_emissions.into_iter().collect(),
+        trigger_source,
+    }
+}
+
+fn extract_deps_from_items(
+    items: &[BlockItem],
+    ctx: &ModuleContext,
+    entities_read: &mut std::collections::BTreeSet<String>,
+    entities_written: &mut std::collections::BTreeSet<String>,
+    entities_created: &mut std::collections::BTreeSet<String>,
+    entities_removed: &mut std::collections::BTreeSet<String>,
+    deferred_specs: &mut std::collections::BTreeSet<String>,
+    trigger_emissions: &mut std::collections::BTreeSet<String>,
+) {
+    for item in items {
+        if let BlockItemKind::Clause { keyword, value } = &item.kind {
+            match keyword.as_str() {
+                "requires" => {
+                    collect_entity_refs(value, &ctx.entity_names, entities_read);
+                    collect_deferred_refs(value, &ctx.deferred_names, deferred_specs);
+                }
+                "ensures" => {
+                    collect_written_entities(value, &ctx.entity_names, entities_written);
+                    collect_created_entities(value, entities_created);
+                    collect_removed_entities(value, entities_removed);
+                    collect_ensures_trigger_emissions(value, &ctx.entity_names, trigger_emissions);
+                    collect_deferred_refs(value, &ctx.deferred_names, deferred_specs);
+                }
+                _ => {}
+            }
+        }
+        if let BlockItemKind::ForBlock { items: nested, .. } = &item.kind {
+            extract_deps_from_items(nested, ctx, entities_read, entities_written,
+                entities_created, entities_removed, deferred_specs, trigger_emissions);
+        }
+        if let BlockItemKind::IfBlock { branches, else_items } = &item.kind {
+            for branch in branches {
+                extract_deps_from_items(&branch.items, ctx, entities_read, entities_written,
+                    entities_created, entities_removed, deferred_specs, trigger_emissions);
+            }
+            if let Some(nested) = else_items {
+                extract_deps_from_items(nested, ctx, entities_read, entities_written,
+                    entities_created, entities_removed, deferred_specs, trigger_emissions);
+            }
+        }
+    }
+}
+
+/// Classify how a rule is triggered from its when clause.
+fn classify_trigger_source(
+    expr: &Expr,
+    emitted_triggers: &std::collections::BTreeSet<String>,
+) -> TriggerSource {
+    match expr {
+        Expr::TransitionsTo { .. } | Expr::Becomes { .. } => TriggerSource::StateTransition,
+        Expr::Binding { value, .. } => classify_trigger_source(value, emitted_triggers),
+        Expr::Block { items, .. } => {
+            // Use the first classifiable item
+            for item in items {
+                let ts = classify_trigger_source(item, emitted_triggers);
+                if !matches!(ts, TriggerSource::External) {
+                    return ts;
+                }
+            }
+            TriggerSource::External
+        }
+        Expr::Comparison { right, .. } => {
+            if matches!(right.as_ref(), Expr::Now { .. }) {
+                TriggerSource::Temporal
+            } else {
+                TriggerSource::External
+            }
+        }
+        Expr::Call { function, .. } => {
+            match function.as_ref() {
+                Expr::MemberAccess { field, .. } if field.name == "created" => {
+                    TriggerSource::Creation
+                }
+                Expr::Ident(id) => {
+                    if emitted_triggers.contains(&id.name) {
+                        TriggerSource::Chained
+                    } else {
+                        TriggerSource::External
+                    }
+                }
+                _ => TriggerSource::External,
+            }
+        }
+        _ => TriggerSource::External,
+    }
+}
+
+/// Collect entity references from an expression, resolving lowercase variables
+/// by capitalising and checking against known entity names.
+fn collect_entity_refs(
+    expr: &Expr,
+    entity_names: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        Expr::Ident(id) => {
+            if entity_names.contains(&id.name) {
+                out.insert(id.name.clone());
+            }
+        }
+        Expr::MemberAccess { object, .. } | Expr::OptionalAccess { object, .. } => {
+            if let Expr::Ident(id) = object.as_ref() {
+                if entity_names.contains(&id.name) {
+                    out.insert(id.name.clone());
+                } else {
+                    let cap = capitalize_first(&id.name);
+                    if entity_names.contains(&cap) {
+                        out.insert(cap);
+                    }
+                }
+            } else {
+                collect_entity_refs(object, entity_names, out);
+            }
+        }
+        Expr::QualifiedName(q) => {
+            if entity_names.contains(&q.name) {
+                out.insert(q.name.clone());
+            }
+        }
+        Expr::Call { function, args, .. } => {
+            // Don't treat bare function names as entity refs (they're trigger names).
+            // But do recurse into MemberAccess functions (Entity.method) and args.
+            if let Expr::MemberAccess { object, .. } = function.as_ref() {
+                collect_entity_refs(object, entity_names, out);
+            }
+            for arg in args {
+                match arg {
+                    CallArg::Positional(e) => collect_entity_refs(e, entity_names, out),
+                    CallArg::Named(na) => collect_entity_refs(&na.value, entity_names, out),
+                }
+            }
+        }
+        Expr::JoinLookup { entity, fields, .. } => {
+            collect_entity_refs(entity, entity_names, out);
+            for f in fields {
+                if let Some(v) = &f.value {
+                    collect_entity_refs(v, entity_names, out);
+                }
+            }
+        }
+        // Two-child nodes
+        Expr::BinaryOp { left, right, .. }
+        | Expr::Comparison { left, right, .. }
+        | Expr::LogicalOp { left, right, .. }
+        | Expr::In { element: left, collection: right, .. }
+        | Expr::NotIn { element: left, collection: right, .. }
+        | Expr::NullCoalesce { left, right, .. }
+        | Expr::Where { source: left, condition: right, .. }
+        | Expr::With { source: left, predicate: right, .. }
+        | Expr::Pipe { left, right, .. }
+        | Expr::TransitionsTo { subject: left, new_state: right, .. }
+        | Expr::Becomes { subject: left, new_state: right, .. }
+        | Expr::WhenGuard { action: left, condition: right, .. } => {
+            collect_entity_refs(left, entity_names, out);
+            collect_entity_refs(right, entity_names, out);
+        }
+        // One-child nodes
+        Expr::Not { operand, .. }
+        | Expr::Exists { operand, .. }
+        | Expr::NotExists { operand, .. }
+        | Expr::TypeOptional { inner: operand, .. } => {
+            collect_entity_refs(operand, entity_names, out);
+        }
+        Expr::Binding { value, .. } | Expr::LetExpr { value, .. } => {
+            collect_entity_refs(value, entity_names, out);
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_entity_refs(item, entity_names, out);
+            }
+        }
+        Expr::SetLiteral { elements, .. } => {
+            for e in elements {
+                collect_entity_refs(e, entity_names, out);
+            }
+        }
+        Expr::For { collection, filter, body, .. } => {
+            collect_entity_refs(collection, entity_names, out);
+            if let Some(f) = filter {
+                collect_entity_refs(f, entity_names, out);
+            }
+            collect_entity_refs(body, entity_names, out);
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_entity_refs(&b.condition, entity_names, out);
+                collect_entity_refs(&b.body, entity_names, out);
+            }
+            if let Some(eb) = else_body {
+                collect_entity_refs(eb, entity_names, out);
+            }
+        }
+        Expr::Lambda { body, .. } | Expr::ProjectionMap { source: body, .. } => {
+            collect_entity_refs(body, entity_names, out);
+        }
+        Expr::GenericType { name, args, .. } => {
+            collect_entity_refs(name, entity_names, out);
+            for a in args {
+                collect_entity_refs(a, entity_names, out);
+            }
+        }
+        Expr::ObjectLiteral { fields, .. } => {
+            for f in fields {
+                collect_entity_refs(&f.value, entity_names, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect entities that are written (field assignments, state transitions) in ensures.
+fn collect_written_entities(
+    expr: &Expr,
+    entity_names: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        // `entity.field = value` or `entity.field transitions_to state`
+        Expr::Comparison { left, op: ComparisonOp::Eq, .. } => {
+            if let Some(name) = resolve_entity_from_member(left, entity_names) {
+                out.insert(name);
+            }
+        }
+        Expr::TransitionsTo { subject, .. } | Expr::Becomes { subject, .. } => {
+            if let Some(name) = resolve_entity_from_member(subject, entity_names) {
+                out.insert(name);
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_written_entities(item, entity_names, out);
+            }
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_written_entities(&b.body, entity_names, out);
+            }
+            if let Some(eb) = else_body {
+                collect_written_entities(eb, entity_names, out);
+            }
+        }
+        Expr::For { body, .. } => collect_written_entities(body, entity_names, out),
+        Expr::Binding { value, .. } | Expr::LetExpr { value, .. } => {
+            collect_written_entities(value, entity_names, out);
+        }
+        _ => {}
+    }
+}
+
+/// Collect entities created via `.created()` calls.
+/// Reports any uppercase identifier before `.created()`, whether or not it is
+/// a declared entity — undeclared entities being created are still dependencies.
+fn collect_created_entities(
+    expr: &Expr,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        Expr::Call { function, args, .. } => {
+            if let Expr::MemberAccess { object, field, .. } = function.as_ref() {
+                if field.name == "created" {
+                    if let Expr::Ident(id) = object.as_ref() {
+                        if id.name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                            out.insert(id.name.clone());
+                        }
+                    }
+                }
+            }
+            for arg in args {
+                match arg {
+                    CallArg::Positional(e) => collect_created_entities(e, out),
+                    CallArg::Named(na) => collect_created_entities(&na.value, out),
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_created_entities(item, out);
+            }
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_created_entities(&b.body, out);
+            }
+            if let Some(eb) = else_body {
+                collect_created_entities(eb, out);
+            }
+        }
+        Expr::For { body, .. } => collect_created_entities(body, out),
+        Expr::Binding { value, .. } | Expr::LetExpr { value, .. } => {
+            collect_created_entities(value, out);
+        }
+        _ => {}
+    }
+}
+
+/// Collect entities removed via `.remove()` or `remove` calls.
+fn collect_removed_entities(
+    expr: &Expr,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        Expr::Call { function, .. } => {
+            if let Expr::MemberAccess { object, field, .. } = function.as_ref() {
+                if field.name == "remove" || field.name == "removed" {
+                    if let Expr::Ident(id) = object.as_ref() {
+                        if id.name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                            out.insert(id.name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_removed_entities(item, out);
+            }
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_removed_entities(&b.body, out);
+            }
+            if let Some(eb) = else_body {
+                collect_removed_entities(eb, out);
+            }
+        }
+        Expr::For { body, .. } => collect_removed_entities(body, out),
+        _ => {}
+    }
+}
+
+/// Collect trigger emission names from an ensures clause.
+/// These are `Call { function: Ident(UppercaseName) }` that are NOT known entities.
+fn collect_ensures_trigger_emissions(
+    expr: &Expr,
+    entity_names: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        Expr::Call { function, args, .. } => {
+            if let Expr::Ident(id) = function.as_ref() {
+                if id.name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                    && !entity_names.contains(&id.name)
+                {
+                    out.insert(id.name.clone());
+                }
+            }
+            for arg in args {
+                match arg {
+                    CallArg::Positional(e) => collect_ensures_trigger_emissions(e, entity_names, out),
+                    CallArg::Named(na) => collect_ensures_trigger_emissions(&na.value, entity_names, out),
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_ensures_trigger_emissions(item, entity_names, out);
+            }
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_ensures_trigger_emissions(&b.body, entity_names, out);
+            }
+            if let Some(eb) = else_body {
+                collect_ensures_trigger_emissions(eb, entity_names, out);
+            }
+        }
+        Expr::For { body, .. } => collect_ensures_trigger_emissions(body, entity_names, out),
+        Expr::Binding { value, .. } | Expr::LetExpr { value, .. } => {
+            collect_ensures_trigger_emissions(value, entity_names, out);
+        }
+        _ => {}
+    }
+}
+
+/// Collect deferred spec references from an expression.
+/// These are `Call { function: Ident(name) }` where name matches a known deferred spec.
+fn collect_deferred_refs(
+    expr: &Expr,
+    deferred_names: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        Expr::Call { function, args, .. } => {
+            if let Expr::Ident(id) = function.as_ref() {
+                if deferred_names.contains(&id.name) {
+                    out.insert(id.name.clone());
+                }
+            }
+            for arg in args {
+                match arg {
+                    CallArg::Positional(e) => collect_deferred_refs(e, deferred_names, out),
+                    CallArg::Named(na) => collect_deferred_refs(&na.value, deferred_names, out),
+                }
+            }
+        }
+        Expr::Ident(id) => {
+            if deferred_names.contains(&id.name) {
+                out.insert(id.name.clone());
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_deferred_refs(item, deferred_names, out);
+            }
+        }
+        Expr::Binding { value, .. } | Expr::LetExpr { value, .. } => {
+            collect_deferred_refs(value, deferred_names, out);
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_deferred_refs(&b.condition, deferred_names, out);
+                collect_deferred_refs(&b.body, deferred_names, out);
+            }
+            if let Some(eb) = else_body {
+                collect_deferred_refs(eb, deferred_names, out);
+            }
+        }
+        Expr::For { collection, filter, body, .. } => {
+            collect_deferred_refs(collection, deferred_names, out);
+            if let Some(f) = filter {
+                collect_deferred_refs(f, deferred_names, out);
+            }
+            collect_deferred_refs(body, deferred_names, out);
+        }
+        Expr::BinaryOp { left, right, .. }
+        | Expr::Comparison { left, right, .. }
+        | Expr::LogicalOp { left, right, .. } => {
+            collect_deferred_refs(left, deferred_names, out);
+            collect_deferred_refs(right, deferred_names, out);
+        }
+        Expr::Not { operand, .. } => collect_deferred_refs(operand, deferred_names, out),
+        Expr::MemberAccess { object, .. } => collect_deferred_refs(object, deferred_names, out),
+        _ => {}
+    }
+}
+
+/// Resolve a MemberAccess expression to an entity name.
+/// Handles both `Entity.field` (direct) and `var.field` (capitalise variable name).
+fn resolve_entity_from_member(
+    expr: &Expr,
+    entity_names: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    if let Expr::MemberAccess { object, .. } = expr {
+        if let Expr::Ident(id) = object.as_ref() {
+            if entity_names.contains(&id.name) {
+                return Some(id.name.clone());
+            }
+            let cap = capitalize_first(&id.name);
+            if entity_names.contains(&cap) {
+                return Some(cap);
+            }
+        }
+    }
+    None
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
     }
 }
 
@@ -1654,5 +2332,553 @@ invariant GlobalCheck { for o in Orders: o.total >= 0 }";
         assert!(find_obligation(&plan, "invariant-GlobalCheck").expression.is_some());
         assert!(find_obligation(&plan, "entity-fields-Order").expression.is_none());
         assert!(find_obligation(&plan, "config-default-max_retries").expression.is_none());
+    }
+
+    // --- Rule dependency analysis ---
+
+    #[test]
+    fn rule_dependencies_external_trigger() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | done }\n\
+            rule Confirm {\n  when: Confirm(order)\n  requires: order.status = pending\n  ensures: order.status = done\n}";
+        let plan = parse_plan(source);
+        let ob = find_obligation(&plan, "rule-success-Confirm");
+        let deps = ob.dependencies.as_ref().expect("rule should have dependencies");
+        assert!(matches!(deps.trigger_source, TriggerSource::External));
+    }
+
+    #[test]
+    fn rule_dependencies_entities_read_from_requires() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | done }\n\
+            rule Confirm {\n  when: Confirm(order)\n  requires: order.status = pending\n  ensures: order.status = done\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Confirm").dependencies.as_ref().unwrap();
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+    }
+
+    #[test]
+    fn rule_dependencies_entities_written_from_ensures() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | done }\n\
+            rule Confirm {\n  when: Confirm(order)\n  requires: order.status = pending\n  ensures: order.status = done\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Confirm").dependencies.as_ref().unwrap();
+        assert!(deps.entities_written.contains(&"Order".to_string()));
+    }
+
+    #[test]
+    fn rule_dependencies_state_transition_trigger() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | shipped }\n\
+            rule Ship {\n  when: order: Order.status transitions_to shipped\n  ensures: order.status = shipped\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Ship").dependencies.as_ref().unwrap();
+        assert!(matches!(deps.trigger_source, TriggerSource::StateTransition));
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+    }
+
+    #[test]
+    fn rule_dependencies_temporal_trigger() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | cancelled, created_at: Timestamp }\n\
+            rule Timeout {\n  when: o: Order.created_at + 48.hours <= now\n  ensures: o.status = cancelled\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Timeout").dependencies.as_ref().unwrap();
+        assert!(matches!(deps.trigger_source, TriggerSource::Temporal));
+    }
+
+    #[test]
+    fn rule_dependencies_creation_trigger() {
+        let source = "-- allium: 3\n\
+            entity Order { total: Integer }\n\
+            entity Email { to: String }\n\
+            rule Notify {\n  when: order: Order.created()\n  ensures: Email.created(to: order.to)\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Notify").dependencies.as_ref().unwrap();
+        assert!(matches!(deps.trigger_source, TriggerSource::Creation));
+    }
+
+    #[test]
+    fn rule_dependencies_chained_trigger() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | done }\n\
+            rule First {\n  when: Start(order)\n  ensures:\n    order.status = done\n    Notify(order)\n}\n\
+            rule Second {\n  when: Notify(order)\n  ensures: order.status = done\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Second").dependencies.as_ref().unwrap();
+        assert!(matches!(deps.trigger_source, TriggerSource::Chained));
+    }
+
+    #[test]
+    fn rule_dependencies_entity_creation_in_ensures() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | shipped }\n\
+            entity Email { to: String }\n\
+            rule Ship {\n  when: Ship(order)\n  ensures:\n    order.status = shipped\n    Email.created(to: order.to)\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Ship").dependencies.as_ref().unwrap();
+        assert!(deps.entities_created.contains(&"Email".to_string()));
+        assert!(deps.entities_written.contains(&"Order".to_string()));
+    }
+
+    #[test]
+    fn rule_dependencies_trigger_emissions() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | done }\n\
+            rule Process {\n  when: Process(order)\n  ensures:\n    order.status = done\n    Notify(order)\n    Alert(order)\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Process").dependencies.as_ref().unwrap();
+        assert!(deps.trigger_emissions.contains(&"Notify".to_string()));
+        assert!(deps.trigger_emissions.contains(&"Alert".to_string()));
+    }
+
+    #[test]
+    fn rule_dependencies_deferred_specs() {
+        let source = "-- allium: 3\n\
+            entity Order { total: Integer }\n\
+            deferred Evaluate\n\
+            rule Process {\n  when: Process(order)\n  ensures: order.total = Evaluate(order)\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Process").dependencies.as_ref().unwrap();
+        assert!(deps.deferred_specs.contains(&"Evaluate".to_string()));
+    }
+
+    #[test]
+    fn rule_dependencies_present_on_failure_obligation() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | done }\n\
+            rule Confirm {\n  requires: order.status = pending\n  ensures: order.status = done\n}";
+        let plan = parse_plan(source);
+        let ob = find_obligation(&plan, "rule-failure-Confirm");
+        assert!(ob.dependencies.is_some());
+    }
+
+    #[test]
+    fn rule_dependencies_absent_on_non_rule_obligations() {
+        let source = "-- allium: 3\nentity Order { total: Integer }";
+        let plan = parse_plan(source);
+        let ob = find_obligation(&plan, "entity-fields-Order");
+        assert!(ob.dependencies.is_none());
+    }
+
+    #[test]
+    fn rule_dependencies_empty_arrays_when_no_deps() {
+        let source = "-- allium: 3\n\
+            rule Simple {\n  ensures: true\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Simple").dependencies.as_ref().unwrap();
+        assert!(deps.entities_read.is_empty());
+        assert!(deps.entities_written.is_empty());
+        assert!(deps.entities_created.is_empty());
+        assert!(deps.entities_removed.is_empty());
+        assert!(deps.deferred_specs.is_empty());
+        assert!(deps.trigger_emissions.is_empty());
+    }
+
+    #[test]
+    fn rule_dependencies_json_serialisation() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | done }\n\
+            rule Confirm {\n  when: Confirm(order)\n  requires: order.status = pending\n  ensures: order.status = done\n}";
+        let plan = parse_plan(source);
+        let json = to_json(&plan);
+        let ob = json["obligations"].as_array().unwrap()
+            .iter().find(|o| o["id"].as_str().unwrap() == "rule-success-Confirm")
+            .unwrap();
+        let deps = &ob["dependencies"];
+        assert!(deps.is_object());
+        assert!(deps["entities_read"].is_array());
+        assert!(deps["entities_written"].is_array());
+        assert!(deps["trigger_source"].is_string());
+    }
+
+    #[test]
+    fn rule_dependencies_omitted_from_json_for_non_rules() {
+        let source = "-- allium: 3\nentity Order { total: Integer }";
+        let plan = parse_plan(source);
+        let json = to_json(&plan);
+        let ob = json["obligations"].as_array().unwrap()
+            .iter().find(|o| o["id"].as_str().unwrap().contains("entity-fields"))
+            .unwrap();
+        assert!(ob.get("dependencies").is_none());
+    }
+
+    #[test]
+    fn rule_dependencies_direct_entity_ref_in_when() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | shipped }\n\
+            rule Ship {\n  when: order: Order.status transitions_to shipped\n  ensures: order.status = shipped\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Ship").dependencies.as_ref().unwrap();
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+        assert!(deps.entities_written.contains(&"Order".to_string()));
+    }
+
+    #[test]
+    fn rule_dependencies_multiple_entities() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | done }\n\
+            entity Customer { email: String }\n\
+            rule Process {\n  when: Process(order)\n  requires: order.status = pending\n  ensures:\n    order.status = done\n    customer.email = order.email\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Process").dependencies.as_ref().unwrap();
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+        assert!(deps.entities_written.contains(&"Order".to_string()));
+        assert!(deps.entities_written.contains(&"Customer".to_string()));
+    }
+
+    // --- Trigger source: becomes ---
+
+    #[test]
+    fn rule_dependencies_becomes_trigger() {
+        let source = "-- allium: 3\n\
+            entity Order { status: shipped | delivered }\n\
+            rule Archive {\n  when: order: Order.status becomes delivered\n  ensures: AuditLog.created(action: delivered, order: order)\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Archive").dependencies.as_ref().unwrap();
+        assert!(matches!(deps.trigger_source, TriggerSource::StateTransition));
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+    }
+
+    // --- For-block and if-block dependency extraction ---
+
+    #[test]
+    fn rule_dependencies_for_block_writes() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | confirmed }\n\
+            rule BulkConfirm {\n  when: BulkConfirm(batch)\n  for order in batch.orders where order.status = pending:\n    ensures: order.status = confirmed\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-BulkConfirm").dependencies.as_ref().unwrap();
+        assert!(deps.entities_written.contains(&"Order".to_string()));
+    }
+
+    #[test]
+    fn rule_dependencies_if_block_writes() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | cancelled, cancelled_by: String? }\n\
+            entity Customer { name: String }\n\
+            rule Cancel {\n  when: Cancel(order, reason)\n  ensures:\n    order.status = cancelled\n    if reason = customer_request:\n      order.cancelled_by = order.customer.name\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Cancel").dependencies.as_ref().unwrap();
+        assert!(deps.entities_written.contains(&"Order".to_string()));
+    }
+
+    // --- Multi-line ensures with multiple field writes ---
+
+    #[test]
+    fn rule_dependencies_multi_field_ensures() {
+        let source = "-- allium: 3\n\
+            entity Order { status: picking | shipped, tracking_number: String, shipped_at: Timestamp }\n\
+            rule ShipOrder {\n  when: ShipOrder(order, tracking)\n  requires: order.status = picking\n  ensures:\n    order.status = shipped\n    order.tracking_number = tracking\n    order.shipped_at = now\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-ShipOrder").dependencies.as_ref().unwrap();
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+        assert!(deps.entities_written.contains(&"Order".to_string()));
+    }
+
+    // --- Entity creation with named args ---
+
+    #[test]
+    fn rule_dependencies_entity_creation_named_args() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | shipped }\n\
+            entity Email { to: String }\n\
+            rule Notify {\n  when: order: Order.status transitions_to shipped\n  ensures: Email.created(to: order.customer.email, template: order_shipped)\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Notify").dependencies.as_ref().unwrap();
+        assert!(deps.entities_created.contains(&"Email".to_string()));
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+        // .created() is entity creation, not a write
+        assert!(!deps.entities_written.contains(&"Email".to_string()));
+    }
+
+    // --- Entity in requires via `in` set membership ---
+
+    #[test]
+    fn rule_dependencies_in_set_requires() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | confirmed | cancelled }\n\
+            rule Cancel {\n  when: Cancel(order)\n  requires: order.status in {pending, confirmed}\n  ensures: order.status = cancelled\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Cancel").dependencies.as_ref().unwrap();
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+    }
+
+    // --- External entity included in entity_names ---
+
+    #[test]
+    fn rule_dependencies_external_entity_resolved() {
+        let source = "-- allium: 3\n\
+            external entity Customer { email: String }\n\
+            rule Notify {\n  when: Notify(customer)\n  ensures: customer.email = null\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Notify").dependencies.as_ref().unwrap();
+        assert!(deps.entities_written.contains(&"Customer".to_string()));
+    }
+
+    // --- Deferred spec with qualified path ---
+
+    #[test]
+    fn rule_dependencies_deferred_qualified_path() {
+        let source = "-- allium: 3\n\
+            entity Order { total: Integer }\n\
+            deferred Order.fraud_check\n\
+            rule Check {\n  when: Check(order)\n  ensures: order.total = fraud_check(order)\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Check").dependencies.as_ref().unwrap();
+        assert!(deps.deferred_specs.contains(&"fraud_check".to_string()));
+    }
+
+    // --- Same entity appears in both read and written ---
+
+    #[test]
+    fn rule_dependencies_entity_both_read_and_written() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | done }\n\
+            rule Confirm {\n  when: Confirm(order)\n  requires: order.status = pending\n  ensures: order.status = done\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Confirm").dependencies.as_ref().unwrap();
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+        assert!(deps.entities_written.contains(&"Order".to_string()));
+    }
+
+    // --- Trigger emission not confused with entity name ---
+
+    #[test]
+    fn rule_dependencies_entity_name_not_in_trigger_emissions() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | done }\n\
+            entity Email { to: String }\n\
+            rule Process {\n  when: Process(order)\n  ensures:\n    order.status = done\n    Email.created(to: order.email)\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Process").dependencies.as_ref().unwrap();
+        // Email.created() is entity creation, not a trigger emission
+        assert!(!deps.trigger_emissions.contains(&"Email".to_string()));
+        assert!(deps.entities_created.contains(&"Email".to_string()));
+    }
+
+    // --- Rule with no when clause ---
+
+    #[test]
+    fn rule_dependencies_no_when_clause() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | done }\n\
+            rule Update {\n  requires: order.status = pending\n  ensures: order.status = done\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Update").dependencies.as_ref().unwrap();
+        assert!(matches!(deps.trigger_source, TriggerSource::External));
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+        assert!(deps.entities_written.contains(&"Order".to_string()));
+    }
+
+    // --- Dependencies shared across obligation types from same rule ---
+
+    #[test]
+    fn rule_dependencies_shared_across_obligation_types() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | cancelled, created_at: Timestamp }\n\
+            rule Timeout {\n  when: o: Order.created_at + 48.hours <= now\n  requires: o.status = pending\n  ensures: o.status = cancelled\n}";
+        let plan = parse_plan(source);
+        let success_deps = find_obligation(&plan, "rule-success-Timeout").dependencies.as_ref().unwrap();
+        let failure_deps = find_obligation(&plan, "rule-failure-Timeout").dependencies.as_ref().unwrap();
+        let temporal_deps = find_obligation(&plan, "temporal-Timeout").dependencies.as_ref().unwrap();
+        // All three should carry the same dependency info
+        assert_eq!(success_deps.entities_read, failure_deps.entities_read);
+        assert_eq!(success_deps.entities_read, temporal_deps.entities_read);
+        assert!(matches!(failure_deps.trigger_source, TriggerSource::Temporal));
+        assert!(matches!(temporal_deps.trigger_source, TriggerSource::Temporal));
+    }
+
+    // --- trigger_source serialises to snake_case ---
+
+    #[test]
+    fn rule_dependencies_trigger_source_snake_case_json() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | shipped }\n\
+            rule Ship {\n  when: order: Order.status transitions_to shipped\n  ensures: order.status = shipped\n}";
+        let plan = parse_plan(source);
+        let json = to_json(&plan);
+        let ob = json["obligations"].as_array().unwrap()
+            .iter().find(|o| o["id"].as_str().unwrap() == "rule-success-Ship")
+            .unwrap();
+        assert_eq!(ob["dependencies"]["trigger_source"].as_str().unwrap(), "state_transition");
+    }
+
+    #[test]
+    fn rule_dependencies_trigger_source_chained_json() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | done }\n\
+            rule A {\n  when: Start(x)\n  ensures: Next(x)\n}\n\
+            rule B {\n  when: Next(x)\n  ensures: x.status = done\n}";
+        let plan = parse_plan(source);
+        let json = to_json(&plan);
+        let ob = json["obligations"].as_array().unwrap()
+            .iter().find(|o| o["id"].as_str().unwrap() == "rule-success-B")
+            .unwrap();
+        assert_eq!(ob["dependencies"]["trigger_source"].as_str().unwrap(), "chained");
+    }
+
+    // --- BTreeSet ordering: entities are alphabetically sorted ---
+
+    #[test]
+    fn rule_dependencies_entities_sorted() {
+        let source = "-- allium: 3\n\
+            entity Zebra { x: Integer }\n\
+            entity Alpha { x: Integer }\n\
+            entity Middle { x: Integer }\n\
+            rule Foo {\n  when: Foo(zebra, alpha, middle)\n  requires: zebra.x = 1 and alpha.x = 2 and middle.x = 3\n  ensures: zebra.x = 4\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Foo").dependencies.as_ref().unwrap();
+        assert_eq!(deps.entities_read, vec!["Alpha", "Middle", "Zebra"]);
+    }
+
+    // --- Entity creation not reported as entity written ---
+
+    #[test]
+    fn rule_dependencies_created_entity_not_in_written() {
+        let source = "-- allium: 3\n\
+            entity AuditLog { action: String }\n\
+            rule Log {\n  when: Log(x)\n  ensures: AuditLog.created(action: x)\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Log").dependencies.as_ref().unwrap();
+        assert!(deps.entities_created.contains(&"AuditLog".to_string()));
+        assert!(deps.entities_written.is_empty());
+    }
+
+    // --- Multiple entity creations ---
+
+    #[test]
+    fn rule_dependencies_multiple_entity_creations() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | shipped }\n\
+            entity Email { to: String }\n\
+            entity AuditLog { action: String }\n\
+            rule Ship {\n  when: Ship(order)\n  ensures:\n    order.status = shipped\n    Email.created(to: order.email)\n    AuditLog.created(action: shipped)\n}";
+        let plan = parse_plan(source);
+        let deps = find_obligation(&plan, "rule-success-Ship").dependencies.as_ref().unwrap();
+        assert_eq!(deps.entities_created, vec!["AuditLog", "Email"]);
+    }
+
+    // --- Chained: emitter rule is external, not chained to itself ---
+
+    #[test]
+    fn rule_dependencies_emitter_is_external_not_self_chained() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | done }\n\
+            rule First {\n  when: Start(order)\n  ensures:\n    order.status = done\n    Notify(order)\n}\n\
+            rule Second {\n  when: Notify(order)\n  ensures: order.status = done\n}";
+        let plan = parse_plan(source);
+        let first_deps = find_obligation(&plan, "rule-success-First").dependencies.as_ref().unwrap();
+        let second_deps = find_obligation(&plan, "rule-success-Second").dependencies.as_ref().unwrap();
+        // First emits Notify — its trigger_source is external (Start is not emitted by any rule)
+        assert!(matches!(first_deps.trigger_source, TriggerSource::External));
+        // Second listens on Notify — chained
+        assert!(matches!(second_deps.trigger_source, TriggerSource::Chained));
+    }
+
+    // --- JSON: all dependency fields present with correct types ---
+
+    #[test]
+    fn rule_dependencies_json_shape_complete() {
+        let source = "-- allium: 3\n\
+            entity Order { status: pending | done }\n\
+            entity Email { to: String }\n\
+            deferred Evaluate\n\
+            rule Process {\n  when: Process(order)\n  requires: order.status = pending\n  ensures:\n    order.status = done\n    Email.created(to: Evaluate(order))\n    Notify(order)\n}";
+        let plan = parse_plan(source);
+        let json = to_json(&plan);
+        let ob = json["obligations"].as_array().unwrap()
+            .iter().find(|o| o["id"].as_str().unwrap() == "rule-success-Process")
+            .unwrap();
+        let deps = &ob["dependencies"];
+        // All seven keys present
+        assert!(deps["entities_read"].is_array());
+        assert!(deps["entities_written"].is_array());
+        assert!(deps["entities_created"].is_array());
+        assert!(deps["entities_removed"].is_array());
+        assert!(deps["deferred_specs"].is_array());
+        assert!(deps["trigger_emissions"].is_array());
+        assert!(deps["trigger_source"].is_string());
+        // Check specific values
+        assert!(deps["entities_read"].as_array().unwrap().iter().any(|v| v == "Order"));
+        assert!(deps["entities_written"].as_array().unwrap().iter().any(|v| v == "Order"));
+        assert!(deps["entities_created"].as_array().unwrap().iter().any(|v| v == "Email"));
+        assert!(deps["deferred_specs"].as_array().unwrap().iter().any(|v| v == "Evaluate"));
+        assert!(deps["trigger_emissions"].as_array().unwrap().iter().any(|v| v == "Notify"));
+        assert_eq!(deps["trigger_source"], "external");
+    }
+
+    // --- Integration: v3-lifecycle fixture ---
+
+    #[test]
+    fn fixture_confirm_order_dependencies() {
+        let source = std::fs::read_to_string("../allium-parser/tests/fixtures/v3-lifecycle.allium").unwrap();
+        let plan = parse_plan(&source);
+        let deps = find_obligation(&plan, "rule-success-ConfirmOrder").dependencies.as_ref().unwrap();
+        assert!(matches!(deps.trigger_source, TriggerSource::External));
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+        assert!(deps.entities_written.contains(&"Order".to_string()));
+        assert!(deps.entities_created.is_empty());
+        assert!(deps.trigger_emissions.is_empty());
+    }
+
+    #[test]
+    fn fixture_cancel_by_timeout_dependencies() {
+        let source = std::fs::read_to_string("../allium-parser/tests/fixtures/v3-lifecycle.allium").unwrap();
+        let plan = parse_plan(&source);
+        let deps = find_obligation(&plan, "rule-success-CancelByTimeout").dependencies.as_ref().unwrap();
+        assert!(matches!(deps.trigger_source, TriggerSource::Temporal));
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+        assert!(deps.entities_written.contains(&"Order".to_string()));
+    }
+
+    #[test]
+    fn fixture_notify_on_shipment_dependencies() {
+        let source = std::fs::read_to_string("../allium-parser/tests/fixtures/v3-lifecycle.allium").unwrap();
+        let plan = parse_plan(&source);
+        let deps = find_obligation(&plan, "rule-success-NotifyOnShipment").dependencies.as_ref().unwrap();
+        assert!(matches!(deps.trigger_source, TriggerSource::StateTransition));
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+        assert!(deps.entities_created.contains(&"Email".to_string()));
+        assert!(deps.entities_written.is_empty());
+    }
+
+    #[test]
+    fn fixture_archive_delivered_dependencies() {
+        let source = std::fs::read_to_string("../allium-parser/tests/fixtures/v3-lifecycle.allium").unwrap();
+        let plan = parse_plan(&source);
+        let deps = find_obligation(&plan, "rule-success-ArchiveDelivered").dependencies.as_ref().unwrap();
+        assert!(matches!(deps.trigger_source, TriggerSource::StateTransition));
+        assert!(deps.entities_created.contains(&"AuditLog".to_string()));
+    }
+
+    #[test]
+    fn fixture_bulk_confirm_dependencies() {
+        let source = std::fs::read_to_string("../allium-parser/tests/fixtures/v3-lifecycle.allium").unwrap();
+        let plan = parse_plan(&source);
+        let deps = find_obligation(&plan, "rule-success-BulkConfirm").dependencies.as_ref().unwrap();
+        assert!(matches!(deps.trigger_source, TriggerSource::External));
+        assert!(deps.entities_written.contains(&"Order".to_string()));
+    }
+
+    #[test]
+    fn fixture_process_cancellation_dependencies() {
+        let source = std::fs::read_to_string("../allium-parser/tests/fixtures/v3-lifecycle.allium").unwrap();
+        let plan = parse_plan(&source);
+        let deps = find_obligation(&plan, "rule-success-ProcessCancellation").dependencies.as_ref().unwrap();
+        assert!(matches!(deps.trigger_source, TriggerSource::External));
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+        assert!(deps.entities_written.contains(&"Order".to_string()));
+    }
+
+    #[test]
+    fn fixture_ship_order_dependencies() {
+        let source = std::fs::read_to_string("../allium-parser/tests/fixtures/v3-lifecycle.allium").unwrap();
+        let plan = parse_plan(&source);
+        let deps = find_obligation(&plan, "rule-success-ShipOrder").dependencies.as_ref().unwrap();
+        assert!(deps.entities_read.contains(&"Order".to_string()));
+        assert!(deps.entities_written.contains(&"Order".to_string()));
+        assert!(deps.entities_created.is_empty());
     }
 }
