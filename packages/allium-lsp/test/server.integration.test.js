@@ -92,7 +92,7 @@ test("publishes diagnostics on didOpen", async (t) => {
   const filePath = writeFile(
     root,
     "bad.allium",
-    `rule A {\n  when: Ping(\n  ensures: Done()\n}\n`,
+    `rule A {\n  when: Ping()\n}\n`,
   );
   const text = fs.readFileSync(filePath, "utf8");
 
