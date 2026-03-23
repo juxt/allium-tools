@@ -79,10 +79,12 @@ Install [allium-mode](https://github.com/juxt/allium-mode) with `straight.el`, D
 
 ## CLI
 
-The `allium` CLI validates and parses Allium specification files.
+The `allium` CLI validates, parses and analyses Allium specification files.
 
 - `allium check` — validate specifications and report diagnostics.
 - `allium parse` — parse a file and output the syntax tree.
+- `allium plan` — derive test obligations from a specification.
+- `allium model` — extract the domain model as structured data.
 
 ### Install
 
