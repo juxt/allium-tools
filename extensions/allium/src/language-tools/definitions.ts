@@ -1,3 +1,14 @@
+import { parseAllium } from "./wasm-ast";
+import type {
+  WasmBlockDecl,
+  WasmBlockItem,
+  WasmBlockItemKind,
+  WasmDecl,
+  WasmDefaultDecl,
+  WasmInvariantDecl,
+  WasmVariantDecl,
+} from "./wasm-ast";
+
 export interface DefinitionSite {
   name: string;
   kind:
@@ -20,11 +31,79 @@ export interface DefinitionLookup {
   configKeys: DefinitionSite[];
 }
 
+const BLOCK_KIND_TO_DEF: Record<string, DefinitionSite["kind"] | undefined> = {
+  Entity: "entity",
+  ExternalEntity: "external_entity",
+  Value: "value",
+  Enum: "enum",
+  Rule: "rule",
+  Surface: "surface",
+  Actor: "actor",
+};
+
 export function buildDefinitionLookup(text: string): DefinitionLookup {
-  return {
-    symbols: collectNamedDefinitions(text),
-    configKeys: collectConfigKeys(text),
-  };
+  const result = parseAllium(text);
+  const symbols: DefinitionSite[] = [];
+  const configKeys: DefinitionSite[] = [];
+
+  for (const decl of result.module.declarations) {
+    const key = Object.keys(decl)[0] as keyof WasmDecl;
+
+    if (key === "Block") {
+      const block = (decl as { Block: WasmBlockDecl }).Block;
+      const kind = BLOCK_KIND_TO_DEF[block.kind];
+
+      if (kind && block.name) {
+        symbols.push({
+          name: block.name.name,
+          kind,
+          startOffset: block.name.span.start,
+          endOffset: block.name.span.end,
+        });
+      }
+
+      if (block.kind === "Config" || block.kind === "Given") {
+        for (const item of block.items) {
+          const configKey = extractConfigKey(item);
+          if (configKey) {
+            configKeys.push(configKey);
+          }
+        }
+      }
+    } else if (key === "Variant") {
+      const v = (decl as { Variant: WasmVariantDecl }).Variant;
+      symbols.push({
+        name: v.name.name,
+        kind: "variant",
+        startOffset: v.name.span.start,
+        endOffset: v.name.span.end,
+      });
+    } else if (key === "Default") {
+      const d = (decl as { Default: WasmDefaultDecl }).Default;
+      symbols.push({
+        name: d.name.name,
+        kind: "default_instance",
+        startOffset: d.name.span.start,
+        endOffset: d.name.span.end,
+      });
+    }
+  }
+
+  return { symbols, configKeys };
+}
+
+function extractConfigKey(item: WasmBlockItem): DefinitionSite | null {
+  const kind = item.kind;
+  if ("Assignment" in kind) {
+    const a = (kind as Extract<WasmBlockItemKind, { Assignment: unknown }>).Assignment;
+    return {
+      name: a.name.name,
+      kind: "config_key",
+      startOffset: a.name.span.start,
+      endOffset: a.name.span.end,
+    };
+  }
+  return null;
 }
 
 export function findDefinitionsAtOffset(
@@ -41,95 +120,6 @@ export function findDefinitionsAtOffset(
     return lookup.configKeys.filter((entry) => entry.name === token.name);
   }
   return lookup.symbols.filter((entry) => entry.name === token.name);
-}
-
-function collectNamedDefinitions(text: string): DefinitionSite[] {
-  const patterns: Array<{
-    pattern: RegExp;
-    kind: DefinitionSite["kind"];
-  }> = [
-    { pattern: /^\s*entity\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm, kind: "entity" },
-    {
-      pattern: /^\s*external\s+entity\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm,
-      kind: "external_entity",
-    },
-    { pattern: /^\s*value\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm, kind: "value" },
-    { pattern: /^\s*variant\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm, kind: "variant" },
-    { pattern: /^\s*enum\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm, kind: "enum" },
-    { pattern: /^\s*rule\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm, kind: "rule" },
-    { pattern: /^\s*surface\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm, kind: "surface" },
-    { pattern: /^\s*actor\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm, kind: "actor" },
-  ];
-
-  const out: DefinitionSite[] = [];
-  for (const { pattern, kind } of patterns) {
-    for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
-      const name = match[1];
-      const startOffset = match.index + match[0].indexOf(name);
-      out.push({
-        name,
-        kind,
-        startOffset,
-        endOffset: startOffset + name.length,
-      });
-    }
-  }
-  const defaultPattern =
-    /^\s*default\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+([A-Za-z_][A-Za-z0-9_]*))?\s*=/gm;
-  for (
-    let match = defaultPattern.exec(text);
-    match;
-    match = defaultPattern.exec(text)
-  ) {
-    const name = match[2] ?? match[1];
-    const startOffset = match.index + match[0].indexOf(name);
-    out.push({
-      name,
-      kind: "default_instance",
-      startOffset,
-      endOffset: startOffset + name.length,
-    });
-  }
-  return out;
-}
-
-function collectConfigKeys(text: string): DefinitionSite[] {
-  const out: DefinitionSite[] = [];
-  const blockPattern = /^\s*config\s*\{/gm;
-
-  for (
-    let block = blockPattern.exec(text);
-    block;
-    block = blockPattern.exec(text)
-  ) {
-    const openOffset = text.indexOf("{", block.index);
-    if (openOffset < 0) {
-      continue;
-    }
-    const closeOffset = findMatchingBrace(text, openOffset);
-    if (closeOffset < 0) {
-      continue;
-    }
-
-    const body = text.slice(openOffset + 1, closeOffset);
-    const keyPattern = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/gm;
-    for (
-      let match = keyPattern.exec(body);
-      match;
-      match = keyPattern.exec(body)
-    ) {
-      const name = match[1];
-      const startOffset = openOffset + 1 + match.index + match[0].indexOf(name);
-      out.push({
-        name,
-        kind: "config_key",
-        startOffset,
-        endOffset: startOffset + name.length,
-      });
-    }
-  }
-
-  return out;
 }
 
 export function tokenAtOffset(
@@ -168,10 +158,19 @@ export interface UseAlias {
 }
 
 export function parseUseAliases(text: string): UseAlias[] {
+  const result = parseAllium(text);
   const aliases: UseAlias[] = [];
-  const pattern = /^\s*use\s+"([^"]+)"\s+as\s+([A-Za-z_][A-Za-z0-9_]*)\s*$/gm;
-  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
-    aliases.push({ sourcePath: match[1], alias: match[2] });
+
+  for (const decl of result.module.declarations) {
+    if ("Use" in decl) {
+      const use_ = decl.Use;
+      if (use_.alias) {
+        const pathText = use_.path.parts
+          .map((p) => ("Text" in p ? p.Text : ""))
+          .join("");
+        aliases.push({ sourcePath: pathText, alias: use_.alias.name });
+      }
+    }
   }
   return aliases;
 }
@@ -217,20 +216,4 @@ export function importedSymbolAtOffset(
   }
   const alias = text.slice(aliasStart, aliasEnd);
   return { alias, symbol };
-}
-
-function findMatchingBrace(text: string, openOffset: number): number {
-  let depth = 0;
-  for (let i = openOffset; i < text.length; i += 1) {
-    const char = text[i];
-    if (char === "{") {
-      depth += 1;
-    } else if (char === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return i;
-      }
-    }
-  }
-  return -1;
 }

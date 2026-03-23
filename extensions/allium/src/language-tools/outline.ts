@@ -1,3 +1,12 @@
+import { parseAllium } from "./wasm-ast";
+import type {
+	WasmBlockDecl,
+	WasmBlockKind,
+	WasmDecl,
+	WasmDefaultDecl,
+	WasmVariantDecl,
+} from "./wasm-ast";
+
 export type AlliumSymbolType =
   | "entity"
   | "external entity"
@@ -8,7 +17,10 @@ export type AlliumSymbolType =
   | "rule"
   | "surface"
   | "actor"
-  | "config";
+  | "config"
+  | "contract"
+  | "invariant"
+  | "deferred";
 
 export interface AlliumSymbol {
   type: AlliumSymbolType;
@@ -19,163 +31,86 @@ export interface AlliumSymbol {
   nameEndOffset: number;
 }
 
+const BLOCK_KIND_TO_SYMBOL: Record<WasmBlockKind, AlliumSymbolType> = {
+  Entity: "entity",
+  ExternalEntity: "external entity",
+  Value: "value",
+  Enum: "enum",
+  Given: "config",
+  Config: "config",
+  Rule: "rule",
+  Surface: "surface",
+  Actor: "actor",
+  Contract: "contract",
+  Invariant: "invariant",
+};
+
 export function collectAlliumSymbols(text: string): AlliumSymbol[] {
+  const result = parseAllium(text);
   const symbols: AlliumSymbol[] = [];
 
-  symbols.push(
-    ...findNamedBlocks(
-      text,
-      /^\s*entity\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm,
-      "entity",
-    ),
-  );
-  symbols.push(
-    ...findNamedBlocks(
-      text,
-      /^\s*external\s+entity\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm,
-      "external entity",
-    ),
-  );
-  symbols.push(
-    ...findNamedBlocks(
-      text,
-      /^\s*value\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm,
-      "value",
-    ),
-  );
-  symbols.push(
-    ...findNamedBlocks(
-      text,
-      /^\s*variant\s+([A-Za-z_][A-Za-z0-9_]*)\s*:/gm,
-      "variant",
-    ),
-  );
-  symbols.push(
-    ...findNamedBlocks(
-      text,
-      /^\s*enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm,
-      "enum",
-    ),
-  );
-  symbols.push(
-    ...findNamedBlocks(
-      text,
-      /^\s*rule\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm,
-      "rule",
-    ),
-  );
-  symbols.push(
-    ...findNamedBlocks(
-      text,
-      /^\s*surface\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm,
-      "surface",
-    ),
-  );
-  symbols.push(
-    ...findNamedBlocks(
-      text,
-      /^\s*actor\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm,
-      "actor",
-    ),
-  );
-  symbols.push(...findDefaultDeclarations(text));
-  symbols.push(...findConfigBlocks(text));
+  for (const decl of result.module.declarations) {
+    const key = Object.keys(decl)[0] as keyof WasmDecl;
+
+    if (key === "Block") {
+      const block = (decl as { Block: WasmBlockDecl }).Block;
+      const type = BLOCK_KIND_TO_SYMBOL[block.kind];
+      if (!type) continue;
+
+      const name = block.name?.name ?? type;
+      const nameStart = block.name?.span.start ?? block.span.start;
+      const nameEnd = block.name?.span.end ?? (nameStart + name.length);
+
+      symbols.push({
+        type,
+        name,
+        startOffset: block.span.start,
+        endOffset: block.span.end - 1,
+        nameStartOffset: nameStart,
+        nameEndOffset: nameEnd,
+      });
+    } else if (key === "Variant") {
+      const v = (decl as { Variant: WasmVariantDecl }).Variant;
+      symbols.push({
+        type: "variant",
+        name: v.name.name,
+        startOffset: v.span.start,
+        endOffset: v.span.end,
+        nameStartOffset: v.name.span.start,
+        nameEndOffset: v.name.span.end,
+      });
+    } else if (key === "Default") {
+      const d = (decl as { Default: WasmDefaultDecl }).Default;
+      symbols.push({
+        type: "default",
+        name: d.name.name,
+        startOffset: d.span.start,
+        endOffset: d.span.end,
+        nameStartOffset: d.name.span.start,
+        nameEndOffset: d.name.span.end,
+      });
+    } else if (key === "Invariant") {
+      const inv = (decl as { Invariant: { span: { start: number; end: number }; name: { span: { start: number; end: number }; name: string } } }).Invariant;
+      symbols.push({
+        type: "invariant",
+        name: inv.name.name,
+        startOffset: inv.span.start,
+        endOffset: inv.span.end,
+        nameStartOffset: inv.name.span.start,
+        nameEndOffset: inv.name.span.end,
+      });
+    } else if (key === "Deferred") {
+      const d = (decl as { Deferred: { span: { start: number; end: number }; path: unknown } }).Deferred;
+      symbols.push({
+        type: "deferred",
+        name: "deferred",
+        startOffset: d.span.start,
+        endOffset: d.span.end,
+        nameStartOffset: d.span.start,
+        nameEndOffset: d.span.end,
+      });
+    }
+  }
 
   return symbols.sort((a, b) => a.startOffset - b.startOffset);
-}
-
-function findNamedBlocks(
-  text: string,
-  pattern: RegExp,
-  type: Exclude<AlliumSymbolType, "config">,
-): AlliumSymbol[] {
-  const symbols: AlliumSymbol[] = [];
-
-  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
-    const name = match[1];
-    const nameStartOffset = match.index + match[0].indexOf(name);
-    const nameEndOffset = nameStartOffset + name.length;
-    const openOffset = text.indexOf("{", match.index);
-    if (openOffset < 0) {
-      continue;
-    }
-    const endOffset = findMatchingBrace(text, openOffset);
-    if (endOffset < 0) {
-      continue;
-    }
-
-    symbols.push({
-      type,
-      name,
-      startOffset: match.index,
-      endOffset,
-      nameStartOffset,
-      nameEndOffset,
-    });
-  }
-
-  return symbols;
-}
-
-function findConfigBlocks(text: string): AlliumSymbol[] {
-  const symbols: AlliumSymbol[] = [];
-  const pattern = /^\s*config\s*\{/gm;
-
-  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
-    const openOffset = text.indexOf("{", match.index);
-    if (openOffset < 0) {
-      continue;
-    }
-    const endOffset = findMatchingBrace(text, openOffset);
-    if (endOffset < 0) {
-      continue;
-    }
-    symbols.push({
-      type: "config",
-      name: "config",
-      startOffset: match.index,
-      endOffset,
-      nameStartOffset: match.index + match[0].indexOf("config"),
-      nameEndOffset: match.index + match[0].indexOf("config") + "config".length,
-    });
-  }
-
-  return symbols;
-}
-
-function findDefaultDeclarations(text: string): AlliumSymbol[] {
-  const symbols: AlliumSymbol[] = [];
-  const pattern =
-    /^\s*default\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+([A-Za-z_][A-Za-z0-9_]*))?\s*=/gm;
-  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
-    const name = match[2] ?? match[1];
-    const nameStartOffset = match.index + match[0].indexOf(name);
-    const lineEndIndex = text.indexOf("\n", match.index);
-    const endOffset = lineEndIndex >= 0 ? lineEndIndex : text.length;
-    symbols.push({
-      type: "default",
-      name,
-      startOffset: match.index,
-      endOffset,
-      nameStartOffset,
-      nameEndOffset: nameStartOffset + name.length,
-    });
-  }
-  return symbols;
-}
-
-function findMatchingBrace(text: string, openOffset: number): number {
-  let depth = 0;
-  for (let i = openOffset; i < text.length; i += 1) {
-    const char = text[i];
-    if (char === "{") {
-      depth += 1;
-    } else if (char === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return i;
-      }
-    }
-  }
-  return -1;
 }

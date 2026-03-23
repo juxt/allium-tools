@@ -66,7 +66,7 @@ export function collectSemanticTokenEntries(
   addMatches(
     entries,
     text,
-    /\b(entity|external|value|variant|enum|given|rule|surface|actor|config|when|requires|ensures|let|facing|with|if|else|in|as|identified_by|exposes|provides|related|guidance|invariant|becomes|not|exists|and|or|default|deferred|open|module|use|transitions_to|guarantee|timeout|within|where|trigger|tags)\b/g,
+    /\b(entity|external|value|variant|enum|given|rule|surface|actor|config|when|requires|ensures|let|facing|with|if|else|in|as|identified_by|exposes|provides|related|guidance|invariant|becomes|not|exists|and|or|default|deferred|open|module|use|transitions_to|transitions|terminal|guarantee|timeout|within|where|trigger|tags|for|implies|contract|contracts|demands|fulfils)\b/g,
     "keyword",
   );
 
