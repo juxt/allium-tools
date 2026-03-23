@@ -19,6 +19,18 @@ const HOVER_DOCS: Record<string, string> = {
   guarantee: "Declares a guarantee constraint on a surface.",
   timeout: "Declares a timeout constraint on a surface.",
   within: "Declares a containment relationship for an actor.",
+  transitions:
+    "Declares valid lifecycle transitions for a status field on an entity.",
+  terminal:
+    "Declares terminal states within a transitions block. Terminal states have no outbound transitions.",
+  implies:
+    "Boolean operator for logical implication. `a implies b` is equivalent to `not a or b`.",
+  contract:
+    "Declares a named contract with signatures and invariants that surfaces can demand or fulfil.",
+  demands:
+    "Declares that a surface requires a contract to be fulfilled by its environment.",
+  fulfils:
+    "Declares that a surface provides an implementation of a contract.",
 };
 
 export function hoverTextAtOffset(text: string, offset: number): string | null {
