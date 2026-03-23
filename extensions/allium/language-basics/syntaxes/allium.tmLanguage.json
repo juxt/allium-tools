@@ -34,6 +34,10 @@
               "match": "\\\\."
             }
           ]
+        },
+        {
+          "name": "string.quoted.backtick.allium",
+          "match": "`[^`]*`"
         }
       ]
     },
@@ -41,11 +45,11 @@
       "patterns": [
         {
           "name": "keyword.declaration.allium",
-          "match": "\\b(use|given|external|entity|value|variant|enum|config|default|rule|surface|actor|deferred|open\\s+question|module|contract|invariant)\\b"
+          "match": "\\b(use|given|external|entity|value|variant|enum|config|default|rule|surface|actor|deferred|open\\s+question|module|contract|invariant|transitions|terminal)\\b"
         },
         {
           "name": "keyword.control.allium",
-          "match": "\\b(when|requires|ensures|let|facing|with|if|else|in|as|identified_by|exposes|provides|related|guidance|becomes|not|exists|and|or|where|within|guarantee|timeout|transitions_to|trigger|tags|contracts|demands|fulfils|implies)\\b"
+          "match": "\\b(when|requires|ensures|let|facing|with|if|else|in|as|identified_by|exposes|provides|related|guidance|becomes|not|exists|and|or|where|within|guarantee|timeout|transitions_to|trigger|tags|contracts|demands|fulfils|implies|for)\\b"
         }
       ]
     },

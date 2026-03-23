@@ -157,5 +157,22 @@
       "contracts: demands ${1:ContractName}, fulfils ${2:ContractName}"
     ],
     "description": "Allium contracts clause with demands/fulfils"
+  },
+  "Transitions": {
+    "prefix": "transitions",
+    "body": [
+      "transitions ${1:status} {",
+      "    ${2:pending} -> ${3:active}",
+      "    terminal: ${4:completed}",
+      "}"
+    ],
+    "description": "Allium transitions block for status field lifecycle"
+  },
+  "When Field": {
+    "prefix": "field-when",
+    "body": [
+      "${1:field}: ${2:Type} when ${3:status} = ${4:state}"
+    ],
+    "description": "Field with when clause for lifecycle-dependent presence"
   }
 }

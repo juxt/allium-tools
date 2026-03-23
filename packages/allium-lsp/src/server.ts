@@ -254,6 +254,12 @@ function alliumSymbolTypeToSymbolKind(type: AlliumSymbolType): SymbolKind {
       return SymbolKind.Class;
     case "config":
       return SymbolKind.Module;
+    case "contract":
+      return SymbolKind.Interface;
+    case "invariant":
+      return SymbolKind.Property;
+    case "deferred":
+      return SymbolKind.Function;
   }
 }
 
