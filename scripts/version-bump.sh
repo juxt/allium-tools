@@ -115,5 +115,5 @@ update_json_version "packages/allium-lsp/package.json"
 update_json_version "packages/tree-sitter-allium/package.json"
 
 echo ""
-echo "Done. Editor-tier packages (allium-vscode, allium-mode, nvim-allium) are not touched."
+echo "Done. Editor-tier packages (allium-vscode, allium-mode) are not touched."
 echo "Bump those manually if needed."

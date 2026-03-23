@@ -19,8 +19,6 @@ artifacts/
 .eslintcache
 .pre-commit-cache/
 .emacs-test/
-.nvim-demo/
-.nvim-test/
 
 # Logs
 npm-debug.log*

@@ -71,9 +71,7 @@ rule DispatchOrder {
 
 ### Neovim
 
-1. Install `allium-lsp` via your favorite plugin manager or from release artifacts.
-2. Configure `nvim-lspconfig` to point to the `allium-lsp` binary.
-3. See the [Neovim Setup Guide](docs/editors/neovim.md) for details.
+Install [nvim-allium](https://github.com/juxt/nvim-allium) with your plugin manager. It handles LSP, tree-sitter highlighting and filetype detection.
 
 ### Emacs
 
@@ -136,7 +134,7 @@ Run the full test matrix locally:
 npm run test:all
 ```
 
-`test:all` runs fastest-to-slowest: `test`, `test:nvim`, `test:emacs`, `test:nvim:integration`, `test:emacs:integration`.
+`test:all` runs fastest-to-slowest: `test`, `test:emacs`, `test:emacs:integration`.
 
 The `pre-push` hook runs `npm run test:all` before allowing a push.
 

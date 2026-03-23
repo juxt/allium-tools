@@ -78,9 +78,10 @@ extensions/allium/          VS Code extension (LSP client launcher)
 packages/allium-lsp/        Language Server Protocol server (wraps language-tools/)
 packages/allium-cli/        Standalone CLI package (allium-check, allium-format, etc.)
 packages/tree-sitter-allium/ Tree-sitter grammar for the Allium language
-packages/nvim-allium/       Neovim plugin (lazy.nvim compatible)
 packages/allium-mode/       Emacs major mode package
 ```
+
+> **Note:** The Neovim plugin lives in its own repo: [juxt/nvim-allium](https://github.com/juxt/nvim-allium).
 
 ### Architecture
 
@@ -92,7 +93,6 @@ language-tools/   Pure analysis engine: parser, analyzer, hover, definitions, re
      ├── packages/allium-lsp/      LSP server: wraps language-tools/ over JSON-RPC (stdio)
      |        |
      |        ├── extensions/allium/   VS Code launcher
-     |        ├── packages/nvim-allium/ Neovim plugin
      |        └── packages/allium-mode/ Emacs major mode
      |
      └── packages/allium-cli/      CLI tools: direct consumers of language-tools/
