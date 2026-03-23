@@ -1,7 +1,7 @@
 -- allium: 3
 
 -- ---------------------------------------------------------------------------
--- V3 lifecycle features: transition graphs, produces/consumes,
+-- V3 lifecycle features: transition graphs, when clauses on fields,
 -- backtick-quoted enum literals, and their interactions.
 -- ---------------------------------------------------------------------------
 
@@ -19,17 +19,17 @@ enum Locale {
 enum CacheDirective { `no-cache` | `no-store` | public | private }
 
 -- ---------------------------------------------------------------------------
--- Entity with transition graph
+-- Entity with transition graph and when-qualified fields
 -- ---------------------------------------------------------------------------
 
 entity Order {
     customer: Customer
     status: pending | confirmed | picking | shipped | delivered | cancelled
-    tracking_number: String?
-    shipped_at: Timestamp?
-    warehouse_assignment: String?
-    cancelled_at: Timestamp?
-    cancelled_by: String?
+    tracking_number: String when status = shipped | delivered
+    shipped_at: Timestamp when status = shipped | delivered
+    warehouse_assignment: String when status = confirmed | picking
+    cancelled_at: Timestamp when status = cancelled
+    cancelled_by: String? when status = cancelled
     locale: Locale
 
     transitions status {
@@ -70,13 +70,12 @@ config {
 }
 
 -- ---------------------------------------------------------------------------
--- Rules with produces/consumes
+-- Rules (no more produces/consumes)
 -- ---------------------------------------------------------------------------
 
 rule ConfirmOrder {
     when: ConfirmOrder(order)
     requires: order.status = pending
-    produces: warehouse_assignment
     ensures:
         order.status = confirmed
         order.warehouse_assignment = assign_warehouse(order)
@@ -85,8 +84,6 @@ rule ConfirmOrder {
 rule ShipOrder {
     when: ShipOrder(order, tracking)
     requires: order.status = picking
-    consumes: warehouse_assignment
-    produces: tracking_number, shipped_at
     ensures:
         order.status = shipped
         order.tracking_number = tracking
@@ -96,7 +93,6 @@ rule ShipOrder {
 rule CancelByCustomer {
     when: CustomerCancels(order)
     requires: order.status in {pending, confirmed}
-    produces: cancelled_at, cancelled_by
     ensures:
         order.status = cancelled
         order.cancelled_at = now
@@ -106,7 +102,6 @@ rule CancelByCustomer {
 rule CancelByTimeout {
     when: order: Order.created_at + config.cancellation_window <= now
     requires: order.status = pending
-    produces: cancelled_at
     ensures:
         order.status = cancelled
         order.cancelled_at = now
@@ -131,24 +126,22 @@ rule ArchiveDelivered {
 }
 
 -- ---------------------------------------------------------------------------
--- Rule with for-block (produces at rule level, not inside for)
+-- Rule with for-block
 -- ---------------------------------------------------------------------------
 
 rule BulkConfirm {
     when: BulkConfirm(batch)
-    produces: warehouse_assignment
     for order in batch.orders where order.status = pending:
         ensures: order.status = confirmed
 }
 
 -- ---------------------------------------------------------------------------
--- Rule with if/else and produces
+-- Rule with if/else
 -- ---------------------------------------------------------------------------
 
 rule ProcessCancellation {
     when: Cancel(order, reason)
     requires: order.status != delivered
-    produces: cancelled_at
     ensures:
         order.status = cancelled
         order.cancelled_at = now
@@ -182,8 +175,8 @@ invariant AllDeliveredHaveTracking {
 entity Subscription {
     status: trial | active | past_due | cancelled
     payment_status: pending | paid | failed | refunded
-    started_at: Timestamp?
-    cancelled_at: Timestamp?
+    started_at: Timestamp when status = active | past_due | cancelled
+    cancelled_at: Timestamp when status = cancelled
     balance: Decimal
 
     transitions status {

@@ -253,6 +253,57 @@ fn token_is_clause_keyword(kind: TokenKind) -> bool {
     )
 }
 
+/// Extract a `when` clause from a field declaration expression.
+///
+/// If the expression is `WhenGuard { action: Type, condition: status = v1 | v2 }`,
+/// decomposes it into the inner type expression and a `WhenClause`.
+fn extract_when_clause(expr: &Expr) -> Option<(Expr, WhenClause)> {
+    if let Expr::WhenGuard { action, condition, span } = expr {
+        // condition should be `status = value1 | value2 | ...`
+        if let Expr::Comparison {
+            left,
+            op: ComparisonOp::Eq,
+            right,
+            span: _cond_span,
+        } = condition.as_ref()
+        {
+            if let Expr::Ident(status_field) = left.as_ref() {
+                let mut qualifying_states = Vec::new();
+                collect_pipe_idents(right, &mut qualifying_states);
+                if !qualifying_states.is_empty() {
+                    return Some((
+                        *action.clone(),
+                        WhenClause {
+                            span: *span,
+                            status_field: status_field.clone(),
+                            qualifying_states,
+                        },
+                    ));
+                }
+            }
+        }
+        // Also handle single state: `when status = shipped` (no pipe)
+        // Already handled above since a single Ident goes through collect_pipe_idents
+    }
+    // Also handle `TypeOptional` wrapping a WhenGuard: `Type? when status = ...`
+    // The parser would parse `Type?` first (postfix), then `when` (infix on the TypeOptional).
+    // Actually, `?` is postfix and `when` is infix with lower BP, so `Type? when cond`
+    // parses as `WhenGuard { action: TypeOptional { Type }, condition: ... }`.
+    // That case is handled by the WhenGuard branch above — action will be TypeOptional.
+    None
+}
+
+fn collect_pipe_idents(expr: &Expr, out: &mut Vec<Ident>) {
+    match expr {
+        Expr::Ident(id) => out.push(id.clone()),
+        Expr::Pipe { left, right, .. } => {
+            collect_pipe_idents(left, out);
+            collect_pipe_idents(right, out);
+        }
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Module parsing
 // ---------------------------------------------------------------------------
@@ -795,12 +846,12 @@ impl<'s> Parser<'s> {
                 return self.parse_param_or_clause_item(start);
             }
 
-            // `produces: field1, field2` and `consumes: field1, field2` — rule-only field lists
+            // `produces:` and `consumes:` are removed in v3 — emit migration diagnostic
             if block_kind == BlockKind::Rule
                 && (self.at(TokenKind::Produces) || self.at(TokenKind::Consumes))
                 && self.peek_at(1).kind == TokenKind::Colon
             {
-                return self.parse_field_list_clause(start);
+                return self.parse_legacy_field_list_clause(start);
             }
 
             // Check for `name:` — assignment or clause
@@ -891,40 +942,34 @@ impl<'s> Parser<'s> {
         })
     }
 
-    /// Parse `produces: field1, field2` or `consumes: field1, field2`.
-    fn parse_field_list_clause(&mut self, start: Span) -> Option<BlockItem> {
+    /// Parse legacy `produces:` / `consumes:` clauses, emitting a migration warning
+    /// and skipping the clause body. Returns `None` so the item is dropped from the AST.
+    fn parse_legacy_field_list_clause(&mut self, start: Span) -> Option<BlockItem> {
         let keyword_tok = self.advance(); // consume `produces` or `consumes`
-        let is_produces = keyword_tok.kind == TokenKind::Produces;
+        let keyword = self.text(keyword_tok.span).to_string();
         self.advance(); // consume `:`
 
-        let mut fields = Vec::new();
-        // Parse comma-separated field names. Stop at end of line, next clause keyword, or `}`.
+        // Skip the comma-separated field names
         let clause_line = self.line_of(start);
         loop {
             if self.at(TokenKind::RBrace) || self.at_eof() {
                 break;
             }
-            // If next token is on a new line and is a clause keyword or block item start, stop
-            if self.line_of(self.peek().span) > clause_line && !fields.is_empty() {
+            if self.line_of(self.peek().span) > clause_line {
                 break;
             }
-            let field = self.parse_ident_in("field name")?;
-            fields.push(field);
-            if self.eat(TokenKind::Comma).is_none() {
-                break;
-            }
+            self.advance();
         }
 
-        let end = fields.last().map(|f| f.span).unwrap_or(start);
-        let kind = if is_produces {
-            BlockItemKind::ProducesClause { fields }
-        } else {
-            BlockItemKind::ConsumesClause { fields }
-        };
-        Some(BlockItem {
-            span: start.merge(end),
-            kind,
-        })
+        self.diagnostics.push(Diagnostic::warning(
+            start.merge(keyword_tok.span),
+            format!(
+                "`{keyword}:` clauses are removed in v3; use `when` clauses on entity fields instead"
+            ),
+        ));
+
+        // Return None to drop this item — try the next item in the caller's loop
+        self.parse_block_item(BlockKind::Rule)
     }
 
     fn parse_let_item(&mut self, start: Span) -> Option<BlockItem> {
@@ -1010,7 +1055,6 @@ impl<'s> Parser<'s> {
     }
 
     /// Collect block items at column >= `base_col` (for indented for-block bodies).
-    /// Nested block items never allow produces/consumes.
     fn parse_indented_block_items(&mut self, base_col: u32) -> Vec<BlockItem> {
         let mut items = Vec::new();
         while !self.at_eof()
@@ -1330,6 +1374,15 @@ impl<'s> Parser<'s> {
             BlockItemKind::Clause {
                 keyword: name_text,
                 value,
+            }
+        } else if let Some((inner_value, when_clause)) = extract_when_clause(&value) {
+            BlockItemKind::FieldWithWhen {
+                name: Ident {
+                    span: name_tok.span,
+                    name: name_text,
+                },
+                value: inner_value,
+                when_clause,
             }
         } else {
             BlockItemKind::Assignment {
@@ -5277,57 +5330,114 @@ entity Task {
     }
 
     #[test]
-    fn produces_consumes_basic() {
+    fn produces_emits_migration_warning() {
         let src = r#"-- allium: 3
 rule ShipOrder {
     when: ShipOrder(order, tracking)
     requires: order.status = picking
-    consumes: warehouse_assignment
     produces: tracking_number, shipped_at
     ensures: order.status = shipped
 }"#;
         let r = parse(src);
-        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        // Find produces and consumes items
-        let mut found_produces = false;
-        let mut found_consumes = false;
-        for item in &b.items {
-            match &item.kind {
-                BlockItemKind::ProducesClause { fields } => {
-                    assert_eq!(fields.len(), 2);
-                    assert_eq!(fields[0].name, "tracking_number");
-                    assert_eq!(fields[1].name, "shipped_at");
-                    found_produces = true;
-                }
-                BlockItemKind::ConsumesClause { fields } => {
-                    assert_eq!(fields.len(), 1);
-                    assert_eq!(fields[0].name, "warehouse_assignment");
-                    found_consumes = true;
-                }
-                _ => {}
-            }
-        }
-        assert!(found_produces, "produces clause not found");
-        assert!(found_consumes, "consumes clause not found");
+        let warnings: Vec<_> = r.diagnostics.iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .collect();
+        assert!(
+            warnings.iter().any(|d| d.message.contains("`produces:` clauses are removed")),
+            "expected migration warning for produces, got: {:?}", warnings
+        );
     }
 
     #[test]
-    fn produces_single_field() {
+    fn consumes_emits_migration_warning() {
         let src = r#"-- allium: 3
-rule Activate {
-    when: Activate(item)
-    produces: activated_at
-    ensures: item.activated_at = now
+rule ReadOrder {
+    when: Check(order)
+    consumes: warehouse_assignment
+    ensures: order.verified = true
 }"#;
         let r = parse(src);
-        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let warnings: Vec<_> = r.diagnostics.iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .collect();
+        assert!(
+            warnings.iter().any(|d| d.message.contains("`consumes:` clauses are removed")),
+            "expected migration warning for consumes, got: {:?}", warnings
+        );
+    }
+
+    #[test]
+    fn when_clause_on_field() {
+        let src = r#"-- allium: 3
+entity Order {
+    status: pending | shipped | delivered
+    tracking_number: String when status = shipped | delivered
+    transitions status {
+        pending -> shipped
+        shipped -> delivered
+        terminal: delivered
+    }
+}"#;
+        let r = parse(src);
+        let errors: Vec<_> = r.diagnostics.iter().filter(|d| d.severity == Severity::Error).collect();
+        assert_eq!(errors.len(), 0, "unexpected errors: {:?}", errors);
         let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        let produces = b.items.iter().find(|i| matches!(&i.kind, BlockItemKind::ProducesClause { .. }));
-        assert!(produces.is_some(), "produces clause not found");
-        if let BlockItemKind::ProducesClause { fields } = &produces.unwrap().kind {
-            assert_eq!(fields.len(), 1);
-            assert_eq!(fields[0].name, "activated_at");
+        let field_with_when = b.items.iter().find(|i| matches!(&i.kind, BlockItemKind::FieldWithWhen { .. }));
+        assert!(field_with_when.is_some(), "expected FieldWithWhen item");
+        if let BlockItemKind::FieldWithWhen { name, when_clause, .. } = &field_with_when.unwrap().kind {
+            assert_eq!(name.name, "tracking_number");
+            assert_eq!(when_clause.status_field.name, "status");
+            assert_eq!(when_clause.qualifying_states.len(), 2);
+            assert_eq!(when_clause.qualifying_states[0].name, "shipped");
+            assert_eq!(when_clause.qualifying_states[1].name, "delivered");
+        }
+    }
+
+    #[test]
+    fn when_clause_single_state() {
+        let src = r#"-- allium: 3
+entity Order {
+    status: active | cancelled
+    cancelled_at: Timestamp when status = cancelled
+    transitions status {
+        active -> cancelled
+        terminal: cancelled
+    }
+}"#;
+        let r = parse(src);
+        let errors: Vec<_> = r.diagnostics.iter().filter(|d| d.severity == Severity::Error).collect();
+        assert_eq!(errors.len(), 0, "unexpected errors: {:?}", errors);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        if let BlockItemKind::FieldWithWhen { name, when_clause, .. } = &b.items[1].kind {
+            assert_eq!(name.name, "cancelled_at");
+            assert_eq!(when_clause.qualifying_states.len(), 1);
+            assert_eq!(when_clause.qualifying_states[0].name, "cancelled");
+        } else {
+            panic!("expected FieldWithWhen, got {:?}", b.items[1].kind);
+        }
+    }
+
+    #[test]
+    fn when_clause_with_optional() {
+        let src = r#"-- allium: 3
+entity Order {
+    status: active | cancelled
+    notes: String? when status = cancelled
+    transitions status {
+        active -> cancelled
+        terminal: cancelled
+    }
+}"#;
+        let r = parse(src);
+        let errors: Vec<_> = r.diagnostics.iter().filter(|d| d.severity == Severity::Error).collect();
+        assert_eq!(errors.len(), 0, "unexpected errors: {:?}", errors);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        if let BlockItemKind::FieldWithWhen { name, value, when_clause } = &b.items[1].kind {
+            assert_eq!(name.name, "notes");
+            assert!(matches!(value, Expr::TypeOptional { .. }), "expected TypeOptional");
+            assert_eq!(when_clause.qualifying_states.len(), 1);
+        } else {
+            panic!("expected FieldWithWhen, got {:?}", b.items[1].kind);
         }
     }
 
@@ -5369,12 +5479,12 @@ entity Order {
     }
 
     #[test]
-    fn v3_full_entity_with_transitions_and_rule_with_deps() {
+    fn v3_full_entity_with_transitions_and_rule() {
         let src = r#"-- allium: 3
 entity Order {
     status: pending | shipped | delivered
-    tracking: String?
-    shipped_at: Timestamp?
+    tracking: String when status = shipped | delivered
+    shipped_at: Timestamp when status = shipped | delivered
 
     transitions status {
         pending -> shipped
@@ -5386,8 +5496,6 @@ entity Order {
 rule ShipOrder {
     when: ShipOrder(order, tracking)
     requires: order.status = pending
-    consumes: warehouse
-    produces: tracking, shipped_at
     ensures:
         order.status = shipped
         order.tracking = tracking
@@ -5607,146 +5715,53 @@ entity E {
     }
 
     // -----------------------------------------------------------------------
-    // Produces/consumes: edge cases
+    // When clause: edge cases
     // -----------------------------------------------------------------------
 
     #[test]
-    fn consumes_only() {
+    fn when_clause_multiple_fields() {
         let src = r#"-- allium: 3
-rule ReadOnly {
-    when: Check(order)
-    consumes: warehouse_assignment, tracking_number
-    ensures: order.verified = true
+entity Order {
+    status: pending | shipped | delivered
+    tracking: String when status = shipped | delivered
+    shipped_at: Timestamp when status = shipped | delivered
+    delivered_at: Timestamp when status = delivered
+    transitions status {
+        pending -> shipped
+        shipped -> delivered
+        terminal: delivered
+    }
 }"#;
         let r = parse(src);
-        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let errors: Vec<_> = r.diagnostics.iter().filter(|d| d.severity == Severity::Error).collect();
+        assert_eq!(errors.len(), 0, "unexpected errors: {:?}", errors);
         let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        let consumes = b.items.iter().find(|i| matches!(&i.kind, BlockItemKind::ConsumesClause { .. }));
-        assert!(consumes.is_some());
-        if let BlockItemKind::ConsumesClause { fields } = &consumes.unwrap().kind {
-            assert_eq!(fields.len(), 2);
-            assert_eq!(fields[0].name, "warehouse_assignment");
-            assert_eq!(fields[1].name, "tracking_number");
-        }
-        // Should not have a produces clause
-        assert!(!b.items.iter().any(|i| matches!(&i.kind, BlockItemKind::ProducesClause { .. })));
+        let when_count = b.items.iter()
+            .filter(|i| matches!(&i.kind, BlockItemKind::FieldWithWhen { .. }))
+            .count();
+        assert_eq!(when_count, 3);
     }
 
     #[test]
-    fn produces_only() {
-        let src = r#"-- allium: 3
-rule Initialize {
-    when: Init(item)
-    produces: created_at, created_by
-    ensures: item.created_at = now
-}"#;
-        let r = parse(src);
-        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        let produces = b.items.iter().find(|i| matches!(&i.kind, BlockItemKind::ProducesClause { .. }));
-        assert!(produces.is_some());
-        if let BlockItemKind::ProducesClause { fields } = &produces.unwrap().kind {
-            assert_eq!(fields.len(), 2);
-        }
-        assert!(!b.items.iter().any(|i| matches!(&i.kind, BlockItemKind::ConsumesClause { .. })));
-    }
-
-    #[test]
-    fn produces_many_fields() {
-        let src = "-- allium: 3\nrule R {\n    when: Go(x)\n    produces: a, b, c, d, e\n    ensures: x.a = 1\n}";
-        let r = parse(src);
-        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        let produces = b.items.iter().find(|i| matches!(&i.kind, BlockItemKind::ProducesClause { .. }));
-        if let BlockItemKind::ProducesClause { fields } = &produces.unwrap().kind {
-            assert_eq!(fields.len(), 5);
-            assert_eq!(fields[4].name, "e");
-        }
-    }
-
-    #[test]
-    fn produces_consumes_ordering_before_requires() {
-        // produces/consumes can appear before requires (unusual but valid position)
+    fn legacy_produces_consumes_skipped_with_warnings() {
         let src = r#"-- allium: 3
 rule R {
     when: Go(x)
     produces: field_a
     consumes: field_b
-    requires: x.status = active
-    ensures: x.field_a = 1
+    ensures: x.done = true
 }"#;
         let r = parse(src);
-        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let warnings: Vec<_> = r.diagnostics.iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .collect();
+        assert!(warnings.len() >= 2, "expected at least 2 migration warnings, got {}", warnings.len());
+        // The produces/consumes items should be dropped from the AST
         let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        assert!(b.items.iter().any(|i| matches!(&i.kind, BlockItemKind::ProducesClause { .. })));
-        assert!(b.items.iter().any(|i| matches!(&i.kind, BlockItemKind::ConsumesClause { .. })));
-    }
-
-    #[test]
-    fn produces_consumes_between_let_and_ensures() {
-        let src = r#"-- allium: 3
-rule R {
-    when: Go(x)
-    requires: x.status = active
-    let val = x.amount
-    consumes: balance
-    produces: receipt
-    ensures: x.receipt = val
-}"#;
-        let r = parse(src);
-        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        // Verify ordering: when, requires, let, consumes, produces, ensures
-        assert!(matches!(&b.items[0].kind, BlockItemKind::Clause { keyword, .. } if keyword == "when"));
-        assert!(matches!(&b.items[1].kind, BlockItemKind::Clause { keyword, .. } if keyword == "requires"));
-        assert!(matches!(&b.items[2].kind, BlockItemKind::Let { .. }));
-        assert!(matches!(&b.items[3].kind, BlockItemKind::ConsumesClause { .. }));
-        assert!(matches!(&b.items[4].kind, BlockItemKind::ProducesClause { .. }));
-        assert!(matches!(&b.items[5].kind, BlockItemKind::Clause { keyword, .. } if keyword == "ensures"));
-    }
-
-    #[test]
-    fn produces_in_rule_with_for_block() {
-        let src = r#"-- allium: 3
-rule BulkShip {
-    when: BulkShip(batch)
-    produces: shipped_at
-    for order in batch.orders:
-        requires: order.status = confirmed
-        ensures: order.status = shipped
-}"#;
-        let r = parse(src);
-        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        assert!(b.items.iter().any(|i| matches!(&i.kind, BlockItemKind::ProducesClause { .. })));
-        assert!(b.items.iter().any(|i| matches!(&i.kind, BlockItemKind::ForBlock { .. })));
-    }
-
-    #[test]
-    fn produces_with_trailing_comma() {
-        let src = "-- allium: 3\nrule R {\n    when: Go(x)\n    produces: a, b,\n    ensures: x.a = 1\n}";
-        let r = parse(src);
-        // Trailing comma is tricky — the parser stops at newline. Let's verify it still works.
-        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        let produces = b.items.iter().find(|i| matches!(&i.kind, BlockItemKind::ProducesClause { .. }));
-        if let BlockItemKind::ProducesClause { fields } = &produces.unwrap().kind {
-            // Should have parsed a and b; trailing comma is consumed but doesn't add a third
-            assert_eq!(fields.len(), 2, "trailing comma should not add extra field");
-        }
-    }
-
-    #[test]
-    fn consumes_single_field() {
-        let src = "-- allium: 3\nrule R {\n    when: Go(x)\n    consumes: balance\n    ensures: x.done = true\n}";
-        let r = parse(src);
-        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        let consumes = b.items.iter().find(|i| matches!(&i.kind, BlockItemKind::ConsumesClause { .. }));
-        if let BlockItemKind::ConsumesClause { fields } = &consumes.unwrap().kind {
-            assert_eq!(fields.len(), 1);
-            assert_eq!(fields[0].name, "balance");
-        }
+        assert!(
+            !b.items.iter().any(|i| matches!(&i.kind, BlockItemKind::FieldWithWhen { .. })),
+            "legacy produces/consumes should not become FieldWithWhen"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -5778,13 +5793,11 @@ entity Account {
     }
 
     #[test]
-    fn v3_rule_with_produces_consumes_multiple_ensures() {
+    fn v3_rule_with_multiple_ensures() {
         let src = r#"-- allium: 3
 rule CompleteOrder {
     when: Complete(order)
     requires: order.status = shipped
-    consumes: tracking_number
-    produces: completed_at, receipt_number
     ensures: order.status = delivered
     ensures: order.completed_at = now
     ensures: order.receipt_number = generate_receipt()
@@ -5799,12 +5812,11 @@ rule CompleteOrder {
     }
 
     #[test]
-    fn v3_rule_with_if_and_produces() {
+    fn v3_rule_with_if_block() {
         let src = r#"-- allium: 3
 rule Cancel {
     when: Cancel(order, reason)
     requires: order.status != delivered
-    produces: cancelled_at
     ensures:
         order.status = cancelled
         order.cancelled_at = now
@@ -5817,14 +5829,12 @@ rule Cancel {
 
     #[test]
     fn v3_complete_lifecycle_spec() {
-        // Full lifecycle: entity with transitions, multiple rules with produces/consumes,
-        // invariant, surface
         let src = r#"-- allium: 3
 
 entity Subscription {
     status: trial | active | past_due | cancelled
-    started_at: Timestamp?
-    cancelled_at: Timestamp?
+    started_at: Timestamp when status = active | past_due | cancelled
+    cancelled_at: Timestamp when status = cancelled
     balance: Decimal
 
     transitions status {
@@ -5846,7 +5856,6 @@ config {
 rule ActivateSubscription {
     when: Activate(sub)
     requires: sub.status = trial
-    produces: started_at
     ensures:
         sub.status = active
         sub.started_at = now
@@ -5855,8 +5864,6 @@ rule ActivateSubscription {
 rule CancelSubscription {
     when: Cancel(sub)
     requires: sub.status != cancelled
-    consumes: started_at
-    produces: cancelled_at
     ensures:
         sub.status = cancelled
         sub.cancelled_at = now
@@ -5884,9 +5891,8 @@ surface SubscriptionDashboard {
     }
 
     #[test]
-    fn v3_produces_consumes_are_rule_only() {
-        // `produces:` and `consumes:` are rule-only clauses. In non-rule blocks
-        // they are parsed as regular assignments (field names).
+    fn v3_produces_consumes_are_field_names_in_entities() {
+        // In non-rule blocks, `produces` and `consumes` are just field names
         let src = r#"-- allium: 3
 entity Factory {
     produces: widget_a
@@ -5895,14 +5901,12 @@ entity Factory {
         let r = parse(src);
         assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
         let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        // In entity blocks, `produces:` and `consumes:` are field assignments, not clauses
         assert!(matches!(&b.items[0].kind, BlockItemKind::Assignment { name, .. } if name.name == "produces"));
         assert!(matches!(&b.items[1].kind, BlockItemKind::Assignment { name, .. } if name.name == "consumes"));
     }
 
     #[test]
-    fn v3_produces_consumes_work_in_rules() {
-        // Verify produces/consumes still work correctly in rule blocks
+    fn v3_legacy_produces_consumes_emit_warnings_in_rules() {
         let src = r#"-- allium: 3
 rule Ship {
     when: Ship(order)
@@ -5911,10 +5915,10 @@ rule Ship {
     ensures: order.status = shipped
 }"#;
         let r = parse(src);
-        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        assert!(b.items.iter().any(|i| matches!(&i.kind, BlockItemKind::ProducesClause { fields } if fields.len() == 1)));
-        assert!(b.items.iter().any(|i| matches!(&i.kind, BlockItemKind::ConsumesClause { fields } if fields.len() == 1)));
+        let warnings: Vec<_> = r.diagnostics.iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .collect();
+        assert!(warnings.len() >= 2, "expected migration warnings, got {:?}", warnings);
     }
 
     #[test]

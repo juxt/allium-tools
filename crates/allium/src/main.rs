@@ -15,7 +15,13 @@ fn main() -> ExitCode {
         eprintln!("       allium parse <file.allium>");
         eprintln!("       allium test-plan <file.allium>");
         eprintln!("       allium generators <file.allium>");
+        eprintln!("       allium --version");
         return ExitCode::from(2);
+    }
+
+    if args[0] == "--version" || args[0] == "-V" {
+        println!("allium {} (language versions: 1, 2, 3)", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
     }
 
     match args[0].as_str() {
@@ -132,7 +138,7 @@ fn cmd_test_plan(args: &[String]) -> ExitCode {
     };
 
     let result = allium_parser::parse(&source);
-    let plan = test_plan::generate_test_plan(&result.module);
+    let plan = test_plan::generate_test_plan(&result.module, &source);
     match serde_json::to_string_pretty(&plan) {
         Ok(json) => {
             println!("{json}");

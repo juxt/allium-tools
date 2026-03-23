@@ -344,8 +344,9 @@ Primitive types have no properties or methods. For domain-specific string types 
 
 **Compound types:**
 - `Set<T>` — unordered collection of unique items
-- `List<T>` — ordered collection (use when order matters)
-- `T?` — optional (may be absent). In lifecycle entities, some `?` fields are genuinely optional (a user's nickname) while others are absent at creation but guaranteed present after a specific transition (an order's warehouse). Use `produces` declarations on rules to establish lifecycle guarantees for the latter case; the checker can then suppress null-safety diagnostics where the guarantee holds (see Lifecycle suppression).
+- `List<T>` — ordered collection (use when order matters). A compound field type declared explicitly on entities
+- `Sequence<T>` — ordered collection produced by ordered relationships and their projections. `Sequence` is a subtype of `Set`: an ordered collection is assignable where an unordered one is expected, but not the reverse. `List<T>` is a field type you declare explicitly; `Sequence` is the collection type the checker infers when a relationship is ordered. Both carry ordering semantics, but they occupy different positions in the grammar
+- `T?` — optional (may be absent). Reserved for genuinely optional fields: a user's nickname, a note that may or may not exist. For fields whose presence depends on lifecycle state, use a `when` clause instead (see below).
 
 **Checking for absent values:**
 ```
@@ -356,6 +357,129 @@ requires: request.reminded_at != null     -- field has a value
 `null` represents the absence of a value for optional fields.
 
 `field = null` and `field != null` are presence checks, not comparisons. `field = null` is true when the field is absent; `field != null` is true when the field has a value. Comparisons with null produce false: `null <= now` is false, `null > 0` is false. Arithmetic with null produces null: `null + 1.day` is null. This means temporal triggers on optional fields (e.g., `when: user: User.next_digest_at <= now`) do not fire when the field is absent.
+
+**State-dependent field presence (`when` clause):**
+
+A field declaration may carry a `when` clause tying its presence to lifecycle state:
+
+```
+entity Order {
+    status: pending | confirmed | shipped | delivered | cancelled
+    customer: Customer
+    total: Money
+    tracking_number: String when status = shipped | delivered
+    shipped_at: Timestamp when status = shipped | delivered
+    delivery_confirmed_at: Timestamp when status = delivered
+
+    transitions status {
+        pending -> confirmed
+        confirmed -> shipped
+        shipped -> delivered
+        terminal: delivered, cancelled
+    }
+}
+```
+
+Fields without `when` are present in all states. Fields with `when` are present only when the named status field holds one of the listed values. The `when` clause references a single status field; that field must have a `transitions` block.
+
+`?` and `when` are orthogonal. `reviewer_notes: String? when review = approved | rejected` means the field exists in those states but may be null within them. `?` is genuine optionality; `when` is lifecycle-dependent presence. A field may carry both.
+
+Entities with multiple status fields use the qualified form to disambiguate:
+
+```
+entity Document {
+    status: draft | published | archived
+    review: pending | approved | rejected
+
+    transitions status { ... }
+    transitions review { ... }
+
+    published_at: Timestamp when status = published | archived
+    reviewer_notes: String when review = rejected
+}
+```
+
+Each `when` clause references one status field. Compound conditions across multiple status fields (`when status = published and review = rejected`) are not supported; use invariants for cross-field constraints.
+
+The `when` keyword appears in three syntactic positions: rule triggers (`when: TriggerCondition`, with colon), surface and provides guards (`Action(...) when condition`, without colon, after an action), and field declarations (`field: Type when status = value`, without colon, after a type). The grammar is unambiguous at each position. Rule triggers are identified by the colon. Surface guards follow an action or related clause. Field `when` clauses follow a type declaration.
+
+**Presence and absence obligations.** Obligations fire when a rule crosses the boundary of a field's `when` set:
+
+- **Entering** (source state outside `when` set, target state inside): the rule must set the field.
+- **Leaving** (source state inside `when` set, target state outside): the rule must clear the field.
+- **Moving within** (both states inside): no obligation. The field is already present and remains present; the rule may update it but need not.
+- **Moving outside** (both states outside): no obligation.
+
+```
+entity Document {
+    status: active | deleted
+    deleted_at: Timestamp when status = deleted
+    deleted_by: User when status = deleted
+
+    transitions status {
+        active -> deleted
+        deleted -> active
+        terminal: active
+    }
+}
+
+rule SoftDelete {
+    when: SoftDelete(document, actor)
+    requires: document.status = active
+    ensures:
+        document.status = deleted
+        document.deleted_at = now        -- entering when set: must set
+        document.deleted_by = actor      -- entering when set: must set
+}
+
+rule RestoreDocument {
+    when: RestoreDocument(document)
+    requires: document.status = deleted
+    ensures:
+        document.status = active
+        document.deleted_at = null       -- leaving when set: must clear
+        document.deleted_by = null       -- leaving when set: must clear
+}
+```
+
+**Access without guard.** Accessing a `when`-qualified field without a `requires` guard narrowing to a qualifying state is an error:
+
+```
+-- Error: tracking_number requires status in {shipped, delivered}
+rule BadAccess {
+    when: SomeEvent(order)
+    ensures: Label.created(tracking: order.tracking_number)
+}
+
+-- Valid: requires narrows to a qualifying state
+rule GenerateLabel {
+    when: GenerateLabel(order)
+    requires: order.status = shipped
+    ensures: Label.created(tracking: order.tracking_number)
+}
+```
+
+**Convergent transitions.** If two rules reach the same state and the entity requires a field at that state, both must set it:
+
+```
+rule CancelByCustomer {
+    when: CustomerCancels(order)
+    requires: order.status = pending
+    ensures:
+        order.status = cancelled
+        order.cancelled_at = now         -- required: entering when set
+        order.cancelled_by = customer    -- required: entering when set
+}
+
+rule CancelByTimeout {
+    when: order: Order.created_at + 48.hours <= now
+    requires: order.status = pending
+    ensures:
+        order.status = cancelled
+        order.cancelled_at = now         -- required: entering when set
+        -- Error: cancelled_by not set
+}
+```
 
 **Enumerated types (inline):**
 ```
@@ -443,7 +567,7 @@ The converse (every rule transition appears in the graph) is enforced by the aut
 
 **Generality.** Transition graphs currently target enum status fields. The syntax is designed to extend to variant discriminators and other lifecycle-bearing fields in future versions without structural changes.
 
-**Interaction with data dependencies.** When a transition graph is declared, the checker uses its structure alongside `produces`/`consumes` declarations to compute per-state field-presence guarantees (see [Data dependencies](#data-dependencies-produces-and-consumes)) and to suppress null-safety diagnostics where lifecycle analysis proves a field is present (see [Lifecycle suppression](#lifecycle-suppression)).
+**Interaction with state-dependent fields.** When a transition graph is declared, the checker uses its structure alongside `when` clauses on field declarations to enforce presence and absence obligations at each transition (see [Field types](#field-types)) and to verify that `when`-qualified fields are only accessed within qualifying state guards.
 
 **Entity references:**
 ```
@@ -474,6 +598,8 @@ The relationship name determines the cardinality:
 - **Singular name** (e.g., `invitation`) — at most one related entity. The value is the entity instance, or `null` if none exists. Equivalent to `T?`. If multiple entities match a singular relationship, the specification is in error and the checker should report it.
 - **Plural name** (e.g., `slots`) — zero or more related entities. The value is a collection, empty if none exist.
 
+Relationships currently produce `Set` (unordered). The declaration syntax for ordered relationships (which would produce `Sequence`) is pending a follow-up ALP. The semantic model for ordered collections is defined; see [Collection operations](#collection-operations) for the type-level rules.
+
 ### Projections
 
 Named filtered views of relationships:
@@ -490,6 +616,8 @@ confirmed_interviewers: confirmations where status = confirmed -> interviewer
 ```
 
 The `-> field` syntax extracts a field from each matching entity. When the extracted field is optional (`T?`), null values are excluded from the result: the projection produces `Set<T>`, not `Set<T?>`.
+
+Projections preserve ordering. If the source collection is a `Sequence`, the projection result is also a `Sequence` in the same relative order. This applies to both `where` filtering and `-> field` extraction. Field extraction on ordered collections retains duplicates (two source elements navigating to the same target produce two entries in sequence order); use `.unique` to deduplicate, which produces an unordered `Set`.
 
 ### Derived values
 
@@ -528,9 +656,6 @@ rule RuleName {
     requires: Precondition1
     requires: Precondition2
 
-    produces: field_name, field_name   -- optional: fields guaranteed non-null after execution
-    consumes: field_name, field_name   -- optional: fields this rule reads
-
     let binding2 = expression      -- or between requires and ensures
 
     ensures: Postcondition1
@@ -547,110 +672,45 @@ rule RuleName {
 | `for` | Iterate: apply the rule body for each element in a collection |
 | `let` | Local variable bindings (can appear anywhere after `when`) |
 | `requires` | Preconditions that must be true (rule fails if not met) |
-| `produces` | Fields guaranteed non-null in every post-state of every execution |
-| `consumes` | Fields this rule reads, enabling the checker to verify they are guaranteed present |
 | `ensures` | What becomes true after the rule executes |
 | `@guidance` | Non-normative implementation advice (optional, always last) |
 
 Place `let` bindings where they make the rule most readable, typically just before the clause that first uses them.
 
-### Data dependencies: produces and consumes
+### Derived value `when` propagation
 
-Rules in lifecycle entities read and write fields whose availability depends on the entity's lifecycle position. `produces` and `consumes` make these dependencies explicit.
+Derived values computed from `when`-qualified fields inherit the intersection of their inputs' `when` sets:
 
 ```
-rule ShipOrder {
-    when: ShipOrder(order, tracking)
-    requires: order.status = picking
-    consumes: warehouse_assignment
-    produces: tracking_number, shipped_at
-    ensures:
-        order.status = shipped
-        order.tracking_number = tracking
-        order.shipped_at = now
+entity Order {
+    status: pending | confirmed | shipped | delivered
+    shipped_at: Timestamp when status = shipped | delivered
+    delivery_confirmed_at: Timestamp when status = delivered
+
+    transitions status {
+        pending -> confirmed
+        confirmed -> shipped
+        shipped -> delivered
+        terminal: delivered
+    }
+
+    -- Inferred: when status = delivered
+    -- (intersection of {shipped, delivered} and {delivered})
+    days_in_transit: delivery_confirmed_at - shipped_at
 }
 ```
 
-**`produces`** is a universal post-condition: the listed fields are guaranteed non-null in every post-state of every execution of the rule. It is a non-null assertion only; it does not narrow field types. A rule declaring `produces: tracking_number` must set `tracking_number` in all execution paths of its `ensures` clause (every branch of every conditional, plus the unconditional path when a conditional has no `else`).
+The checker infers this; the author does not declare it. If the intersection is empty, the derived value is unreachable and the checker reports an error.
 
-**`consumes`** declares that the rule reads the listed fields, enabling the checker to verify they are guaranteed present given the rule's `requires` guard and the state-level guarantees at that lifecycle position.
-
-**Absent declarations** are treated as "unchecked", not "empty". Existing rules without `produces` or `consumes` remain valid with no change in checker behaviour. Authors adopt incrementally. Validation of `produces` obligations (E-PROOF-INCOMPLETE) applies only to rules that declare `produces`; rules without the declaration are not checked.
-
-**State-level guarantees.** The checker computes per-state field-presence guarantees by intersecting the `produces` sets of all rules whose transitions reach that state. When multiple rules converge on a target state with different production profiles, the state-level guarantee is only the fields that all inbound rules produce. If a downstream rule's `consumes` references a field not in the intersection, the checker reports the gap with a lifecycle-aware diagnostic naming the inbound rule that lacks the production, the missing field and the affected downstream rules.
-
-**Convergent transitions.** When multiple rules reach the same state with different production profiles, the checker reports the gap:
+An author may optionally annotate a derived value with an explicit `when` clause as documentation:
 
 ```
-rule CancelByCustomer {
-    when: CustomerCancels(order)
-    requires: order.status = pending
-    produces: cancelled_at, cancelled_by
-    ensures:
-        order.status = cancelled
-        order.cancelled_at = now
-        order.cancelled_by = customer
-}
-
-rule CancelByTimeout {
-    when: order: Order.created_at + 48.hours <= now
-    requires: order.status = pending
-    produces: cancelled_at
-    ensures:
-        order.status = cancelled
-        order.cancelled_at = now
-}
+days_in_transit: delivery_confirmed_at - shipped_at when status = delivered
 ```
 
-A downstream rule consuming `cancelled_by` at state `cancelled` will trigger a checker error:
+When present, the checker verifies it matches the inferred set. A mismatch is an error. When absent, the inferred set applies silently. The checker exports inferred `when` sets as structured data alongside state-level summaries.
 
-```
-error: field `cancelled_by` is not guaranteed present at state `cancelled`
-  rule CancelByTimeout reaches `cancelled` but does not produce `cancelled_by`
-  rule CancelByCustomer produces `cancelled_by`, but CancelByTimeout does not
-  downstream rule ArchiveCancelledOrder consumes `cancelled_by`
-```
-
-**Derived summaries.** State-level guarantees ("when status is `shipped`, `tracking_number` and `warehouse_assignment` are guaranteed present") are derived mechanically from per-rule declarations and the transition graph (or, when no graph is declared, the transition structure inferred from rule `requires`/`ensures` clauses). They are tooling output (queryable, displayable in documentation generators), not independently declared constructs.
-
-**Forward compatibility.** Per-rule `produces`/`consumes` declarations are designed as a stepping stone. A future state-dependent type mechanism could subsume them by interpreting each `produces` clause as a type-narrowing assertion, making the upgrade path a mechanical promotion rather than a rewrite.
-
-### Lifecycle suppression
-
-The checker uses `produces` declarations and transition reachability to suppress null-safety diagnostics on `?` fields when lifecycle analysis proves the field is present.
-
-**Proof obligation.** For a `?` field `f` on an entity with a declared transition graph: the checker computes, for each lifecycle state `s`, whether every inbound path to `s` passes through a rule that declares `produces: f`. If so, `f` is proven present at state `s`. When no transition graph is declared, the checker infers the transition structure from rule `requires`/`ensures` clauses (sound but incomplete: it can prove presence but cannot disprove it).
-
-**Suppression scope.** Within a rule or derived value whose `requires` clause (or enclosing context) constrains the entity to a state where `f` is proven present, the checker suppresses null-safety diagnostics on `f`. The expression `order.warehouse` is valid without `?.` or `?? default` when the enclosing context proves `order.status = shipped` and the proof obligation for `warehouse` at `shipped` is satisfied.
-
-```
-rule GenerateShippingLabel {
-    when: GenerateLabel(order)
-    requires: order.status = shipped
-    consumes: warehouse, tracking_number
-    ensures:
-        -- warehouse and tracking_number can be accessed without ?.
-        -- because the proof obligation is satisfied at state shipped
-        Label.created(
-            origin: order.warehouse.address,
-            tracking: order.tracking_number
-        )
-}
-```
-
-**Cross-entity boundary.** Suppression applies only within the lifecycle graph of a single entity. Cross-entity references (`shipment.order.warehouse`) do not benefit from suppression even if the referenced entity's lifecycle analysis would prove presence. This boundary may be relaxed in a future ALP.
-
-**Opt-in.** Suppression applies only when `produces` declarations exist on the relevant rules. Rules without `produces` declarations are treated as unchecked (per ALP-22), and fields they set do not contribute to the proof. Existing specs without `produces` declarations are unaffected.
-
-**Diagnostic messages.** When the checker cannot complete the proof (e.g. the `requires` clause constrains to `confirmed | shipped` but only `shipped` guarantees the field), the diagnostic names which states lack the guarantee:
-
-```
-error[E-NULL-ACCESS]: field `warehouse` is optional
-  it is guaranteed non-null when `status = shipped` (via rule ShipOrder)
-  but not when `status = confirmed`
-```
-
-**Tooling output.** The checker exports state-level field-presence guarantees as structured data (per-state field sets with presence/absence annotations). PBT generators and documentation tools consume this output.
+**Cross-entity access.** Accessing a `when`-qualified field on a related entity requires a guard narrowing the related entity's status to a qualifying state. `candidacy.order.tracking_number` requires that the rule's context narrows `order.status` to a qualifying state.
 
 ### Rule-level iteration
 
@@ -926,9 +986,9 @@ reply_to?.author
 identity.timezone ?? "UTC"
 inherits_from?.effective_permissions ?? {}
 
--- Lifecycle suppression: ?. can be omitted when the checker proves
--- field presence via produces declarations (see Lifecycle suppression)
-order.warehouse.address       -- valid when requires: order.status = shipped
+-- State-dependent fields: ?. is not needed for when-qualified fields
+-- when the requires clause narrows to a qualifying state
+order.tracking_number         -- valid when requires: order.status = shipped
 
 -- Self-reference
 this                                        -- the instance being defined or identified
@@ -989,12 +1049,21 @@ interviewers.remove(leaving_interviewer)
 all_permissions: permissions + inherited_permissions
 removed_mentions: old_mentions - new_mentions
 
--- First/last (for ordered collections)
+-- First/last (ordered collections only: Sequence or List<T>)
 attempts.first
 attempts.last
+
+-- Deduplicate (produces unordered Set)
+ordered_interviewers.unique
 ```
 
-`.add()` and `.remove()` are ensures-only mutations on a relationship. Set `+` and `-` are expression-level operations that produce new sets without mutating anything.
+`.first` and `.last` are restricted to ordered collections (`Sequence` or `List<T>`). Using them on a `Set` is a warning in the current version, becoming a hard error in the next version.
+
+`.unique` deduplicates a collection. Because deduplication discards positional information, the result is always an unordered `Set`, even when the source is ordered.
+
+`for item in collection:` iterates in declared order when the source is a `Sequence` or `List<T>`. When the source is a `Set`, iteration order is unspecified.
+
+`.add()` and `.remove()` are ensures-only mutations on a relationship. Set `+` and `-` are expression-level operations that produce new sets without mutating anything. When applied to ordered collections (`Sequence` or `List<T>`), `+` and `-` produce unordered results (`Set<T>`). The checker reports the type change if the result is used where ordering is expected.
 
 ### Comparisons
 
@@ -1284,6 +1353,8 @@ Invariant expressions must be pure:
 ### Checking semantics
 
 Invariants are logical assertions over entity state, not runtime checks. Checking frequency and strategy are tooling concerns: PBT checks invariants after rule sequences, the model checker checks exhaustively, the trace validator checks against reconstructed state.
+
+Invariant expressions that reference `when`-qualified fields must scope their quantification to qualifying states. `for o in Orders: o.tracking_number != null` is an error if `tracking_number` carries a `when` clause, because the field does not exist in all states. Use a guard: `for o in Orders: o.status in {shipped, delivered} implies o.tracking_number != null`.
 
 ### Prose-only vs expression-bearing invariants
 
@@ -1785,17 +1856,15 @@ A valid Allium specification must satisfy:
 7d. Every enum value on the field appears in at least one edge or in the `terminal:` clause; every value in the graph exists on the field (exact correspondence)
 7e. Terminal states must be explicitly declared with a `terminal:` clause
 
-**Data dependency validity (when `produces`/`consumes` clauses are present):**
-7f. A rule declaring `produces: f` must set `f` in all execution paths of its `ensures` clause (E-PROOF-INCOMPLETE). An execution path is each branch of every conditional, plus the unconditional path when a conditional has no `else` branch
-7g. Fields listed in `consumes` must be guaranteed present at the rule's lifecycle position, given the state-level guarantees derived from inbound rules' `produces` sets and the rule's `requires` guard
-7h. When multiple rules converge on a target state, the state-level guarantee is the intersection of their `produces` sets. If a downstream rule's `consumes` references a field outside the intersection, the checker reports the gap
-
-**Lifecycle suppression (when proof obligation is satisfied):**
-7i. Accessing a `?` field without null handling (E-NULL-ACCESS) is suppressed when the enclosing context constrains the entity to a state where every inbound path passes through a rule that produces the field
-7j. Navigating through a `?` field without `?.` (E-NULL-NAV) is suppressed under the same conditions
-7k. When the proof cannot be completed, the diagnostic names which states lack the guarantee
-7l. Suppression applies only within a single entity's lifecycle graph; cross-entity references are not suppressed
-7m. W-TAUTOLOGICAL-INVARIANT (off by default): an invariant whose expression is provably true given lifecycle analysis. Informational warning, enabled by checker configuration
+**State-dependent field validity (when `when` clauses are present):**
+7f. Every state in a `when` clause must be a valid value of the referenced status field
+7g. The field referenced in a `when` clause must have a `transitions` block
+7h. Rules transitioning into the `when` set (source state outside, target state inside) must set the field
+7i. Rules transitioning out of the `when` set (source state inside, target state outside) must clear the field
+7j. Transitions within the `when` set (both states inside) or outside it (both states outside) carry no obligation
+7k. Accessing a `when`-qualified field without a `requires` guard narrowing to a qualifying state is an error
+7l. Optional explicit `when` on derived values must match the checker's inferred intersection of input `when` sets
+7m. Tautological invariant (off by default, opt-in): an expression-bearing invariant whose assertion is provably true given lifecycle analysis from `when` clauses and transition reachability
 
 **Expression validity:**
 10. No circular dependencies in derived values
@@ -1865,17 +1934,22 @@ A valid Allium specification must satisfy:
 56. Invariant expressions must not reference `now` (volatile; stored timestamp fields are permitted)
 57. Entity collection references in top-level invariants must correspond to declared entity types
 
+**Ordered collection validity:**
+58. `.first` and `.last` on unordered collections (`Set`) produce a warning in the current version, becoming a hard error in the next version
+59. Set arithmetic (`+`, `-`) on ordered collections produces unordered results. The checker reports an error if the result is used where an ordered collection is expected
+60. `.unique` produces an unordered `Set` regardless of the source collection's ordering
+
 **Enum literal validity:**
-58. Backtick-quoted enum literals must contain only printable Unicode characters (categories L, M, N, P, S) excluding backtick and whitespace
-59. Backtick-quoted literals are permitted only in enum declarations (named and inline), literal comparisons and `ensures` clauses; they are not permitted in identifier positions
-60. Backtick-quoted literals cannot appear in arithmetic expressions
+61. Backtick-quoted enum literals must contain only printable Unicode characters (categories L, M, N, P, S) excluding backtick and whitespace
+62. Backtick-quoted literals are permitted only in enum declarations (named and inline), literal comparisons and `ensures` clauses; they are not permitted in identifier positions
+63. Backtick-quoted literals cannot appear in arithmetic expressions
 
 **Annotation validity:**
-61. `@invariant` requires a PascalCase name; names must be unique within their containing construct (contract or surface)
-62. `@guarantee` requires a PascalCase name; names must be unique within their surface
-63. `@guidance` must not have a name; must appear after all structural clauses and after all other annotations in its containing construct
-64. All annotations must be followed by at least one indented comment line; unindented comment lines after an annotation are not part of the annotation body
-65. Within a construct, `@invariant` and `@guarantee` annotations may appear in any order relative to each other but must appear after all structural clauses; `@guidance` must appear last
+64. `@invariant` requires a PascalCase name; names must be unique within their containing construct (contract or surface)
+65. `@guarantee` requires a PascalCase name; names must be unique within their surface
+66. `@guidance` must not have a name; must appear after all structural clauses and after all other annotations in its containing construct
+67. All annotations must be followed by at least one indented comment line; unindented comment lines after an annotation are not part of the annotation body
+68. Within a construct, `@invariant` and `@guarantee` annotations may appear in any order relative to each other but must appear after all structural clauses; `@guidance` must appear last
 
 The checker should warn (but not error) on:
 - External entities without known governing specification
@@ -1900,7 +1974,8 @@ The checker should warn (but not error) on:
 - `@invariant` prose that resembles a formal expression (informational: promote to expression-bearing `invariant Name { expression }` when the assertion is machine-readable)
 - Config reference chains deeper than two levels of indirection
 - Diamond dependency conflicts in config overrides
-- W-TAUTOLOGICAL-INVARIANT (off by default, opt-in): an expression-bearing invariant whose assertion is provably true given lifecycle analysis from `produces` declarations and transition reachability
+- Tautological invariant (off by default, opt-in): an expression-bearing invariant whose assertion is provably true given lifecycle analysis from `when` clauses and transition reachability
+- `.first` or `.last` on unordered collections (warning in current version, error in next)
 
 ---
 
@@ -2033,8 +2108,10 @@ ensures: deadline = now + config.confirmation_deadline
 | **Variant** | One alternative in a sum type, declared with `variant X : Base { ... }` |
 | **Type Guard** | Condition (`requires:` or `if`) that narrows to a variant, unlocking its fields |
 | **Field** | Data stored on an entity or value |
-| **Relationship** | Navigation from one entity to related entities |
-| **Projection** | A filtered view of a relationship |
+| **Relationship** | Navigation from one entity to related entities. Unordered relationships produce `Set`; ordered relationships produce `Sequence`. Declaration syntax for ordered relationships is pending |
+| **Projection** | A filtered view of a relationship. Preserves the ordering of the source collection: a projection of a `Sequence` is a `Sequence` |
+| **Sequence** | Ordered collection type that will be produced by ordered relationships and their projections when declaration syntax is introduced (pending follow-up ALP). A subtype of `Set`: assignable where an unordered collection is expected, but not the reverse. Distinct from `List<T>`, which is a compound field type declared explicitly. Ordering propagates through `where` and field extraction; set arithmetic (`+`, `-`) and `.unique` produce unordered results |
+| **Ordered collection** | A collection whose elements have a meaningful sequence (intrinsic order). `Sequence` and `List<T>` are the two ordered collection types. `.first`, `.last` and deterministic `for` iteration are restricted to ordered collections |
 | **Derived Value** | A computed value based on other fields |
 | **Parameterised Derived Value** | A derived value that takes arguments, e.g. `can_use_feature(f): f in plan.features` |
 | **Rule** | A specification of behaviour triggered by some condition |
@@ -2042,9 +2119,10 @@ ensures: deadline = now + config.confirmation_deadline
 | **Trigger Emission** | An ensures clause that emits a named event; other rules chain from it via their `when` clause |
 | **Precondition** | A requirement that must be true for a rule to execute |
 | **Postcondition** | An assertion about what becomes true after a rule executes |
-| **`produces`** | Optional rule clause declaring fields guaranteed non-null in every post-state of every execution. Universal post-condition. The checker derives state-level guarantees by intersecting `produces` sets of all rules reaching a state |
-| **`consumes`** | Optional rule clause declaring fields the rule reads, enabling the checker to verify they are guaranteed present at the rule's lifecycle position. Absent declarations are treated as "unchecked", not "empty" |
-| **Lifecycle suppression** | Checker behaviour that suppresses null-safety diagnostics on `?` fields when lifecycle analysis (from `produces` declarations and transition reachability) proves the field is present at the entity's current state. Applies within a single entity's lifecycle graph only; cross-entity references are not suppressed |
+| **`when` clause (field)** | Clause on a field declaration tying its presence to lifecycle state: `field: Type when status = value1 \| value2`. The field is present only in the listed states. The referenced status field must have a `transitions` block. Orthogonal to `?` (genuine optionality) |
+| **Presence obligation** | When a rule transitions an entity into a field's `when` set (source state outside, target state inside), the rule must set the field |
+| **Absence obligation** | When a rule transitions an entity out of a field's `when` set (source state inside, target state outside), the rule must clear the field |
+| **Derived value `when` inference** | The checker infers `when` sets for derived values by intersecting the `when` sets of their inputs. Authors may optionally annotate with an explicit `when` clause, verified against the inference. The checker exports inferred `when` sets as structured data |
 | **Black Box Function** | Domain logic referenced but not defined in the spec; pure and deterministic. Common examples include `length()`, `hash()`, `verify()` |
 | **External Entity** | An entity managed by another specification; referenced but not governed here |
 | **Config** | Configurable parameters for a specification, referenced via `config.field` |

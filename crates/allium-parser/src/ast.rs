@@ -135,6 +135,18 @@ pub struct TransitionGraph {
 }
 
 // ---------------------------------------------------------------------------
+// When clauses (v3)
+// ---------------------------------------------------------------------------
+
+/// A `when` clause on a field declaration: `when status = shipped | delivered`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WhenClause {
+    pub span: Span,
+    pub status_field: Ident,
+    pub qualifying_states: Vec<Ident>,
+}
+
+// ---------------------------------------------------------------------------
 // Block items — uniform representation for declaration bodies
 // ---------------------------------------------------------------------------
 
@@ -186,10 +198,12 @@ pub enum BlockItemKind {
     InvariantBlock { name: Ident, body: Expr },
     /// `transitions field { ... }` — transition graph declaration inside an entity
     TransitionsBlock(TransitionGraph),
-    /// `produces: field1, field2` — fields guaranteed non-null after rule execution
-    ProducesClause { fields: Vec<Ident> },
-    /// `consumes: field1, field2` — fields this rule reads
-    ConsumesClause { fields: Vec<Ident> },
+    /// `name: Type when status_field = state1 | state2` — field with lifecycle-dependent presence
+    FieldWithWhen {
+        name: Ident,
+        value: Expr,
+        when_clause: WhenClause,
+    },
 }
 
 // ---------------------------------------------------------------------------
