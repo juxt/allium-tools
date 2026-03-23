@@ -1,0 +1,237 @@
+-- allium: 3
+
+-- ---------------------------------------------------------------------------
+-- V3 lifecycle features: transition graphs, when clauses on fields,
+-- backtick-quoted enum literals, and their interactions.
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- Named enum with backtick-quoted external standard values
+-- ---------------------------------------------------------------------------
+
+enum Locale {
+    en
+    fr
+    `de-CH-1996`
+    `pt-BR`
+}
+
+enum CacheDirective { `no-cache` | `no-store` | public | private }
+
+-- ---------------------------------------------------------------------------
+-- Entity with transition graph and when-qualified fields
+-- ---------------------------------------------------------------------------
+
+entity Order {
+    customer: Customer
+    status: pending | confirmed | picking | shipped | delivered | cancelled
+    tracking_number: String when status = shipped | delivered
+    shipped_at: Timestamp when status = shipped | delivered
+    warehouse_assignment: String when status = confirmed | picking
+    cancelled_at: Timestamp when status = cancelled
+    cancelled_by: String? when status = cancelled
+    locale: Locale
+
+    transitions status {
+        pending -> confirmed
+        confirmed -> picking
+        picking -> shipped
+        shipped -> delivered
+        pending -> cancelled
+        confirmed -> cancelled
+        terminal: delivered, cancelled
+    }
+
+    items: OrderItem with order = this
+    active_items: items where status = active
+    is_complete: status = delivered
+
+    invariant NonNegativeTotal { this.total >= 0 }
+}
+
+external entity Customer {
+    email: String
+    name: String
+}
+
+value Address {
+    street: String
+    city: String
+    postcode: String
+}
+
+-- ---------------------------------------------------------------------------
+-- Config
+-- ---------------------------------------------------------------------------
+
+config {
+    max_retries: Integer = 3
+    cancellation_window: Duration = 48.hours
+}
+
+-- ---------------------------------------------------------------------------
+-- Rules (no more produces/consumes)
+-- ---------------------------------------------------------------------------
+
+rule ConfirmOrder {
+    when: ConfirmOrder(order)
+    requires: order.status = pending
+    ensures:
+        order.status = confirmed
+        order.warehouse_assignment = assign_warehouse(order)
+}
+
+rule ShipOrder {
+    when: ShipOrder(order, tracking)
+    requires: order.status = picking
+    ensures:
+        order.status = shipped
+        order.tracking_number = tracking
+        order.shipped_at = now
+}
+
+rule CancelByCustomer {
+    when: CustomerCancels(order)
+    requires: order.status in {pending, confirmed}
+    ensures:
+        order.status = cancelled
+        order.cancelled_at = now
+        order.cancelled_by = order.customer.name
+}
+
+rule CancelByTimeout {
+    when: order: Order.created_at + config.cancellation_window <= now
+    requires: order.status = pending
+    ensures:
+        order.status = cancelled
+        order.cancelled_at = now
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule with transitions_to trigger
+-- ---------------------------------------------------------------------------
+
+rule NotifyOnShipment {
+    when: order: Order.status transitions_to shipped
+    ensures: Email.created(to: order.customer.email, template: order_shipped)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule with becomes trigger
+-- ---------------------------------------------------------------------------
+
+rule ArchiveDelivered {
+    when: order: Order.status becomes delivered
+    ensures: AuditLog.created(action: delivered, order: order)
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule with for-block
+-- ---------------------------------------------------------------------------
+
+rule BulkConfirm {
+    when: BulkConfirm(batch)
+    for order in batch.orders where order.status = pending:
+        ensures: order.status = confirmed
+}
+
+-- ---------------------------------------------------------------------------
+-- Rule with if/else
+-- ---------------------------------------------------------------------------
+
+rule ProcessCancellation {
+    when: Cancel(order, reason)
+    requires: order.status != delivered
+    ensures:
+        order.status = cancelled
+        order.cancelled_at = now
+        if reason = customer_request:
+            order.cancelled_by = order.customer.name
+}
+
+-- ---------------------------------------------------------------------------
+-- Backtick literals in comparisons
+-- ---------------------------------------------------------------------------
+
+rule LocaleCheck {
+    when: SetLocale(order, locale)
+    requires: locale != `de-CH-1996`
+    ensures: order.locale = locale
+}
+
+-- ---------------------------------------------------------------------------
+-- Invariant using for-expression
+-- ---------------------------------------------------------------------------
+
+invariant AllDeliveredHaveTracking {
+    for order in Orders where status = delivered:
+        order.tracking_number != null
+}
+
+-- ---------------------------------------------------------------------------
+-- Entity with multiple status fields (independent graphs)
+-- ---------------------------------------------------------------------------
+
+entity Subscription {
+    status: trial | active | past_due | cancelled
+    payment_status: pending | paid | failed | refunded
+    started_at: Timestamp when status = active | past_due | cancelled
+    cancelled_at: Timestamp when status = cancelled
+    balance: Decimal
+
+    transitions status {
+        trial -> active
+        active -> past_due
+        past_due -> active
+        active -> cancelled
+        past_due -> cancelled
+        terminal: cancelled
+    }
+
+    transitions payment_status {
+        pending -> paid
+        pending -> failed
+        failed -> paid
+        paid -> refunded
+        terminal: refunded
+    }
+
+    invariant NonNegativeBalance { this.balance >= 0 }
+}
+
+-- ---------------------------------------------------------------------------
+-- Surface referencing lifecycle entity
+-- ---------------------------------------------------------------------------
+
+actor Admin {
+    identified_by: Customer where role = admin
+}
+
+surface OrderDashboard {
+    facing viewer: Admin
+    context order: Order where customer = viewer
+
+    provides: CancelByCustomer(order) when order.status in {pending, confirmed}
+    provides: ShipOrder(order, tracking) when order.status = picking
+
+    exposes:
+        order.status
+        order.tracking_number
+}
+
+-- ---------------------------------------------------------------------------
+-- Inline enum with backtick values on entity field
+-- ---------------------------------------------------------------------------
+
+entity HttpResponse {
+    cache_control: `no-cache` | `no-store` | public | private
+    content_type: String
+}
+
+-- ---------------------------------------------------------------------------
+-- Open questions and deferred specs
+-- ---------------------------------------------------------------------------
+
+deferred Order.fraud_check
+
+open question "How should partial shipments interact with the transition graph?"

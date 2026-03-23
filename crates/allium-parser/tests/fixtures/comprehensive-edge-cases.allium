@@ -1,4 +1,4 @@
--- allium: 1
+-- allium: 3
 
 use "github.com/specs/auth/abc123" as auth
 use "github.com/specs/notifications/def456"

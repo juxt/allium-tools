@@ -249,7 +249,59 @@ fn token_is_clause_keyword(kind: TokenKind) -> bool {
         kind,
         TokenKind::When | TokenKind::Requires | TokenKind::Ensures | TokenKind::Within
             | TokenKind::Invariant
+            | TokenKind::Transitions
     )
+}
+
+/// Extract a `when` clause from a field declaration expression.
+///
+/// If the expression is `WhenGuard { action: Type, condition: status = v1 | v2 }`,
+/// decomposes it into the inner type expression and a `WhenClause`.
+fn extract_when_clause(expr: &Expr) -> Option<(Expr, WhenClause)> {
+    if let Expr::WhenGuard { action, condition, span } = expr {
+        // condition should be `status = value1 | value2 | ...`
+        if let Expr::Comparison {
+            left,
+            op: ComparisonOp::Eq,
+            right,
+            span: _cond_span,
+        } = condition.as_ref()
+        {
+            if let Expr::Ident(status_field) = left.as_ref() {
+                let mut qualifying_states = Vec::new();
+                collect_pipe_idents(right, &mut qualifying_states);
+                if !qualifying_states.is_empty() {
+                    return Some((
+                        *action.clone(),
+                        WhenClause {
+                            span: *span,
+                            status_field: status_field.clone(),
+                            qualifying_states,
+                        },
+                    ));
+                }
+            }
+        }
+        // Also handle single state: `when status = shipped` (no pipe)
+        // Already handled above since a single Ident goes through collect_pipe_idents
+    }
+    // Also handle `TypeOptional` wrapping a WhenGuard: `Type? when status = ...`
+    // The parser would parse `Type?` first (postfix), then `when` (infix on the TypeOptional).
+    // Actually, `?` is postfix and `when` is infix with lower BP, so `Type? when cond`
+    // parses as `WhenGuard { action: TypeOptional { Type }, condition: ... }`.
+    // That case is handled by the WhenGuard branch above — action will be TypeOptional.
+    None
+}
+
+fn collect_pipe_idents(expr: &Expr, out: &mut Vec<Ident>) {
+    match expr {
+        Expr::Ident(id) => out.push(id.clone()),
+        Expr::Pipe { left, right, .. } => {
+            collect_pipe_idents(left, out);
+            collect_pipe_idents(right, out);
+        }
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -270,11 +322,11 @@ impl<'s> Parser<'s> {
                     "missing version marker; expected '-- allium: 1' as the first line",
                 ));
             }
-            Some(1) | Some(2) => {}
+            Some(1) | Some(2) | Some(3) => {}
             Some(v) => {
                 self.diagnostics.push(Diagnostic::error(
                     start,
-                    format!("unsupported allium version {v}; this parser supports versions 1 and 2"),
+                    format!("unsupported allium version {v}; this parser supports versions 1, 2 and 3"),
                 ));
             }
         }
@@ -417,7 +469,7 @@ impl<'s> Parser<'s> {
         let items = if kind == BlockKind::Enum {
             self.parse_enum_body()
         } else {
-            self.parse_block_items()
+            self.parse_block_items(kind)
         };
         let end = self.expect(TokenKind::RBrace)?.span;
         Some(BlockDecl {
@@ -431,17 +483,28 @@ impl<'s> Parser<'s> {
     // -- anonymous block: `keyword { ... }` -----------------------------
 
     /// Parse enum body: pipe-separated variant names.
-    /// `{ pending | shipped | delivered }`
+    /// `{ pending | shipped | delivered }` or `` { en | `de-CH-1996` } ``
     fn parse_enum_body(&mut self) -> Vec<BlockItem> {
         let mut items = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at_eof() {
             if self.eat(TokenKind::Pipe).is_some() {
                 continue;
             }
-            if let Some(ident) = self.parse_ident_in("enum variant") {
+            if self.at(TokenKind::BacktickLiteral) {
+                let t = self.advance();
+                let raw = self.text(t.span);
+                let value = raw[1..raw.len() - 1].to_string();
+                items.push(BlockItem {
+                    span: t.span,
+                    kind: BlockItemKind::EnumVariant {
+                        name: Ident { span: t.span, name: value },
+                        backtick_quoted: true,
+                    },
+                });
+            } else if let Some(ident) = self.parse_ident_in("enum variant") {
                 items.push(BlockItem {
                     span: ident.span,
-                    kind: BlockItemKind::EnumVariant { name: ident },
+                    kind: BlockItemKind::EnumVariant { name: ident, backtick_quoted: false },
                 });
             } else {
                 self.advance(); // skip unrecognised token
@@ -453,7 +516,7 @@ impl<'s> Parser<'s> {
     fn parse_anonymous_block(&mut self, kind: BlockKind) -> Option<BlockDecl> {
         let start = self.advance().span;
         self.expect(TokenKind::LBrace)?;
-        let items = self.parse_block_items();
+        let items = self.parse_block_items(kind);
         let end = self.expect(TokenKind::RBrace)?.span;
         Some(BlockDecl {
             span: start.merge(end),
@@ -471,7 +534,7 @@ impl<'s> Parser<'s> {
         self.expect(TokenKind::Slash)?;
         self.advance(); // consume "config" ident
         self.expect(TokenKind::LBrace)?;
-        let items = self.parse_block_items();
+        let items = self.parse_block_items(BlockKind::Config);
         let end = self.expect(TokenKind::RBrace)?.span;
         Some(BlockDecl {
             span: start.merge(end),
@@ -519,7 +582,7 @@ impl<'s> Parser<'s> {
         let base = self.parse_expr(0)?;
 
         let items = if self.eat(TokenKind::LBrace).is_some() {
-            let items = self.parse_block_items();
+            let items = self.parse_block_items(BlockKind::Entity);
             self.expect(TokenKind::RBrace)?;
             items
         } else {
@@ -586,7 +649,7 @@ impl<'s> Parser<'s> {
         }
 
         self.expect(TokenKind::LBrace)?;
-        let items = self.parse_block_items();
+        let items = self.parse_block_items(BlockKind::Contract);
         let end = self.expect(TokenKind::RBrace)?.span;
         Some(BlockDecl {
             span: start.merge(end),
@@ -662,10 +725,10 @@ impl<'s> Parser<'s> {
 // ---------------------------------------------------------------------------
 
 impl<'s> Parser<'s> {
-    fn parse_block_items(&mut self) -> Vec<BlockItem> {
+    fn parse_block_items(&mut self, block_kind: BlockKind) -> Vec<BlockItem> {
         let mut items = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at_eof() {
-            if let Some(item) = self.parse_block_item() {
+            if let Some(item) = self.parse_block_item(block_kind) {
                 items.push(item);
                 self.eat(TokenKind::Comma);
             } else {
@@ -676,7 +739,7 @@ impl<'s> Parser<'s> {
         items
     }
 
-    fn parse_block_item(&mut self) -> Option<BlockItem> {
+    fn parse_block_item(&mut self, block_kind: BlockKind) -> Option<BlockItem> {
         let start = self.peek().span;
 
         // `let name = value`
@@ -715,6 +778,14 @@ impl<'s> Parser<'s> {
                 span: start.merge(text.span),
                 kind: BlockItemKind::OpenQuestion { text },
             });
+        }
+
+        // `transitions field { ... }` — transition graph (v3)
+        if self.at(TokenKind::Transitions)
+            && self.peek_at(1).kind.is_word()
+            && self.peek_at(2).kind == TokenKind::LBrace
+        {
+            return self.parse_transitions_block(start);
         }
 
         // Migration diagnostics: old colon-form prose constructs
@@ -775,6 +846,14 @@ impl<'s> Parser<'s> {
                 return self.parse_param_or_clause_item(start);
             }
 
+            // `produces:` and `consumes:` are removed in v3 — emit migration diagnostic
+            if block_kind == BlockKind::Rule
+                && (self.at(TokenKind::Produces) || self.at(TokenKind::Consumes))
+                && self.peek_at(1).kind == TokenKind::Colon
+            {
+                return self.parse_legacy_field_list_clause(start);
+            }
+
             // Check for `name:` — assignment or clause
             if self.peek_at(1).kind == TokenKind::Colon {
                 return self.parse_assign_or_clause_item(start);
@@ -795,6 +874,102 @@ impl<'s> Parser<'s> {
             ),
         );
         None
+    }
+
+    /// Parse `transitions field { edges..., terminal: states }`.
+    fn parse_transitions_block(&mut self, start: Span) -> Option<BlockItem> {
+        self.advance(); // consume `transitions`
+        let field = self.parse_ident_in("transition field name")?;
+        self.expect(TokenKind::LBrace)?;
+
+        let mut edges = Vec::new();
+        let mut terminal = Vec::new();
+
+        while !self.at(TokenKind::RBrace) && !self.at_eof() {
+            // `terminal: state1, state2`
+            if self.at(TokenKind::Terminal) && self.peek_at(1).kind == TokenKind::Colon {
+                self.advance(); // consume `terminal`
+                self.advance(); // consume `:`
+                loop {
+                    let state = self.parse_ident_in("terminal state")?;
+                    terminal.push(state);
+                    if self.eat(TokenKind::Comma).is_none() {
+                        break;
+                    }
+                    // Allow trailing comma before `}`
+                    if self.at(TokenKind::RBrace) {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            // `from -> to`
+            let from = self.parse_ident_in("source state")?;
+            if self.expect(TokenKind::ThinArrow).is_none() {
+                // Recovery: skip to next line or `}`
+                while !self.at(TokenKind::RBrace) && !self.at_eof() {
+                    let cur_line = self.line_of(self.peek().span);
+                    self.advance();
+                    if self.line_of(self.peek().span) != cur_line {
+                        break;
+                    }
+                }
+                continue;
+            }
+            let to = self.parse_ident_in("target state")?;
+            let edge_span = from.span.merge(to.span);
+            edges.push(TransitionEdge {
+                span: edge_span,
+                from,
+                to,
+            });
+
+            // Optional comma between edges
+            self.eat(TokenKind::Comma);
+        }
+
+        let end = self.expect(TokenKind::RBrace)?.span;
+
+        Some(BlockItem {
+            span: start.merge(end),
+            kind: BlockItemKind::TransitionsBlock(TransitionGraph {
+                span: start.merge(end),
+                field,
+                edges,
+                terminal,
+            }),
+        })
+    }
+
+    /// Parse legacy `produces:` / `consumes:` clauses, emitting a migration warning
+    /// and skipping the clause body. Returns `None` so the item is dropped from the AST.
+    fn parse_legacy_field_list_clause(&mut self, start: Span) -> Option<BlockItem> {
+        let keyword_tok = self.advance(); // consume `produces` or `consumes`
+        let keyword = self.text(keyword_tok.span).to_string();
+        self.advance(); // consume `:`
+
+        // Skip the comma-separated field names
+        let clause_line = self.line_of(start);
+        loop {
+            if self.at(TokenKind::RBrace) || self.at_eof() {
+                break;
+            }
+            if self.line_of(self.peek().span) > clause_line {
+                break;
+            }
+            self.advance();
+        }
+
+        self.diagnostics.push(Diagnostic::warning(
+            start.merge(keyword_tok.span),
+            format!(
+                "`{keyword}:` clauses are removed in v3; use `when` clauses on entity fields instead"
+            ),
+        ));
+
+        // Return None to drop this item — try the next item in the caller's loop
+        self.parse_block_item(BlockKind::Rule)
     }
 
     fn parse_let_item(&mut self, start: Span) -> Option<BlockItem> {
@@ -857,7 +1032,7 @@ impl<'s> Parser<'s> {
         } else {
             // Single-line for: parse one block item
             let mut items = Vec::new();
-            if let Some(item) = self.parse_block_item() {
+            if let Some(item) = self.parse_block_item(BlockKind::Entity) {
                 items.push(item);
             }
             items
@@ -886,7 +1061,7 @@ impl<'s> Parser<'s> {
             && !self.at(TokenKind::RBrace)
             && self.col_of(self.peek().span) >= base_col
         {
-            if let Some(item) = self.parse_block_item() {
+            if let Some(item) = self.parse_block_item(BlockKind::Entity) {
                 items.push(item);
             } else {
                 self.advance();
@@ -958,7 +1133,7 @@ impl<'s> Parser<'s> {
         } else {
             // Single-line: parse one block item
             let mut items = Vec::new();
-            if let Some(item) = self.parse_block_item() {
+            if let Some(item) = self.parse_block_item(BlockKind::Entity) {
                 items.push(item);
             }
             items
@@ -1199,6 +1374,15 @@ impl<'s> Parser<'s> {
             BlockItemKind::Clause {
                 keyword: name_text,
                 value,
+            }
+        } else if let Some((inner_value, when_clause)) = extract_when_clause(&value) {
+            BlockItemKind::FieldWithWhen {
+                name: Ident {
+                    span: name_tok.span,
+                    name: name_text,
+                },
+                value: inner_value,
+                when_clause,
             }
         } else {
             BlockItemKind::Assignment {
@@ -1545,6 +1729,16 @@ impl<'s> Parser<'s> {
             TokenKind::String => {
                 let sl = self.parse_string()?;
                 Some(Expr::StringLiteral(sl))
+            }
+            TokenKind::BacktickLiteral => {
+                let t = self.advance();
+                let raw = self.text(t.span);
+                // Strip surrounding backticks
+                let value = raw[1..raw.len() - 1].to_string();
+                Some(Expr::BacktickLiteral {
+                    span: t.span,
+                    value,
+                })
             }
             TokenKind::True => {
                 let t = self.advance();
@@ -5072,5 +5266,753 @@ entity E {
         assert_eq!(r.diagnostics.len(), 0);
         let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
         assert_eq!(b.items.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Version 3: transitions, produces, consumes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn version_3_accepted() {
+        let r = parse("-- allium: 3\nentity User {}");
+        assert_eq!(r.module.version, Some(3));
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn transitions_block_basic() {
+        let src = r#"-- allium: 3
+entity Order {
+    status: pending | confirmed | shipped | delivered | cancelled
+
+    transitions status {
+        pending -> confirmed
+        confirmed -> shipped
+        shipped -> delivered
+        pending -> cancelled
+        confirmed -> cancelled
+        terminal: delivered, cancelled
+    }
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        // items[0] is the status field, items[1] is the transitions block
+        let BlockItemKind::TransitionsBlock(graph) = &b.items[1].kind else {
+            panic!("expected TransitionsBlock, got {:?}", b.items[1].kind)
+        };
+        assert_eq!(graph.field.name, "status");
+        assert_eq!(graph.edges.len(), 5);
+        assert_eq!(graph.edges[0].from.name, "pending");
+        assert_eq!(graph.edges[0].to.name, "confirmed");
+        assert_eq!(graph.terminal.len(), 2);
+        assert_eq!(graph.terminal[0].name, "delivered");
+        assert_eq!(graph.terminal[1].name, "cancelled");
+    }
+
+    #[test]
+    fn transitions_block_no_terminal() {
+        let src = r#"-- allium: 3
+entity Task {
+    status: open | closed
+    transitions status {
+        open -> closed
+    }
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::TransitionsBlock(graph) = &b.items[1].kind else {
+            panic!("expected TransitionsBlock")
+        };
+        assert_eq!(graph.edges.len(), 1);
+        assert!(graph.terminal.is_empty());
+    }
+
+    #[test]
+    fn produces_emits_migration_warning() {
+        let src = r#"-- allium: 3
+rule ShipOrder {
+    when: ShipOrder(order, tracking)
+    requires: order.status = picking
+    produces: tracking_number, shipped_at
+    ensures: order.status = shipped
+}"#;
+        let r = parse(src);
+        let warnings: Vec<_> = r.diagnostics.iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .collect();
+        assert!(
+            warnings.iter().any(|d| d.message.contains("`produces:` clauses are removed")),
+            "expected migration warning for produces, got: {:?}", warnings
+        );
+    }
+
+    #[test]
+    fn consumes_emits_migration_warning() {
+        let src = r#"-- allium: 3
+rule ReadOrder {
+    when: Check(order)
+    consumes: warehouse_assignment
+    ensures: order.verified = true
+}"#;
+        let r = parse(src);
+        let warnings: Vec<_> = r.diagnostics.iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .collect();
+        assert!(
+            warnings.iter().any(|d| d.message.contains("`consumes:` clauses are removed")),
+            "expected migration warning for consumes, got: {:?}", warnings
+        );
+    }
+
+    #[test]
+    fn when_clause_on_field() {
+        let src = r#"-- allium: 3
+entity Order {
+    status: pending | shipped | delivered
+    tracking_number: String when status = shipped | delivered
+    transitions status {
+        pending -> shipped
+        shipped -> delivered
+        terminal: delivered
+    }
+}"#;
+        let r = parse(src);
+        let errors: Vec<_> = r.diagnostics.iter().filter(|d| d.severity == Severity::Error).collect();
+        assert_eq!(errors.len(), 0, "unexpected errors: {:?}", errors);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let field_with_when = b.items.iter().find(|i| matches!(&i.kind, BlockItemKind::FieldWithWhen { .. }));
+        assert!(field_with_when.is_some(), "expected FieldWithWhen item");
+        if let BlockItemKind::FieldWithWhen { name, when_clause, .. } = &field_with_when.unwrap().kind {
+            assert_eq!(name.name, "tracking_number");
+            assert_eq!(when_clause.status_field.name, "status");
+            assert_eq!(when_clause.qualifying_states.len(), 2);
+            assert_eq!(when_clause.qualifying_states[0].name, "shipped");
+            assert_eq!(when_clause.qualifying_states[1].name, "delivered");
+        }
+    }
+
+    #[test]
+    fn when_clause_single_state() {
+        let src = r#"-- allium: 3
+entity Order {
+    status: active | cancelled
+    cancelled_at: Timestamp when status = cancelled
+    transitions status {
+        active -> cancelled
+        terminal: cancelled
+    }
+}"#;
+        let r = parse(src);
+        let errors: Vec<_> = r.diagnostics.iter().filter(|d| d.severity == Severity::Error).collect();
+        assert_eq!(errors.len(), 0, "unexpected errors: {:?}", errors);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        if let BlockItemKind::FieldWithWhen { name, when_clause, .. } = &b.items[1].kind {
+            assert_eq!(name.name, "cancelled_at");
+            assert_eq!(when_clause.qualifying_states.len(), 1);
+            assert_eq!(when_clause.qualifying_states[0].name, "cancelled");
+        } else {
+            panic!("expected FieldWithWhen, got {:?}", b.items[1].kind);
+        }
+    }
+
+    #[test]
+    fn when_clause_with_optional() {
+        let src = r#"-- allium: 3
+entity Order {
+    status: active | cancelled
+    notes: String? when status = cancelled
+    transitions status {
+        active -> cancelled
+        terminal: cancelled
+    }
+}"#;
+        let r = parse(src);
+        let errors: Vec<_> = r.diagnostics.iter().filter(|d| d.severity == Severity::Error).collect();
+        assert_eq!(errors.len(), 0, "unexpected errors: {:?}", errors);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        if let BlockItemKind::FieldWithWhen { name, value, when_clause } = &b.items[1].kind {
+            assert_eq!(name.name, "notes");
+            assert!(matches!(value, Expr::TypeOptional { .. }), "expected TypeOptional");
+            assert_eq!(when_clause.qualifying_states.len(), 1);
+        } else {
+            panic!("expected FieldWithWhen, got {:?}", b.items[1].kind);
+        }
+    }
+
+    #[test]
+    fn transitions_in_json_output() {
+        let src = r#"-- allium: 3
+entity Order {
+    status: pending | done
+    transitions status {
+        pending -> done
+        terminal: done
+    }
+}"#;
+        let r = parse(src);
+        let json = serde_json::to_string(&r.module).unwrap();
+        assert!(json.contains("TransitionsBlock"), "JSON should contain TransitionsBlock: {}", json);
+        assert!(json.contains("pending"), "JSON should contain 'pending'");
+    }
+
+    #[test]
+    fn transitions_block_with_commas() {
+        let src = r#"-- allium: 3
+entity Order {
+    status: a | b | c
+    transitions status {
+        a -> b,
+        b -> c,
+        terminal: c,
+    }
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::TransitionsBlock(graph) = &b.items[1].kind else {
+            panic!("expected TransitionsBlock")
+        };
+        assert_eq!(graph.edges.len(), 2);
+        assert_eq!(graph.terminal.len(), 1);
+    }
+
+    #[test]
+    fn v3_full_entity_with_transitions_and_rule() {
+        let src = r#"-- allium: 3
+entity Order {
+    status: pending | shipped | delivered
+    tracking: String when status = shipped | delivered
+    shipped_at: Timestamp when status = shipped | delivered
+
+    transitions status {
+        pending -> shipped
+        shipped -> delivered
+        terminal: delivered
+    }
+}
+
+rule ShipOrder {
+    when: ShipOrder(order, tracking)
+    requires: order.status = pending
+    ensures:
+        order.status = shipped
+        order.tracking = tracking
+        order.shipped_at = now
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        assert_eq!(r.module.declarations.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Transition graph: edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn transitions_empty_block() {
+        let src = "-- allium: 3\nentity E {\n    status: a | b\n    transitions status {}\n}";
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::TransitionsBlock(graph) = &b.items[1].kind else {
+            panic!("expected TransitionsBlock, got {:?}", b.items[1].kind)
+        };
+        assert!(graph.edges.is_empty());
+        assert!(graph.terminal.is_empty());
+    }
+
+    #[test]
+    fn transitions_terminal_only() {
+        let src = r#"-- allium: 3
+entity E {
+    status: done
+    transitions status {
+        terminal: done
+    }
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::TransitionsBlock(graph) = &b.items[1].kind else { panic!() };
+        assert!(graph.edges.is_empty());
+        assert_eq!(graph.terminal.len(), 1);
+        assert_eq!(graph.terminal[0].name, "done");
+    }
+
+    #[test]
+    fn transitions_terminal_before_edges() {
+        let src = r#"-- allium: 3
+entity E {
+    status: a | b | c
+    transitions status {
+        terminal: c
+        a -> b
+        b -> c
+    }
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::TransitionsBlock(graph) = &b.items[1].kind else { panic!() };
+        assert_eq!(graph.edges.len(), 2);
+        assert_eq!(graph.terminal.len(), 1);
+        assert_eq!(graph.terminal[0].name, "c");
+    }
+
+    #[test]
+    fn transitions_self_loop() {
+        let src = r#"-- allium: 3
+entity E {
+    status: running | stopped
+    transitions status {
+        running -> running
+        running -> stopped
+        terminal: stopped
+    }
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::TransitionsBlock(graph) = &b.items[1].kind else { panic!() };
+        assert_eq!(graph.edges.len(), 2);
+        assert_eq!(graph.edges[0].from.name, "running");
+        assert_eq!(graph.edges[0].to.name, "running");
+    }
+
+    #[test]
+    fn transitions_single_edge() {
+        let src = "-- allium: 3\nentity E {\n    s: a | b\n    transitions s { a -> b }\n}";
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::TransitionsBlock(graph) = &b.items[1].kind else { panic!() };
+        assert_eq!(graph.field.name, "s");
+        assert_eq!(graph.edges.len(), 1);
+    }
+
+    #[test]
+    fn transitions_multiple_terminal_values() {
+        let src = r#"-- allium: 3
+entity E {
+    status: a | b | c | d | e
+    transitions status {
+        a -> b
+        b -> c
+        terminal: c, d, e
+    }
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::TransitionsBlock(graph) = &b.items[1].kind else { panic!() };
+        assert_eq!(graph.terminal.len(), 3);
+    }
+
+    #[test]
+    fn transitions_trailing_comma_in_terminal() {
+        let src = "-- allium: 3\nentity E {\n    s: a | b\n    transitions s {\n        a -> b\n        terminal: b,\n    }\n}";
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::TransitionsBlock(graph) = &b.items[1].kind else { panic!() };
+        assert_eq!(graph.terminal.len(), 1);
+    }
+
+    #[test]
+    fn transitions_among_other_entity_items() {
+        // Transitions block between fields, relationships, invariants
+        let src = r#"-- allium: 3
+entity Order {
+    status: pending | shipped | delivered
+    customer: Customer
+    tracking: String?
+
+    transitions status {
+        pending -> shipped
+        shipped -> delivered
+        terminal: delivered
+    }
+
+    active_items: items where status = active
+    invariant Positive { this.total > 0 }
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        // Should have: status, customer, tracking, transitions, active_items, invariant
+        assert_eq!(b.items.len(), 6);
+        assert!(matches!(&b.items[3].kind, BlockItemKind::TransitionsBlock(_)));
+        assert!(matches!(&b.items[5].kind, BlockItemKind::InvariantBlock { .. }));
+    }
+
+    #[test]
+    fn transitions_error_recovery_missing_arrow() {
+        let src = r#"-- allium: 3
+entity E {
+    status: a | b | c
+    transitions status {
+        a b
+        b -> c
+    }
+}"#;
+        let r = parse(src);
+        // Should get a diagnostic about missing `->`
+        assert!(r.diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "expected error for missing arrow, got: {:?}", r.diagnostics);
+        // But should still parse the valid edge
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::TransitionsBlock(graph) = &b.items[1].kind else {
+            panic!("expected TransitionsBlock")
+        };
+        assert_eq!(graph.edges.len(), 1, "should recover and parse second edge");
+        assert_eq!(graph.edges[0].from.name, "b");
+    }
+
+    #[test]
+    fn transitions_field_name_preserved() {
+        let src = "-- allium: 3\nentity E {\n    phase: x | y\n    transitions phase { x -> y }\n}";
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::TransitionsBlock(graph) = &b.items[1].kind else { panic!() };
+        assert_eq!(graph.field.name, "phase");
+    }
+
+    #[test]
+    fn transitions_diamond_topology() {
+        // Common pattern: multiple paths converge on a state
+        let src = r#"-- allium: 3
+entity E {
+    status: new | path_a | path_b | done
+    transitions status {
+        new -> path_a
+        new -> path_b
+        path_a -> done
+        path_b -> done
+        terminal: done
+    }
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::TransitionsBlock(graph) = &b.items[1].kind else { panic!() };
+        assert_eq!(graph.edges.len(), 4);
+    }
+
+    #[test]
+    fn transitions_edge_span_is_from_to_range() {
+        let src = "-- allium: 3\nentity E {\n    s: a | b\n    transitions s {\n        a -> b\n    }\n}";
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::TransitionsBlock(graph) = &b.items[1].kind else { panic!() };
+        let edge = &graph.edges[0];
+        // Span should cover from `a` through `b`, not include the arrow
+        assert!(edge.span.start <= edge.from.span.start);
+        assert!(edge.span.end >= edge.to.span.end);
+    }
+
+    // -----------------------------------------------------------------------
+    // When clause: edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn when_clause_multiple_fields() {
+        let src = r#"-- allium: 3
+entity Order {
+    status: pending | shipped | delivered
+    tracking: String when status = shipped | delivered
+    shipped_at: Timestamp when status = shipped | delivered
+    delivered_at: Timestamp when status = delivered
+    transitions status {
+        pending -> shipped
+        shipped -> delivered
+        terminal: delivered
+    }
+}"#;
+        let r = parse(src);
+        let errors: Vec<_> = r.diagnostics.iter().filter(|d| d.severity == Severity::Error).collect();
+        assert_eq!(errors.len(), 0, "unexpected errors: {:?}", errors);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let when_count = b.items.iter()
+            .filter(|i| matches!(&i.kind, BlockItemKind::FieldWithWhen { .. }))
+            .count();
+        assert_eq!(when_count, 3);
+    }
+
+    #[test]
+    fn legacy_produces_consumes_skipped_with_warnings() {
+        let src = r#"-- allium: 3
+rule R {
+    when: Go(x)
+    produces: field_a
+    consumes: field_b
+    ensures: x.done = true
+}"#;
+        let r = parse(src);
+        let warnings: Vec<_> = r.diagnostics.iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .collect();
+        assert!(warnings.len() >= 2, "expected at least 2 migration warnings, got {}", warnings.len());
+        // The produces/consumes items should be dropped from the AST
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert!(
+            !b.items.iter().any(|i| matches!(&i.kind, BlockItemKind::FieldWithWhen { .. })),
+            "legacy produces/consumes should not become FieldWithWhen"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // v3 interactions: transitions + produces/consumes + other constructs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn v3_entity_with_transitions_and_invariant() {
+        let src = r#"-- allium: 3
+entity Account {
+    status: open | frozen | closed
+    balance: Decimal
+
+    transitions status {
+        open -> frozen
+        frozen -> open
+        open -> closed
+        frozen -> closed
+        terminal: closed
+    }
+
+    invariant NonNegative { this.balance >= 0 }
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert!(b.items.iter().any(|i| matches!(&i.kind, BlockItemKind::TransitionsBlock(_))));
+        assert!(b.items.iter().any(|i| matches!(&i.kind, BlockItemKind::InvariantBlock { .. })));
+    }
+
+    #[test]
+    fn v3_rule_with_multiple_ensures() {
+        let src = r#"-- allium: 3
+rule CompleteOrder {
+    when: Complete(order)
+    requires: order.status = shipped
+    ensures: order.status = delivered
+    ensures: order.completed_at = now
+    ensures: order.receipt_number = generate_receipt()
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let ensures_count = b.items.iter()
+            .filter(|i| matches!(&i.kind, BlockItemKind::Clause { keyword, .. } if keyword == "ensures"))
+            .count();
+        assert_eq!(ensures_count, 3);
+    }
+
+    #[test]
+    fn v3_rule_with_if_block() {
+        let src = r#"-- allium: 3
+rule Cancel {
+    when: Cancel(order, reason)
+    requires: order.status != delivered
+    ensures:
+        order.status = cancelled
+        order.cancelled_at = now
+        if reason = customer_request:
+            order.cancelled_by = order.customer
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn v3_complete_lifecycle_spec() {
+        let src = r#"-- allium: 3
+
+entity Subscription {
+    status: trial | active | past_due | cancelled
+    started_at: Timestamp when status = active | past_due | cancelled
+    cancelled_at: Timestamp when status = cancelled
+    balance: Decimal
+
+    transitions status {
+        trial -> active
+        active -> past_due
+        past_due -> active
+        active -> cancelled
+        past_due -> cancelled
+        terminal: cancelled
+    }
+
+    invariant NonNegative { this.balance >= 0 }
+}
+
+config {
+    trial_period: Duration = 14.days
+}
+
+rule ActivateSubscription {
+    when: Activate(sub)
+    requires: sub.status = trial
+    ensures:
+        sub.status = active
+        sub.started_at = now
+}
+
+rule CancelSubscription {
+    when: Cancel(sub)
+    requires: sub.status != cancelled
+    ensures:
+        sub.status = cancelled
+        sub.cancelled_at = now
+}
+
+invariant AllCancelledHaveTimestamp {
+    for sub in Subscriptions where status = cancelled:
+        sub.cancelled_at != null
+}
+
+surface SubscriptionDashboard {
+    facing user: User
+    context sub: Subscription where owner = user
+    exposes:
+        sub.status
+        sub.balance
+    provides:
+        Cancel(sub) when sub.status != cancelled
+}
+"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        // entity, config, 2 rules, invariant, surface = 6 declarations
+        assert_eq!(r.module.declarations.len(), 6);
+    }
+
+    #[test]
+    fn v3_produces_consumes_are_field_names_in_entities() {
+        // In non-rule blocks, `produces` and `consumes` are just field names
+        let src = r#"-- allium: 3
+entity Factory {
+    produces: widget_a
+    consumes: raw_material
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert!(matches!(&b.items[0].kind, BlockItemKind::Assignment { name, .. } if name.name == "produces"));
+        assert!(matches!(&b.items[1].kind, BlockItemKind::Assignment { name, .. } if name.name == "consumes"));
+    }
+
+    #[test]
+    fn v3_legacy_produces_consumes_emit_warnings_in_rules() {
+        let src = r#"-- allium: 3
+rule Ship {
+    when: Ship(order)
+    produces: tracking_number
+    consumes: warehouse
+    ensures: order.status = shipped
+}"#;
+        let r = parse(src);
+        let warnings: Vec<_> = r.diagnostics.iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .collect();
+        assert!(warnings.len() >= 2, "expected migration warnings, got {:?}", warnings);
+    }
+
+    #[test]
+    fn v3_version_preserved_in_module() {
+        let src = "-- allium: 3\nentity E {}";
+        let r = parse(src);
+        assert_eq!(r.module.version, Some(3));
+    }
+
+    #[test]
+    fn v3_version_4_still_rejected() {
+        let src = "-- allium: 4\nentity E {}";
+        let r = parse(src);
+        assert!(r.diagnostics.iter().any(|d| d.severity == Severity::Error
+            && d.message.contains("unsupported")));
+    }
+
+    // -----------------------------------------------------------------------
+    // Backtick-quoted enum literals
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn backtick_in_named_enum() {
+        let src = "-- allium: 3\nenum Locale { en | fr | `de-CH-1996` | `no-cache` }";
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.items.len(), 4);
+        // First two are unquoted
+        let BlockItemKind::EnumVariant { name, backtick_quoted } = &b.items[0].kind else { panic!() };
+        assert_eq!(name.name, "en");
+        assert!(!backtick_quoted);
+        // Third is backtick-quoted
+        let BlockItemKind::EnumVariant { name, backtick_quoted } = &b.items[2].kind else { panic!() };
+        assert_eq!(name.name, "de-CH-1996");
+        assert!(backtick_quoted);
+        // Fourth is backtick-quoted
+        let BlockItemKind::EnumVariant { name, backtick_quoted } = &b.items[3].kind else { panic!() };
+        assert_eq!(name.name, "no-cache");
+        assert!(backtick_quoted);
+    }
+
+    #[test]
+    fn backtick_in_inline_enum() {
+        let src = "-- allium: 3\nentity E { cache: `no-cache` | `no-store` | `public` }";
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        // Top-level should be Pipe chains of BacktickLiteral
+        assert!(matches!(value, Expr::Pipe { .. }));
+    }
+
+    #[test]
+    fn backtick_in_comparison() {
+        let src = r#"-- allium: 3
+rule R {
+    when: Check(item)
+    requires: item.locale = `de-CH-1996`
+    ensures: Done()
+}"#;
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn backtick_mixed_with_unquoted() {
+        let src = "-- allium: 3\nenum CacheDirective { `no-cache` | `no-store` | public | private }";
+        let r = parse(src);
+        assert_eq!(r.diagnostics.len(), 0, "unexpected diagnostics: {:?}", r.diagnostics);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert_eq!(b.items.len(), 4);
+        let BlockItemKind::EnumVariant { backtick_quoted, .. } = &b.items[0].kind else { panic!() };
+        assert!(backtick_quoted);
+        let BlockItemKind::EnumVariant { backtick_quoted, .. } = &b.items[2].kind else { panic!() };
+        assert!(!backtick_quoted);
+    }
+
+    // -----------------------------------------------------------------------
+    // V3 fixture file
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn v3_lifecycle_fixture() {
+        let src = include_str!("../tests/fixtures/v3-lifecycle.allium");
+        let r = parse(src);
+        let errors: Vec<_> = r.diagnostics.iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert_eq!(
+            errors.len(),
+            0,
+            "expected no errors in v3 lifecycle fixture, got: {:?}",
+            errors.iter().map(|d| &d.message).collect::<Vec<_>>(),
+        );
     }
 }
