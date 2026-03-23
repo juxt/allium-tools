@@ -1,8 +1,10 @@
-//! Walks the Allium AST and emits generator specifications.
+//! Walks the Allium AST and emits a domain model.
 //!
 //! For each entity: fields with types and constraints, relationships,
 //! applicable invariants, config-derived bounds, transition graphs and
 //! per-field lifecycle qualification via `when` sets.
+//!
+//! Invoked by `allium model`.
 
 use allium_parser::ast::*;
 use allium_parser::{Module, Span};
@@ -11,9 +13,13 @@ use serde::Serialize;
 #[derive(Debug, Serialize)]
 pub struct GeneratorSpec {
     pub version: Option<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub entities: Vec<EntityGen>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub value_types: Vec<ValueTypeGen>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub enums: Vec<EnumGen>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub config: Vec<ConfigParam>,
 }
 
@@ -22,11 +28,15 @@ pub struct EntityGen {
     pub name: String,
     pub kind: EntityKind,
     pub fields: Vec<FieldGen>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub relationships: Vec<RelationshipGen>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub projections: Vec<ProjectionGen>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub derived_values: Vec<DerivedValueGen>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transition_graph: Option<TransitionGraphGen>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub transition_graphs: Vec<TransitionGraphGen>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub invariants: Vec<InvariantGen>,
 }
 
@@ -47,6 +57,7 @@ pub struct WhenSet {
 pub struct FieldGen {
     pub name: String,
     pub type_expr: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub optional: bool,
     /// Inline enum values, if this field uses an inline enum.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -86,6 +97,7 @@ pub struct DerivedValueGen {
 pub struct TransitionGraphGen {
     pub field: String,
     pub edges: Vec<EdgeGen>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub terminal: Vec<String>,
     /// All states that appear in the graph.
     pub states: Vec<String>,
@@ -176,7 +188,7 @@ fn build_entity_gen(block: &BlockDecl, source: &str) -> EntityGen {
     let mut relationships = Vec::new();
     let mut projections = Vec::new();
     let mut derived_values = Vec::new();
-    let mut transition_graph = None;
+    let mut transition_graphs = Vec::new();
     let mut invariants = Vec::new();
 
     // Collect when sets keyed by field name, for derived value inference
@@ -249,7 +261,7 @@ fn build_entity_gen(block: &BlockDecl, source: &str) -> EntityGen {
                     states.insert(t.name.clone());
                 }
 
-                transition_graph = Some(TransitionGraphGen {
+                transition_graphs.push(TransitionGraphGen {
                     field: graph.field.name.clone(),
                     edges,
                     terminal: graph.terminal.iter().map(|t| t.name.clone()).collect(),
@@ -289,7 +301,7 @@ fn build_entity_gen(block: &BlockDecl, source: &str) -> EntityGen {
         relationships,
         projections,
         derived_values,
-        transition_graph,
+        transition_graphs,
         invariants,
     }
 }
@@ -461,7 +473,14 @@ fn is_derived(value: &Expr) -> bool {
 }
 
 fn extract_type_from_assignment(value: &Expr, source: &str) -> String {
-    span_text(source, value.span())
+    match value {
+        Expr::Comparison {
+            op: ComparisonOp::Eq,
+            left,
+            ..
+        } => span_text(source, left.span()),
+        _ => span_text(source, value.span()),
+    }
 }
 
 /// Extract a single-field bound from a simple invariant expression.
@@ -537,13 +556,13 @@ fn expr_literal_str(expr: &Expr) -> Option<String> {
     }
 }
 
-fn extract_default_from_assignment(value: &Expr, _source: &str) -> Option<String> {
+fn extract_default_from_assignment(value: &Expr, source: &str) -> Option<String> {
     match value {
         Expr::Comparison {
             op: ComparisonOp::Eq,
             right,
             ..
-        } => Some(format!("{:?}", right)),
+        } => Some(span_text(source, right.span())),
         _ => None,
     }
 }
@@ -713,7 +732,7 @@ mod tests {
     fn transition_graph_edges_and_terminal() {
         let source = "-- allium: 3\nentity Order {\n  status: pending | done\n  transitions status {\n    pending -> done\n    terminal: done\n  }\n}";
         let spec = parse_generators(source);
-        let graph = find_entity(&spec, "Order").transition_graph.as_ref().unwrap();
+        let graph = &find_entity(&spec, "Order").transition_graphs[0];
         assert_eq!(graph.field, "status");
         assert_eq!(graph.edges.len(), 1);
         assert_eq!(graph.edges[0].from, "pending");
@@ -725,16 +744,16 @@ mod tests {
     fn transition_graph_collects_all_states() {
         let source = "-- allium: 3\nentity Order {\n  status: a | b | c\n  transitions status {\n    a -> b\n    b -> c\n    terminal: c\n  }\n}";
         let spec = parse_generators(source);
-        let graph = find_entity(&spec, "Order").transition_graph.as_ref().unwrap();
+        let graph = &find_entity(&spec, "Order").transition_graphs[0];
         // BTreeSet ordering
         assert_eq!(graph.states, vec!["a", "b", "c"]);
     }
 
     #[test]
-    fn transition_graph_omitted_when_absent() {
+    fn transition_graphs_omitted_when_absent() {
         let spec = parse_generators("-- allium: 3\nentity Foo { x: Integer }");
         let json = to_json(&spec);
-        assert!(json["entities"][0].get("transition_graph").is_none());
+        assert!(json["entities"][0].get("transition_graphs").is_none());
     }
 
     // --- When sets ---
@@ -969,7 +988,7 @@ entity Order {
         assert_eq!(e.relationships.len(), 1);
         assert_eq!(e.derived_values.len(), 1);
         assert_eq!(e.invariants.len(), 1);
-        assert!(e.transition_graph.is_some());
+        assert_eq!(e.transition_graphs.len(), 1);
         assert_eq!(e.invariants[0].expression, "this.total >= 0");
         let total = find_field(e, "total");
         assert_eq!(total.constraints[0].bound, ">= 0");

@@ -1,7 +1,9 @@
-//! Walks the Allium AST and emits a test obligations document.
+//! Walks the Allium AST and emits a test plan.
 //!
 //! Each obligation represents a test that should exist, derived mechanically
 //! from the spec's constructs. The output is language-agnostic structured data.
+//!
+//! Invoked by `allium plan`.
 
 use allium_parser::ast::*;
 use allium_parser::{Module, Span};

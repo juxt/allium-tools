@@ -13,8 +13,8 @@ fn main() -> ExitCode {
         eprintln!("Usage: allium check <file.allium>...");
         eprintln!("       allium check <directory>");
         eprintln!("       allium parse <file.allium>");
-        eprintln!("       allium test-plan <file.allium>");
-        eprintln!("       allium generators <file.allium>");
+        eprintln!("       allium plan <file.allium>");
+        eprintln!("       allium model <file.allium>");
         eprintln!("       allium --version");
         return ExitCode::from(2);
     }
@@ -27,11 +27,11 @@ fn main() -> ExitCode {
     match args[0].as_str() {
         "check" => cmd_check(&args[1..]),
         "parse" => cmd_parse(&args[1..]),
-        "test-plan" => cmd_test_plan(&args[1..]),
-        "generators" => cmd_generators(&args[1..]),
+        "plan" => cmd_plan(&args[1..]),
+        "model" => cmd_model(&args[1..]),
         other => {
             eprintln!("Unknown command: {other}");
-            eprintln!("Available commands: check, parse, test-plan, generators");
+            eprintln!("Available commands: check, parse, plan, model");
             ExitCode::from(2)
         }
     }
@@ -122,9 +122,9 @@ fn cmd_check(args: &[String]) -> ExitCode {
     }
 }
 
-fn cmd_test_plan(args: &[String]) -> ExitCode {
+fn cmd_plan(args: &[String]) -> ExitCode {
     if args.len() != 1 {
-        eprintln!("Usage: allium test-plan <file.allium>");
+        eprintln!("Usage: allium plan <file.allium>");
         return ExitCode::from(2);
     }
 
@@ -151,9 +151,9 @@ fn cmd_test_plan(args: &[String]) -> ExitCode {
     }
 }
 
-fn cmd_generators(args: &[String]) -> ExitCode {
+fn cmd_model(args: &[String]) -> ExitCode {
     if args.len() != 1 {
-        eprintln!("Usage: allium generators <file.allium>");
+        eprintln!("Usage: allium model <file.allium>");
         return ExitCode::from(2);
     }
 
@@ -174,7 +174,7 @@ fn cmd_generators(args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("Failed to serialise generator spec: {e}");
+            eprintln!("Failed to serialise model: {e}");
             ExitCode::from(1)
         }
     }
