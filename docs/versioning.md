@@ -14,7 +14,7 @@ These packages share a major.minor version that tracks the Allium language versi
 | allium (Rust CLI) | `crates/allium/Cargo.toml` | Cargo workspace (`Cargo.toml`) |
 | allium-cli (Node) | `packages/allium-cli/package.json` | Hardcoded |
 | allium-lsp | `packages/allium-lsp/package.json` | Hardcoded |
-| tree-sitter-allium | `packages/tree-sitter-allium/package.json` | Hardcoded |
+| tree-sitter-allium | Separate repo: [juxt/tree-sitter-allium](https://github.com/juxt/tree-sitter-allium) | Hardcoded |
 
 The canonical major.minor lives in two places:
 

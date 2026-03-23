@@ -86,4 +86,4 @@ If you use the `LSP` package, add this to `LSP.sublime-settings`:
 
 ## Tree-sitter Support
 
-Editors like Helix and Zed use Tree-sitter for highlighting. To enable this, you will need to compile the Allium grammar. See [packages/tree-sitter-allium/README.md](../../packages/tree-sitter-allium/README.md) for build instructions.
+Editors like Helix and Zed use Tree-sitter for highlighting. To enable this, you will need to compile the Allium grammar. See [tree-sitter-allium](https://github.com/juxt/tree-sitter-allium) for build instructions.

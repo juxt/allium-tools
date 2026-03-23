@@ -2,7 +2,7 @@
 
 ## Tree-sitter grammar audit
 
-Findings from comparing the tree-sitter grammar (`packages/tree-sitter-allium/grammar.js`) against the language reference.
+Findings from comparing the tree-sitter grammar ([tree-sitter-allium](https://github.com/juxt/tree-sitter-allium)) against the language reference.
 
 ### What tree-sitter handles
 

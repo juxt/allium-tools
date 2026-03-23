@@ -23,7 +23,7 @@ The LSP server implements the following capabilities:
 - **Folding Ranges**: Logical block collapsing.
 - **Completions**: Keyword and configuration key suggestions.
 
-### Tree-sitter Grammar (`tree-sitter-allium`)
+### Tree-sitter Grammar ([tree-sitter-allium](https://github.com/juxt/tree-sitter-allium))
 
 For fast, local syntax highlighting and structural navigation, Allium provides:
 
@@ -41,9 +41,9 @@ Your integration should typically be a thin wrapper that:
 
 ## 3. Repository Conventions
 
-- **New Package**: Create a new directory in `packages/` (e.g., `packages/allium-<editor>`).
-- **README**: Include a `README.md` within your package directory explaining local installation.
-- **Documentation**: Write a detailed setup guide in `docs/editors/<editor>.md`.
+- **New Repository**: Create a new repo (e.g., `allium-<editor>` or `<editor>-allium`).
+- **README**: Include a `README.md` explaining installation and setup.
+- **Documentation**: Add a setup guide to `docs/editors/<editor>.md` in this repo, linking to the new repo.
 
 ## 4. Testing Your Integration
 
@@ -57,7 +57,7 @@ Before submitting a PR, verify the following features:
 
 ## 5. Submission Checklist
 
-- [ ] New package created in `packages/`.
+- [ ] New repo created for the editor plugin.
 - [ ] LSP client correctly configured for `allium-lsp`.
 - [ ] Tree-sitter queries integrated (if applicable).
 - [ ] `README.md` added to the new package.

@@ -46,7 +46,6 @@ TARGETS=(
   # Core-tier npm packages
   "packages/allium-cli/package.json"
   "packages/allium-lsp/package.json"
-  "packages/tree-sitter-allium/package.json"
 )
 
 update_json_version() {
@@ -112,8 +111,6 @@ update_cargo_version "Cargo.toml"
 update_json_version "package.json"
 update_json_version "packages/allium-cli/package.json"
 update_json_version "packages/allium-lsp/package.json"
-update_json_version "packages/tree-sitter-allium/package.json"
-
 echo ""
 echo "Done. Editor-tier packages (allium-vscode) are not touched."
 echo "Bump those manually if needed."

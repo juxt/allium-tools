@@ -52,7 +52,7 @@ Located in `packages/allium-lsp/`, this package provides an LSP-compliant wrappe
 
 ### 3. tree-sitter-allium (Structural Grammar)
 
-Located in `packages/tree-sitter-allium/`, this provides a high-performance incremental parser.
+Located in its own repo ([juxt/tree-sitter-allium](https://github.com/juxt/tree-sitter-allium)), this provides a high-performance incremental parser.
 
 - **Usage**: Editors use Tree-sitter for fast syntax highlighting, code folding, smart indentation, and structural navigation (like "jumping to the next rule").
 - **Artifacts**: Produces a native `.node` library for Node.js and a `.wasm` file for web/browser use.

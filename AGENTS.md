@@ -77,10 +77,9 @@ This is an npm workspace monorepo. Each package has its own `package.json`, `tsc
 extensions/allium/          VS Code extension (LSP client launcher)
 packages/allium-lsp/        Language Server Protocol server (wraps language-tools/)
 packages/allium-cli/        Standalone CLI package (allium-check, allium-format, etc.)
-packages/tree-sitter-allium/ Tree-sitter grammar for the Allium language
 ```
 
-> **Note:** Editor plugins live in their own repos: [juxt/nvim-allium](https://github.com/juxt/nvim-allium), [juxt/allium-mode](https://github.com/juxt/allium-mode).
+> **Note:** Some packages live in their own repos: [juxt/tree-sitter-allium](https://github.com/juxt/tree-sitter-allium), [juxt/nvim-allium](https://github.com/juxt/nvim-allium), [juxt/allium-mode](https://github.com/juxt/allium-mode).
 
 ### Architecture
 
@@ -94,8 +93,6 @@ language-tools/   Pure analysis engine: parser, analyzer, hover, definitions, re
      |        └── extensions/allium/   VS Code launcher
      |
      └── packages/allium-cli/      CLI tools: direct consumers of language-tools/
-
-packages/tree-sitter-allium/   Structural grammar (used by Neovim, Emacs, GitHub, etc.)
 ```
 
 ### Development setup
@@ -119,21 +116,19 @@ npm run --workspace extensions/allium test
 
 ### Build order
 
-1. **`packages/tree-sitter-allium`**: Generate the parser first.
-2. **`packages/allium-lsp`**: Build the server.
-3. **`extensions/allium`**: The VS Code extension bundles the LSP server binary.
-4. **`packages/allium-cli`**: Shares logic from the extension source.
+1. **`packages/allium-lsp`**: Build the server.
+2. **`extensions/allium`**: The VS Code extension bundles the LSP server binary.
+3. **`packages/allium-cli`**: Shares logic from the extension source.
 
 ### Testing Workflow
 
 - **Unit tests**: Run `npm run test` in the relevant package.
-- **Corpus tests**: Run `tree-sitter test` in `packages/tree-sitter-allium`.
 - **Integration tests**: Run `npm run test` in `extensions/allium` to test LSP-to-engine interactions.
 
 ### Adding new editor integrations
 
 New editor integrations live under `packages/`. Each should:
 1. Point its LSP client at the `allium-lsp` binary.
-2. Use tree-sitter query files from `packages/tree-sitter-allium/queries/`.
+2. Use tree-sitter query files from [juxt/tree-sitter-allium](https://github.com/juxt/tree-sitter-allium).
 3. Include a README with setup instructions.
 4. Provide a `docs/editors/<name>.md` guide.

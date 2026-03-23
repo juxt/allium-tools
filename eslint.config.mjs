@@ -32,22 +32,6 @@ export default tseslint.config(
     },
   },
   {
-    files: ["packages/tree-sitter-allium/grammar.js"],
-    languageOptions: {
-      globals: {
-        ...globals.node,
-        grammar: "readonly",
-        seq: "readonly",
-        optional: "readonly",
-        repeat: "readonly",
-        choice: "readonly",
-        token: "readonly",
-        field: "readonly",
-        prec: "readonly",
-      },
-    },
-  },
-  {
     files: ["**/*.js", "**/*.mjs"],
     languageOptions: {
       globals: {
