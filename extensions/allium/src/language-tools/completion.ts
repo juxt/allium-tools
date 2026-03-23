@@ -49,6 +49,14 @@ const KEYWORDS = [
   "where",
   "trigger",
   "tags",
+  "transitions",
+  "terminal",
+  "for",
+  "implies",
+  "contract",
+  "contracts",
+  "demands",
+  "fulfils",
 ];
 
 export function collectCompletionCandidates(

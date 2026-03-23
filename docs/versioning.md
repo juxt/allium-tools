@@ -1,6 +1,6 @@
 # Versioning policy
 
-The Allium language is at version 2. Tooling versions should align with the language where appropriate.
+The Allium language is at version 3. Tooling versions should align with the language where appropriate.
 
 ## Version tiers
 

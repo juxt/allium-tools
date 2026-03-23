@@ -1,12 +1,13 @@
 {
   "name": "allium-tools",
   "private": true,
-  "version": "2.0.0",
+  "version": "3.0.0",
   "license": "MIT",
   "workspaces": [
     "extensions/allium",
     "packages/allium-cli",
-    "packages/allium-lsp"
+    "packages/allium-lsp",
+    "packages/allium-parser-wasm"
   ],
   "scripts": {
     "prepare": "bash -lc 'if command -v pre-commit >/dev/null 2>&1; then pre-commit install && pre-commit install --hook-type pre-push; else echo \"pre-commit not found; skipping hook install\"; fi'",

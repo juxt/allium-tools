@@ -11,6 +11,7 @@ pub enum TokenKind {
     Number,
     Duration,
     String,
+    BacktickLiteral,
     True,
     False,
     Null,
@@ -57,6 +58,12 @@ pub enum TokenKind {
     Implies,
     Contract,
     Invariant,
+
+    // v3 lifecycle keywords
+    Transitions,
+    Produces,
+    Consumes,
+    Terminal,
 
     // Sigil
     At,              // @
@@ -109,6 +116,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Number => write!(f, "number"),
             TokenKind::Duration => write!(f, "duration"),
             TokenKind::String => write!(f, "string"),
+            TokenKind::BacktickLiteral => write!(f, "backtick literal"),
             TokenKind::True => write!(f, "'true'"),
             TokenKind::False => write!(f, "'false'"),
             TokenKind::Null => write!(f, "'null'"),
@@ -147,6 +155,10 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Implies => write!(f, "'implies'"),
             TokenKind::Contract => write!(f, "'contract'"),
             TokenKind::Invariant => write!(f, "'invariant'"),
+            TokenKind::Transitions => write!(f, "'transitions'"),
+            TokenKind::Produces => write!(f, "'produces'"),
+            TokenKind::Consumes => write!(f, "'consumes'"),
+            TokenKind::Terminal => write!(f, "'terminal'"),
             TokenKind::At => write!(f, "'@'"),
             TokenKind::Now => write!(f, "'now'"),
             TokenKind::This => write!(f, "'this'"),
@@ -226,6 +238,10 @@ impl TokenKind {
                 | TokenKind::Implies
                 | TokenKind::Contract
                 | TokenKind::Invariant
+                | TokenKind::Transitions
+                | TokenKind::Produces
+                | TokenKind::Consumes
+                | TokenKind::Terminal
                 | TokenKind::Now
                 | TokenKind::This
                 | TokenKind::Within
@@ -332,6 +348,9 @@ impl<'s> Lexer<'s> {
         if b == b'"' {
             return self.lex_string(start);
         }
+        if b == b'`' {
+            return self.lex_backtick(start);
+        }
         if b.is_ascii_digit() {
             return self.lex_number(start);
         }
@@ -384,6 +403,34 @@ impl<'s> Lexer<'s> {
                     }
                 }
                 b'\n' => {
+                    return Token {
+                        kind: TokenKind::Error,
+                        span: Span::new(start, self.pos),
+                    };
+                }
+                _ => self.pos += 1,
+            }
+        }
+        Token {
+            kind: TokenKind::Error,
+            span: Span::new(start, self.pos),
+        }
+    }
+
+    // -- backtick literals ----------------------------------------------
+
+    fn lex_backtick(&mut self, start: usize) -> Token {
+        self.pos += 1; // opening `
+        while self.pos < self.src.len() {
+            match self.src[self.pos] {
+                b'`' => {
+                    self.pos += 1;
+                    return Token {
+                        kind: TokenKind::BacktickLiteral,
+                        span: Span::new(start, self.pos),
+                    };
+                }
+                b'\n' | b'\r' => {
                     return Token {
                         kind: TokenKind::Error,
                         span: Span::new(start, self.pos),
@@ -583,6 +630,10 @@ fn classify_keyword(text: &str) -> TokenKind {
         "invariant" => TokenKind::Invariant,
         "transitions_to" => TokenKind::TransitionsTo,
         "becomes" => TokenKind::Becomes,
+        "transitions" => TokenKind::Transitions,
+        "produces" => TokenKind::Produces,
+        "consumes" => TokenKind::Consumes,
+        "terminal" => TokenKind::Terminal,
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         "null" => TokenKind::Null,
@@ -705,6 +756,60 @@ mod tests {
         assert_eq!(
             text_of(src),
             vec!["status", ":", "pending", "|", "active", "|", "completed", ""]
+        );
+    }
+
+    #[test]
+    fn v3_keywords() {
+        assert_eq!(
+            kinds("transitions produces consumes terminal"),
+            vec![
+                TokenKind::Transitions,
+                TokenKind::Produces,
+                TokenKind::Consumes,
+                TokenKind::Terminal,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn backtick_literal() {
+        assert_eq!(kinds("`de-CH-1996`"), vec![TokenKind::BacktickLiteral, TokenKind::Eof]);
+        assert_eq!(kinds("`no-cache`"), vec![TokenKind::BacktickLiteral, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn backtick_literal_text() {
+        let src = "`de-CH-1996`";
+        assert_eq!(text_of(src), vec!["`de-CH-1996`", ""]);
+    }
+
+    #[test]
+    fn backtick_in_enum_context() {
+        assert_eq!(
+            kinds("en | `de-CH-1996` | fr"),
+            vec![
+                TokenKind::Ident,
+                TokenKind::Pipe,
+                TokenKind::BacktickLiteral,
+                TokenKind::Pipe,
+                TokenKind::Ident,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn backtick_unterminated() {
+        assert_eq!(kinds("`unterminated"), vec![TokenKind::Error, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn backtick_newline_terminates() {
+        assert_eq!(
+            kinds("`bad\nstuff`"),
+            vec![TokenKind::Error, TokenKind::Ident, TokenKind::Error, TokenKind::Eof]
         );
     }
 

@@ -11,10 +11,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "npm"
+      - name: Build WASM parser
+        run: |
+          cargo install wasm-pack
+          wasm-pack build crates/allium-wasm --target nodejs --out-dir ../../packages/allium-parser-wasm
+          node -e "const p=require('./packages/allium-parser-wasm/package.json');p.name='allium-parser-wasm';p.scripts={build:'echo ok',test:'echo ok',lint:'echo ok'};require('fs').writeFileSync('./packages/allium-parser-wasm/package.json',JSON.stringify(p,null,2)+'\n')"
       - run: npm ci
       - run: npm run lint
       - run: npm run test

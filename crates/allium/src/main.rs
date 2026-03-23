@@ -1,3 +1,6 @@
+mod generators;
+mod test_plan;
+
 use allium_parser::diagnostic::Severity;
 use allium_parser::lexer::SourceMap;
 use std::path::{Path, PathBuf};
@@ -10,15 +13,25 @@ fn main() -> ExitCode {
         eprintln!("Usage: allium check <file.allium>...");
         eprintln!("       allium check <directory>");
         eprintln!("       allium parse <file.allium>");
+        eprintln!("       allium plan <file.allium>");
+        eprintln!("       allium model <file.allium>");
+        eprintln!("       allium --version");
         return ExitCode::from(2);
+    }
+
+    if args[0] == "--version" || args[0] == "-V" {
+        println!("allium {} (language versions: 1, 2, 3)", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
     }
 
     match args[0].as_str() {
         "check" => cmd_check(&args[1..]),
         "parse" => cmd_parse(&args[1..]),
+        "plan" => cmd_plan(&args[1..]),
+        "model" => cmd_model(&args[1..]),
         other => {
             eprintln!("Unknown command: {other}");
-            eprintln!("Available commands: check, parse");
+            eprintln!("Available commands: check, parse, plan, model");
             ExitCode::from(2)
         }
     }
@@ -106,6 +119,64 @@ fn cmd_check(args: &[String]) -> ExitCode {
             "{file_count} file(s) checked, {total_errors} error(s), {total_warnings} warning(s)."
         );
         ExitCode::from(1)
+    }
+}
+
+fn cmd_plan(args: &[String]) -> ExitCode {
+    if args.len() != 1 {
+        eprintln!("Usage: allium plan <file.allium>");
+        return ExitCode::from(2);
+    }
+
+    let path = Path::new(&args[0]);
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{}: {e}", path.display());
+            return ExitCode::from(1);
+        }
+    };
+
+    let result = allium_parser::parse(&source);
+    let plan = test_plan::generate_test_plan(&result.module, &source);
+    match serde_json::to_string_pretty(&plan) {
+        Ok(json) => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Failed to serialise test plan: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn cmd_model(args: &[String]) -> ExitCode {
+    if args.len() != 1 {
+        eprintln!("Usage: allium model <file.allium>");
+        return ExitCode::from(2);
+    }
+
+    let path = Path::new(&args[0]);
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{}: {e}", path.display());
+            return ExitCode::from(1);
+        }
+    };
+
+    let result = allium_parser::parse(&source);
+    let spec = generators::generate_generators(&result.module, &source);
+    match serde_json::to_string_pretty(&spec) {
+        Ok(json) => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Failed to serialise model: {e}");
+            ExitCode::from(1)
+        }
     }
 }
 
