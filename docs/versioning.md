@@ -30,7 +30,7 @@ Editor plugins are thin integration layers that delegate to the LSP and tree-sit
 | Package | Manifest |
 |---|---|
 | allium-vscode | `extensions/allium/package.json` |
-| allium-mode | `packages/allium-mode/allium-mode.el` and `allium-mode-pkg.el` |
+| allium-mode | Separate repo: [juxt/allium-mode](https://github.com/juxt/allium-mode) |
 | nvim-allium | Separate repo: [juxt/nvim-allium](https://github.com/juxt/nvim-allium) |
 
 Editor plugins should document which core version they're compatible with in their README.
@@ -55,10 +55,9 @@ When the Allium language version changes (e.g. v1 → v2), the following steps a
 
 1. **Core tier.** Run `scripts/version-bump.sh <new-version>` to update all core-tier manifests.
 2. **This document.** Update the language version statement at the top of this file.
-3. **Editor plugins.** Check whether each editor plugin has changes on the release branch (`git diff main --stat -- extensions/ packages/allium-mode/`). If a plugin has changed, bump its version:
-   - allium-vscode: `extensions/allium/package.json`
-   - allium-mode: `packages/allium-mode/allium-mode.el` and `allium-mode-pkg.el`
-   - nvim-allium: lives in [juxt/nvim-allium](https://github.com/juxt/nvim-allium), versioned independently
+3. **Editor plugins.** Check whether the VS Code extension has changes on the release branch (`git diff main --stat -- extensions/`). If so, bump its version in `extensions/allium/package.json`. Other editor plugins live in separate repos and are versioned independently:
+   - allium-mode: [juxt/allium-mode](https://github.com/juxt/allium-mode)
+   - nvim-allium: [juxt/nvim-allium](https://github.com/juxt/nvim-allium)
 4. **Compatibility notes.** Update the "Compatibility" line in each editor plugin README to reference the new core version.
 5. **Homebrew.** After CI publishes the release, run `scripts/update-homebrew-formula.sh <version>` and push the tap repo. See `docs/releasing.md` for the full steps.
 

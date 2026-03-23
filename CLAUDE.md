@@ -1,6 +1,6 @@
 # Allium tools
 
-This is a monorepo for Allium language tooling: parsers, CLI tools, an LSP server, a tree-sitter grammar, and editor plugins for VS Code, Neovim and Emacs.
+This is a monorepo for Allium language tooling: parsers, CLI tools, an LSP server, a tree-sitter grammar, and the VS Code extension.
 
 Read `README.md` for an overview of the project and `AGENTS.md` for development guidance.
 

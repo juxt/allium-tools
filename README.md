@@ -75,8 +75,7 @@ Install [nvim-allium](https://github.com/juxt/nvim-allium) with your plugin mana
 
 ### Emacs
 
-1. Install `allium-mode` and configure it to use `allium-lsp` with `eglot` or `lsp-mode`.
-2. See the [Emacs Setup Guide](docs/editors/emacs.md) for details.
+Install [allium-mode](https://github.com/juxt/allium-mode) with `straight.el`, Doom or manually. It handles syntax highlighting, indentation and LSP integration via `eglot` or `lsp-mode`. See the [Emacs Setup Guide](docs/editors/emacs.md) for details.
 
 ## CLI
 
@@ -133,8 +132,6 @@ Run the full test matrix locally:
 ```bash
 npm run test:all
 ```
-
-`test:all` runs fastest-to-slowest: `test`, `test:emacs`, `test:emacs:integration`.
 
 The `pre-push` hook runs `npm run test:all` before allowing a push.
 

@@ -28,20 +28,19 @@ ln -s $(pwd)/dist/bin.js /usr/local/bin/allium-lsp
 
 ## 2. Install allium-mode
 
-`allium-mode` provides the major mode for editing Allium files.
+`allium-mode` provides the major mode for editing Allium files. It lives in its own repo: [juxt/allium-mode](https://github.com/juxt/allium-mode).
 
 ### Using use-package and straight.el
 
 ```elisp
 (use-package allium-mode
-  :straight (:host github :repo "juxt/allium-tools"
-             :files ("packages/allium-mode/*.el"))
+  :straight (:host github :repo "juxt/allium-mode")
   :mode "\.allium'")
 ```
 
-### Manual Installation
+### Manual installation
 
-1. Copy `allium-mode.el` to a directory in your `load-path`.
+1. Clone [juxt/allium-mode](https://github.com/juxt/allium-mode) and add the directory to your `load-path`.
 2. Add the following to your `init.el`:
 
 ```elisp
