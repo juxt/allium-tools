@@ -1,3 +1,13 @@
+import { parseAllium } from "./wasm-ast";
+import { wasmBlocksToParsedBlocks } from "./wasm-adapter";
+
+let useWasmParser = false;
+
+/** Enable or disable the WASM parser backend. */
+export function setUseWasmParser(enabled: boolean): void {
+	useWasmParser = enabled;
+}
+
 export interface ParsedBlock {
   kind: "rule" | "given" | "config" | "surface" | "actor" | "enum" | "use" | "contract" | "invariant" | "entity" | "value";
   name: string;
@@ -11,6 +21,19 @@ export interface ParsedBlock {
 }
 
 export function parseAlliumBlocks(text: string): ParsedBlock[] {
+  if (useWasmParser) {
+    return parseAlliumBlocksWasm(text);
+  }
+  return parseAlliumBlocksRegex(text);
+}
+
+/** Parse using the WASM Rust parser and map to ParsedBlock[]. */
+export function parseAlliumBlocksWasm(text: string): ParsedBlock[] {
+  const result = parseAllium(text);
+  return wasmBlocksToParsedBlocks(text, result);
+}
+
+function parseAlliumBlocksRegex(text: string): ParsedBlock[] {
   const blocks: ParsedBlock[] = [];
   blocks.push(
     ...findNamedBraceBlocks(
