@@ -34,7 +34,8 @@ ln -s $(pwd)/dist/bin.js /usr/local/bin/allium-lsp
 
 ```elisp
 (unless (package-installed-p 'allium-mode)
-  (package-vc-install '(allium-mode :url "https://github.com/juxt/allium-mode")))
+  (let ((byte-compile-warnings nil))
+    (package-vc-install '(allium-mode :url "https://github.com/juxt/allium-mode"))))
 
 (use-package allium-mode
   :mode "\\.allium\\'")
