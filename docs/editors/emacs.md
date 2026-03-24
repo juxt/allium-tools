@@ -1,4 +1,4 @@
-# Emacs Setup Guide for Allium
+# Emacs setup guide for Allium
 
 This guide explains how to set up Allium language support in Emacs using `allium-lsp` and `allium-mode`.
 
@@ -7,16 +7,16 @@ This guide explains how to set up Allium language support in Emacs using `allium
 - **Emacs** >= 28.1 (Emacs 29+ recommended for built-in tree-sitter support).
 - **eglot** (built-in since Emacs 29) or **lsp-mode**.
 
-## 1. Install Allium LSP Server
+## 1. Install the Allium LSP server
 
 The LSP server must be available in your system path as `allium-lsp`.
 
-### From Release Artifacts
+### From release artifacts
 
 1. Download the `allium-lsp-<version>.tar.gz` for your platform from [GitHub Releases](https://github.com/juxt/allium-tools/releases).
 2. Extract the archive and move the `allium-lsp` binary to a directory in your `$PATH`.
 
-### From Source
+### From source
 
 ```bash
 cd packages/allium-lsp
@@ -30,12 +30,22 @@ ln -s $(pwd)/dist/bin.js /usr/local/bin/allium-lsp
 
 `allium-mode` provides the major mode for editing Allium files. It lives in its own repo: [juxt/allium-mode](https://github.com/juxt/allium-mode).
 
-### Using use-package and straight.el
+### Using package-vc (Emacs 29+)
+
+```elisp
+(unless (package-installed-p 'allium-mode)
+  (package-vc-install '(allium-mode :url "https://github.com/juxt/allium-mode")))
+
+(use-package allium-mode
+  :mode "\\.allium\\'")
+```
+
+### Using straight.el
 
 ```elisp
 (use-package allium-mode
   :straight (:host github :repo "juxt/allium-mode")
-  :mode "\.allium'")
+  :mode "\\.allium\\'")
 ```
 
 ### Manual installation
@@ -45,86 +55,58 @@ ln -s $(pwd)/dist/bin.js /usr/local/bin/allium-lsp
 
 ```elisp
 (require 'allium-mode)
-(add-to-list 'auto-mode-alist '("\.allium'" . allium-mode))
 ```
 
-## 3. Configure LSP Client
+## 3. Configure LSP client
 
-### eglot (Recommended)
+### eglot (recommended)
 
-Eglot is the lightweight, built-in LSP client for Emacs.
+`allium-mode` registers itself with eglot automatically. Use `allium-eglot-ensure` to connect; it checks that the server is installed and shows install instructions if it is missing.
 
 ```elisp
-(use-package eglot
-  :ensure t
-  :config
-  (add-to-list 'eglot-server-programs
-               '(allium-mode . ("allium-lsp" "--stdio")))
-  :hook (allium-mode . eglot-ensure))
+(add-hook 'allium-mode-hook 'allium-eglot-ensure)
 ```
 
 ### lsp-mode
 
-```elisp
-(use-package lsp-mode
-  :ensure t
-  :hook (allium-mode . lsp-deferred)
-  :commands lsp
-  :config
-  (lsp-register-client
-   (make-lsp-client :new-connection (lsp-stdio-connection '("allium-lsp" "--stdio"))
-                    :major-modes '(allium-mode)
-                    :server-id 'allium-lsp)))
-```
-
-## 4. Emacs 29+ Tree-sitter Setup (Optional)
-
-Emacs 29+ includes built-in support for tree-sitter, providing faster and more accurate highlighting and navigation.
-
-1. Ensure the `allium` grammar is installed. You can add it to `treesit-language-source-alist` and run `treesit-install-language-grammar`.
-2. Use `allium-ts-mode` instead of the standard `allium-mode`:
+`allium-mode` registers itself with lsp-mode automatically.
 
 ```elisp
-(add-to-list 'auto-mode-alist '("\.allium'" . allium-ts-mode))
+(add-hook 'allium-mode-hook 'lsp-deferred)
 ```
 
-## Feature Reference
+## 4. Tree-sitter grammar (optional)
 
-| Feature | Command / Interaction |
+On Emacs 29+, `allium-mode` automatically uses tree-sitter when the Allium grammar is installed, giving you more accurate highlighting and richer imenu navigation. Without the grammar, the mode falls back to regex-based highlighting.
+
+To compile and install the grammar:
+
+```
+M-x treesit-install-language-grammar RET allium RET
+```
+
+When prompted for the repository URL, enter:
+
+```
+https://github.com/juxt/tree-sitter-allium
+```
+
+Accept the defaults for the remaining prompts. This compiles the grammar and installs the shared library into your `tree-sitter` directory. You need a C compiler available on your system (`cc`).
+
+## Feature reference
+
+| Feature | Command |
 | :--- | :--- |
-| **Hover** | `M-x eldoc` (or automatic via ElDoc) |
-| **Go to Definition** | `M-.` (`xref-find-definitions`) |
-| **Find References** | `M-?` (`xref-find-references`) |
-| **Rename** | `M-x eglot-rename` or `M-x lsp-rename` |
-| **Code Actions** | `M-x eglot-code-actions` or `s-l a` (lsp-mode) |
-| **Formatting** | `M-x eglot-format-buffer` or `M-x lsp-format-buffer` |
-| **Outline** | `M-x imenu` |
-
-## What Is Available Today
-
-`allium-mode` currently provides:
-
-- Major mode support for `*.allium` files (`allium-mode`).
-- Optional tree-sitter major mode (`allium-ts-mode`) on Emacs 29+ when the grammar is installed.
-- Syntax highlighting, indentation, and line comments (`-- ...`).
-- Imenu support in tree-sitter mode.
-- LSP wiring for both `eglot` and `lsp-mode` with language id `allium`.
-
-To access the language features in a buffer:
-
-1. Open an `.allium` file.
-2. Ensure your LSP client is active (`eglot-ensure` or `lsp-deferred`).
-3. Use standard Emacs/Xref/LSP commands:
-   - Definition: `M-.`
-   - References: `M-?`
-   - Rename: `M-x eglot-rename` or `M-x lsp-rename`
-   - Code actions: `M-x eglot-code-actions` or `M-x lsp-execute-code-action`
-   - Format: `M-x eglot-format-buffer` or `M-x lsp-format-buffer`
-
-There are no custom allium-specific interactive commands at the moment; features are accessed through standard `xref`, `eldoc`, and your chosen LSP client commands.
+| Hover | `M-x eldoc` (or automatic via ElDoc) |
+| Go to definition | `M-.` (`xref-find-definitions`) |
+| Find references | `M-?` (`xref-find-references`) |
+| Rename | `M-x eglot-rename` or `M-x lsp-rename` |
+| Code actions | `M-x eglot-code-actions` or `M-x lsp-execute-code-action` |
+| Formatting | `M-x eglot-format-buffer` or `M-x lsp-format-buffer` |
+| Outline | `M-x imenu` |
 
 ## Troubleshooting
 
-- **Server not found**: Run `M-x executable-find RET allium-lsp RET` to ensure Emacs can see the binary.
-- **Connection Issues**: Check the `*eglot log*` or `*lsp-log*` buffers for raw JSON-RPC communication and server stderr.
-- **Indentation**: Allium follows a standard 4-space indent. This can be customized via `allium-indent-offset`.
+- **Server not found**: Run `M-x executable-find RET allium-lsp RET` to ensure Emacs can see the binary. If using `allium-eglot-ensure`, it will tell you what to do.
+- **Connection issues**: Check the `*eglot log*` or `*lsp-log*` buffers for raw JSON-RPC communication and server stderr.
+- **Indentation**: Allium uses a 4-space indent by default. Customise via `allium-indent-offset`.
