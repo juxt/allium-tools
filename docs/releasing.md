@@ -2,13 +2,14 @@
 
 Pushing a `v*` tag triggers the release workflow, which builds and publishes all artifacts: Rust binaries, VSIX, npm tarballs, LSP and tree-sitter outputs. Everything ships from a single tag.
 
-Not every artifact needs manual follow-up. The Homebrew formula is the only piece that requires a separate update after CI finishes.
+Not every artifact needs manual follow-up. The crates.io publish and Homebrew formula update are the two steps that require manual action after CI finishes.
 
 ## What goes where
 
 | Artifact | Destination | Needs manual step? |
 |---|---|---|
 | Rust CLI binaries (4 platforms) | GitHub release | No (CI publishes) |
+| Rust crates (allium-parser, allium-cli) | crates.io | Yes |
 | VSIX | GitHub release | No (CI publishes) |
 | npm tarballs (allium-cli, allium-lsp, tree-sitter) | GitHub release | No (CI publishes) |
 | Homebrew formula | homebrew-allium tap | Yes |
@@ -33,7 +34,14 @@ Not every artifact needs manual follow-up. The Homebrew formula is the only piec
 
 3. **Wait for CI** to build and attach release artifacts.
 
-4. **Update the Homebrew tap:**
+4. **Publish to crates.io** (parser first, since allium-cli depends on it):
+
+   ```bash
+   cargo publish -p allium-parser
+   cargo publish -p allium-cli
+   ```
+
+5. **Update the Homebrew tap:**
 
    ```bash
    ./scripts/update-homebrew-formula.sh 3.0.0
@@ -41,7 +49,7 @@ Not every artifact needs manual follow-up. The Homebrew formula is the only piec
 
    This downloads the four platform tarballs, computes SHA256 checksums and rewrites the formula. Pass `--dry-run` to preview without modifying the file.
 
-5. **Push the tap repo:**
+6. **Push the tap repo:**
 
    ```bash
    cd ~/Code/homebrew-allium
