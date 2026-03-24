@@ -34,7 +34,7 @@ ln -s $(pwd)/dist/bin.js /usr/local/bin/allium-lsp
 
 ```elisp
 (unless (package-installed-p 'allium-mode)
-  (let ((warning-minimum-level :error))
+  (let ((inhibit-message t))
     (package-vc-install '(allium-mode :url "https://github.com/juxt/allium-mode"))))
 
 (use-package allium-mode
