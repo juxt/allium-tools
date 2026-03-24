@@ -2,60 +2,38 @@
 
 Pushing a `v*` tag triggers the release workflow, which builds and publishes all artifacts: Rust binaries, VSIX, npm tarballs, LSP and tree-sitter outputs. Everything ships from a single tag.
 
-Not every artifact needs manual follow-up. The crates.io publish and Homebrew formula update are the two steps that require manual action after CI finishes.
+After CI finishes, two steps need manual action: publishing to crates.io and updating the Homebrew formula. The release script handles the full sequence.
 
 ## What goes where
 
-| Artifact | Destination | Needs manual step? |
+| Artifact | Destination | Automated? |
 |---|---|---|
-| Rust CLI binaries (4 platforms) | GitHub release | No (CI publishes) |
-| Rust crates (allium-parser, allium-cli) | crates.io | Yes |
-| VSIX | GitHub release | No (CI publishes) |
-| npm tarballs (allium-cli, allium-lsp, tree-sitter) | GitHub release | No (CI publishes) |
-| Homebrew formula | homebrew-allium tap | Yes |
+| Rust CLI binaries (4 platforms) | GitHub release | CI |
+| Rust crates (allium-parser, allium-cli) | crates.io | Release script |
+| VSIX | GitHub release | CI |
+| npm tarballs (allium-cli, allium-lsp, tree-sitter) | GitHub release | CI |
+| Homebrew formula | homebrew-allium tap | Release script |
 
-## Steps
+## Running a release
 
-1. **Bump versions** with `scripts/version-bump.sh`:
+```bash
+./scripts/release.sh 3.1.0
+```
 
-   ```bash
-   ./scripts/version-bump.sh 3.0.0
-   ```
+This bumps versions, commits, tags, pushes, waits for CI, publishes to crates.io and updates the Homebrew tap. Pass `--dry-run` to preview each step without making changes.
 
-   For major language version bumps, also follow the checklist in `docs/versioning.md`.
+For major language version bumps, also follow the checklist in `docs/versioning.md`.
 
-2. **Commit, tag and push:**
+Requires `gh` (GitHub CLI), `cargo` logged in to crates.io, and the `homebrew-allium` tap repo as a sibling directory.
 
-   ```bash
-   git add -A && git commit -m "v3.0.0"
-   git tag v3.0.0
-   git push origin main --tags
-   ```
+## Manual steps (if not using the script)
 
-3. **Wait for CI** to build and attach release artifacts.
-
-4. **Publish to crates.io** (parser first, since allium-cli depends on it):
-
-   ```bash
-   cargo publish -p allium-parser
-   cargo publish -p allium-cli
-   ```
-
-5. **Update the Homebrew tap:**
-
-   ```bash
-   ./scripts/update-homebrew-formula.sh 3.0.0
-   ```
-
-   This downloads the four platform tarballs, computes SHA256 checksums and rewrites the formula. Pass `--dry-run` to preview without modifying the file.
-
-6. **Push the tap repo:**
-
-   ```bash
-   cd ~/Code/homebrew-allium
-   git add -A && git commit -m "allium 3.0.0"
-   git push
-   ```
+1. Bump versions: `./scripts/version-bump.sh <version>`
+2. Commit, tag and push: `git add -A && git commit -m "v<version>" && git tag v<version> && git push origin main --tags`
+3. Wait for CI to build and attach release artifacts
+4. Publish to crates.io: `cargo publish -p allium-parser && cargo publish -p allium-cli`
+5. Update Homebrew formula: `./scripts/update-homebrew-formula.sh <version>`
+6. Push the tap repo
 
 ## When to release
 
