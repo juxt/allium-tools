@@ -41,21 +41,15 @@ comm -13 /tmp/ts.txt /tmp/rust.txt  # Rust only
 
 ## Current state
 
-155 diagnostics match exactly. 4 are Rust-only (all correct). 6 are TypeScript-only (all TypeScript false positives).
+155 diagnostics match exactly. 4 are Rust-only (all correct). 0 are TypeScript-only.
 
-## TypeScript false positives the Rust correctly avoids (6)
+## TypeScript false positives fixed
 
-### 1. `field.unused` on `terminal` inside `transitions` blocks (5 instances)
+### `field.unused` on `terminal` inside `transitions` blocks (6 instances)
 
-The TypeScript regex-based field collector treats `terminal: acknowledged` inside a `transitions status { ... }` block as a field declaration. Per the language reference, `terminal:` is a keyword clause in the transition graph syntax, not a field. The Rust AST represents these as `TransitionsBlock` items, correctly excluding them.
+The TypeScript regex-based field collector was treating `terminal: resolved` inside `transitions status { ... }` blocks as field declarations. Per the language reference, `terminal:` is a keyword clause in the transition graph syntax, not a field. Fixed by excluding `transitions { ... }` sub-block ranges from field scanning in `collectDeclaredEntityFields`.
 
-Files: arbiter.allium:50, clerk.allium:57, registrar.allium:54, core.allium:180, core.allium:227
-
-### 2. `field.unused` on value type fields
-
-The TypeScript checker flags fields on value types (`value TimeRange { start: Timestamp }`) as unused when they're not referenced by `.field` access elsewhere. Value types are structural declarations whose fields are part of the type contract. The Rust checker correctly skips `BlockKind::Value` in unused-field checks.
-
-File: warden.allium:49
+Files: arbiter.allium:50, clerk.allium:57, registrar.allium:54, core.allium:180, core.allium:227, warden.allium:49
 
 ## Checks where Rust is more correct (4)
 

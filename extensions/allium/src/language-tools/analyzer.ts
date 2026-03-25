@@ -3520,6 +3520,21 @@ function collectDeclaredEntityFields(
       continue;
     }
     const body = text.slice(open + 1, close);
+    // Collect transitions block ranges to exclude from field scanning.
+    // `terminal:` inside transitions blocks is a keyword, not a field.
+    const transitionsRanges: Array<[number, number]> = [];
+    const transPattern = /\btransitions\s+\w+\s*\{/g;
+    for (
+      let tm = transPattern.exec(body);
+      tm;
+      tm = transPattern.exec(body)
+    ) {
+      const tOpen = body.indexOf("{", tm.index);
+      if (tOpen < 0) continue;
+      const tClose = findMatchingBrace(text, open + 1 + tOpen);
+      if (tClose < 0) continue;
+      transitionsRanges.push([tOpen, tClose - (open + 1)]);
+    }
     const fieldPattern = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)$/gm;
     for (
       let field = fieldPattern.exec(body);
@@ -3529,6 +3544,13 @@ function collectDeclaredEntityFields(
       const name = field[1];
       const rhs = field[2].trim();
       if (rhs.length === 0) {
+        continue;
+      }
+      if (
+        transitionsRanges.some(
+          ([s, e]) => field!.index >= s && field!.index <= e,
+        )
+      ) {
         continue;
       }
       out.push({
