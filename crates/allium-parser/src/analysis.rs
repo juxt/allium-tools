@@ -274,7 +274,15 @@ impl Ctx<'_> {
     fn check_discriminator_variants(&mut self) {
         let mut variants_by_base: HashMap<&str, HashSet<&str>> = HashMap::new();
         for v in self.variants() {
-            if let Some(base_name) = expr_as_ident(&v.base) {
+            let base_name = expr_as_ident(&v.base).or_else(|| {
+                // Parser may represent `variant X : Base { ... }` as JoinLookup
+                if let Expr::JoinLookup { entity, .. } = &v.base {
+                    expr_as_ident(entity)
+                } else {
+                    None
+                }
+            });
+            if let Some(base_name) = base_name {
                 variants_by_base
                     .entry(base_name)
                     .or_default()
@@ -396,7 +404,13 @@ impl Ctx<'_> {
                 None => continue,
             };
 
-            let mut bindings: Vec<(&str, Span)> = Vec::new();
+            // Only check facing bindings for unused if surface has provides
+            let has_provides = surface
+                .items
+                .iter()
+                .any(|i| matches!(&i.kind, BlockItemKind::Clause { keyword, .. } if keyword == "provides"));
+
+            let mut bindings: Vec<(&str, Span, bool)> = Vec::new(); // name, span, is_facing
             for item in &surface.items {
                 let BlockItemKind::Clause { keyword, value } = &item.kind else {
                     continue;
@@ -405,12 +419,16 @@ impl Ctx<'_> {
                     continue;
                 }
                 if let Expr::Binding { name, .. } = value {
-                    bindings.push((&name.name, name.span));
+                    bindings.push((&name.name, name.span, keyword == "facing"));
                 }
             }
 
-            for (name, span) in &bindings {
+            for (name, span, is_facing) in &bindings {
                 if *name == "_" {
+                    continue;
+                }
+                // Facing bindings are only meaningful in surfaces with provides
+                if *is_facing && !has_provides {
                     continue;
                 }
                 let used = surface.items.iter().any(|item| {
@@ -937,6 +955,23 @@ impl Ctx<'_> {
                     }
                 }
             }
+            // Entity.created or Entity.field (in binding triggers)
+            Expr::MemberAccess { object, .. } => {
+                if let Expr::Ident(id) = object.as_ref() {
+                    if starts_uppercase(&id.name) && !known.contains(id.name.as_str()) {
+                        self.push(
+                            Diagnostic::error(
+                                id.span,
+                                format!(
+                                    "Type reference '{}' is not declared locally or imported.",
+                                    id.name
+                                ),
+                            )
+                            .with_code("allium.rule.undefinedTypeReference"),
+                        );
+                    }
+                }
+            }
             Expr::Block { items, .. } => {
                 for item in items {
                     self.check_type_refs_in_rule_expr(item, known);
@@ -971,17 +1006,33 @@ impl Ctx<'_> {
             }
         }
 
-        // Collect triggers emitted by rule ensures
+        // Collect triggers emitted by rule ensures (including for/if blocks)
         let mut emitted: HashSet<&str> = HashSet::new();
         for rule in self.blocks(BlockKind::Rule) {
             for item in &rule.items {
-                let BlockItemKind::Clause { keyword, value } = &item.kind else {
-                    continue;
-                };
-                if keyword != "ensures" {
-                    continue;
+                match &item.kind {
+                    BlockItemKind::Clause { keyword, value } if keyword == "ensures" => {
+                        collect_call_names(value, &mut emitted);
+                    }
+                    BlockItemKind::ForBlock { items, .. } => {
+                        for sub in items {
+                            collect_call_names_from_item(&sub.kind, &mut emitted);
+                        }
+                    }
+                    BlockItemKind::IfBlock { branches, else_items, .. } => {
+                        for b in branches {
+                            for sub in &b.items {
+                                collect_call_names_from_item(&sub.kind, &mut emitted);
+                            }
+                        }
+                        if let Some(items) = else_items {
+                            for sub in items {
+                                collect_call_names_from_item(&sub.kind, &mut emitted);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                collect_call_names(value, &mut emitted);
             }
         }
 
@@ -1013,6 +1064,30 @@ impl Ctx<'_> {
                 }
             }
         }
+    }
+}
+
+fn collect_call_names_from_item<'a>(kind: &'a BlockItemKind, out: &mut HashSet<&'a str>) {
+    match kind {
+        BlockItemKind::Clause { value, .. } => collect_call_names(value, out),
+        BlockItemKind::ForBlock { items, .. } => {
+            for item in items {
+                collect_call_names_from_item(&item.kind, out);
+            }
+        }
+        BlockItemKind::IfBlock { branches, else_items, .. } => {
+            for b in branches {
+                for item in &b.items {
+                    collect_call_names_from_item(&item.kind, out);
+                }
+            }
+            if let Some(items) = else_items {
+                for item in items {
+                    collect_call_names_from_item(&item.kind, out);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1081,7 +1156,7 @@ impl Ctx<'_> {
                 Decl::Block(b)
                     if matches!(
                         b.kind,
-                        BlockKind::Entity | BlockKind::ExternalEntity | BlockKind::Value
+                        BlockKind::Entity | BlockKind::ExternalEntity
                     ) =>
                 {
                     b
@@ -1299,7 +1374,20 @@ fn collect_accessed_fields_from_expr<'a>(expr: &'a Expr, out: &mut HashSet<&'a s
 
 impl Ctx<'_> {
     fn check_unused_entities(&mut self) {
-        let all_idents = self.collect_all_referenced_idents();
+        let mut all_idents = self.collect_all_referenced_idents();
+        // Entities that serve as variant bases are "used"
+        for v in self.variants() {
+            let base = expr_as_ident(&v.base).or_else(|| {
+                if let Expr::JoinLookup { entity, .. } = &v.base {
+                    expr_as_ident(entity)
+                } else {
+                    None
+                }
+            });
+            if let Some(name) = base {
+                all_idents.insert(name);
+            }
+        }
         let mut findings = Vec::new();
 
         for d in &self.module.declarations {
@@ -1642,8 +1730,16 @@ fn is_valid_trigger(expr: &Expr) -> bool {
         Expr::Call { function, .. } => {
             matches!(function.as_ref(), Expr::Ident(_) | Expr::MemberAccess { .. })
         }
-        // binding: Entity.field becomes/transitions_to state
-        Expr::Binding { .. } => true,
+        // binding: Entity.field becomes/transitions_to/created/comparison
+        Expr::Binding { value, .. } => {
+            matches!(
+                value.as_ref(),
+                Expr::Becomes { .. }
+                    | Expr::TransitionsTo { .. }
+                    | Expr::MemberAccess { .. }
+                    | Expr::Comparison { .. }
+            )
+        }
         // a or b — combined triggers
         Expr::LogicalOp {
             op: LogicalOp::Or,
@@ -1873,17 +1969,23 @@ impl Ctx<'_> {
     fn check_duplicate_let_bindings(&mut self) {
         for rule in self.blocks(BlockKind::Rule) {
             let mut seen: HashMap<&str, Span> = HashMap::new();
-            for item in &rule.items {
-                if let BlockItemKind::Let { name, .. } = &item.kind {
-                    if let Some(prev_span) = seen.get(name.name.as_str()) {
-                        let _ = prev_span; // first occurrence
+            self.check_duplicate_lets_in_items(&rule.items, &mut seen);
+        }
+    }
+
+    fn check_duplicate_lets_in_items<'b>(
+        &mut self,
+        items: &'b [BlockItem],
+        seen: &mut HashMap<&'b str, Span>,
+    ) {
+        for item in items {
+            match &item.kind {
+                BlockItemKind::Let { name, .. } => {
+                    if seen.contains_key(name.name.as_str()) {
                         self.push(
                             Diagnostic::error(
                                 name.span,
-                                format!(
-                                    "Duplicate let binding '{}' in this rule.",
-                                    name.name
-                                ),
+                                format!("Duplicate let binding '{}' in this rule.", name.name),
                             )
                             .with_code("allium.let.duplicateBinding"),
                         );
@@ -1891,6 +1993,21 @@ impl Ctx<'_> {
                         seen.insert(&name.name, name.span);
                     }
                 }
+                BlockItemKind::ForBlock { items, .. } => {
+                    self.check_duplicate_lets_in_items(items, seen);
+                }
+                BlockItemKind::IfBlock {
+                    branches,
+                    else_items,
+                } => {
+                    for b in branches {
+                        self.check_duplicate_lets_in_items(&b.items, seen);
+                    }
+                    if let Some(items) = else_items {
+                        self.check_duplicate_lets_in_items(items, seen);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -1917,15 +2034,19 @@ impl Ctx<'_> {
 
         // Walk all expressions looking for config.field references
         for d in &self.module.declarations {
-            let block = match d {
-                Decl::Block(b) => b,
-                _ => continue,
-            };
-            if block.kind == BlockKind::Config {
-                continue;
-            }
-            for item in &block.items {
-                self.check_config_refs_in_item(&item.kind, &config_params);
+            match d {
+                Decl::Block(b) => {
+                    if b.kind == BlockKind::Config {
+                        continue;
+                    }
+                    for item in &b.items {
+                        self.check_config_refs_in_item(&item.kind, &config_params);
+                    }
+                }
+                Decl::Invariant(inv) => {
+                    self.check_config_refs_in_expr(&inv.body, &config_params);
+                }
+                _ => {}
             }
         }
     }
