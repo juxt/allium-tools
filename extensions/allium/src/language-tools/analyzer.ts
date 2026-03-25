@@ -3564,7 +3564,7 @@ function collectSuppressions(
   lineStarts: number[],
 ): Map<number, Set<string>> {
   const suppressionByLine = new Map<number, Set<string>>();
-  const pattern = /^\s*--\s*allium-ignore\s+([A-Za-z0-9._,\- \t]+)$/gm;
+  const pattern = /^[^\S\n]*--\s*allium-ignore\s+([A-Za-z0-9._,\- \t]+)$/gm;
   for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
     const line = offsetToPosition(lineStarts, match.index).line;
     const codes = match[1]
