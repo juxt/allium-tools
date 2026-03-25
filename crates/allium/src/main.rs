@@ -86,7 +86,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
         };
 
         let result = allium_parser::parse(&source);
-        let analysis_diagnostics = allium_parser::analyze(&result.module);
+        let analysis_diagnostics = allium_parser::analyze(&result.module, &source);
         let source_map = SourceMap::new(&source);
 
         let all_diagnostics: Vec<&allium_parser::Diagnostic> = result
@@ -102,13 +102,24 @@ fn cmd_check(args: &[String]) -> ExitCode {
                 Severity::Warning => "warning",
                 Severity::Info => "info",
             };
-            println!(
-                "{}:{}:{}: {severity}: {}",
-                path.display(),
-                line + 1,
-                col + 1,
-                d.message,
-            );
+            if let Some(code) = d.code {
+                println!(
+                    "{}:{}:{}: {severity} {} {}",
+                    path.display(),
+                    line + 1,
+                    col + 1,
+                    code,
+                    d.message,
+                );
+            } else {
+                println!(
+                    "{}:{}:{}: {severity}: {}",
+                    path.display(),
+                    line + 1,
+                    col + 1,
+                    d.message,
+                );
+            }
             print_source_snippet(&source_map, &source, line, col);
 
             match d.severity {
