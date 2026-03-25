@@ -1,12 +1,8 @@
 # Versioning policy
 
-The Allium language is at version 3. Tooling versions should align with the language where appropriate.
+The Allium language is at version 3. All packages in this repo share a single version that tracks the language.
 
-## Version tiers
-
-### Core tier: major.minor tracks the language
-
-These packages share a major.minor version that tracks the Allium language version. Patch versions may differ between packages (e.g. a parser bugfix doesn't force a CLI release).
+## Packages
 
 | Package | Manifest | Version source |
 |---|---|---|
@@ -15,55 +11,48 @@ These packages share a major.minor version that tracks the Allium language versi
 | allium-cli (Node) | `packages/allium-cli/package.json` | Hardcoded |
 | allium-lsp | `packages/allium-lsp/package.json` | Hardcoded |
 | allium-vscode | `extensions/allium/package.json` | Hardcoded |
-| tree-sitter-allium | Separate repo: [juxt/tree-sitter-allium](https://github.com/juxt/tree-sitter-allium) | Hardcoded |
 
-The canonical major.minor lives in two places:
+The canonical version lives in two places:
 
 - `Cargo.toml` workspace version (Rust crates)
 - `package.json` root version (npm packages)
 
-These two must always agree on major.minor.
+These two must always agree.
 
-### Editor tier: versions independently
+## External editor plugins
 
-External editor plugins are thin integration layers that delegate to the LSP and tree-sitter. They version at their own pace, reflecting their own maturity and feature set.
+Editor plugins in separate repos version independently and note compatible core versions in their README.
 
-| Package | Manifest |
+| Package | Repo |
 |---|---|
-| allium-mode | Separate repo: [juxt/allium-mode](https://github.com/juxt/allium-mode) |
-| nvim-allium | Separate repo: [juxt/nvim-allium](https://github.com/juxt/nvim-allium) |
-
-Editor plugins should document which core version they're compatible with in their README.
+| tree-sitter-allium | [juxt/tree-sitter-allium](https://github.com/juxt/tree-sitter-allium) |
+| allium-mode | [juxt/allium-mode](https://github.com/juxt/allium-mode) |
+| nvim-allium | [juxt/nvim-allium](https://github.com/juxt/nvim-allium) |
 
 ## Bumping versions
 
-Use `scripts/version-bump.sh` to update core-tier versions:
+Use `scripts/version-bump.sh` to update all package versions:
 
 ```bash
-# Set all core-tier packages to 2.0.0
-./scripts/version-bump.sh 2.0.0
+# Set all packages to 3.1.0
+./scripts/version-bump.sh 3.1.0
 
 # Dry run — show what would change without writing
-./scripts/version-bump.sh --dry-run 2.0.0
+./scripts/version-bump.sh --dry-run 3.1.0
 ```
-
-Editor-tier packages are bumped manually as needed.
 
 ## Major language version release checklist
 
-When the Allium language version changes (e.g. v1 → v2), the following steps are needed beyond a normal version bump.
+When the Allium language version changes (e.g. v2 → v3):
 
-1. **Core tier.** Run `scripts/version-bump.sh <new-version>` to update all core-tier manifests.
-2. **This document.** Update the language version statement at the top of this file.
-3. **Editor plugins.** Check whether the VS Code extension has changes on the release branch (`git diff main --stat -- extensions/`). If so, bump its version in `extensions/allium/package.json`. Other editor plugins live in separate repos and are versioned independently:
-   - allium-mode: [juxt/allium-mode](https://github.com/juxt/allium-mode)
-   - nvim-allium: [juxt/nvim-allium](https://github.com/juxt/nvim-allium)
-4. **Compatibility notes.** Update the "Compatibility" line in each editor plugin README to reference the new core version.
-5. **Homebrew.** After CI publishes the release, run `scripts/update-homebrew-formula.sh <version>` and push the tap repo. See `docs/releasing.md` for the full steps.
+1. Run `scripts/version-bump.sh <new-version>` to update all manifests.
+2. Update the language version statement at the top of this file.
+3. Update the "Compatibility" line in each external editor plugin README.
+4. After CI publishes the release, run `scripts/update-homebrew-formula.sh <version>` and push the tap repo. See `docs/releasing.md` for the full steps.
 
 ## Rules
 
-1. A grammar or language-level change bumps the core-tier minor (or major) version.
-2. A bugfix in a single core package bumps only that package's patch version.
-3. Editor plugins declare their own versions and note compatible core versions in their README.
-4. The two canonical version sources (Cargo workspace, root package.json) must always share the same major.minor.
+1. A grammar or language-level change bumps the minor (or major) version.
+2. A bugfix bumps the patch version.
+3. All packages in this repo share the same version.
+4. The two canonical version sources (Cargo workspace, root package.json) must always agree.

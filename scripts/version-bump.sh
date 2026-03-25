@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Bump core-tier package versions across the monorepo.
-# See VERSIONING.md for the versioning policy.
+# Bump package versions across the monorepo.
+# See docs/versioning.md for the versioning policy.
 #
 # Usage:
 #   ./scripts/version-bump.sh [--dry-run] <version>
@@ -33,21 +33,6 @@ if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-
-# Files to update and the sed pattern for each.
-# Format: file:pattern
-TARGETS=(
-  # Cargo workspace (covers allium-parser and allium via workspace inheritance)
-  "Cargo.toml:s/^version = \"[0-9]*\.[0-9]*\.[0-9]*\"/version = \"$VERSION\"/"
-
-  # Root package.json
-  "package.json"
-
-  # Core-tier npm packages
-  "packages/allium-cli/package.json"
-  "packages/allium-lsp/package.json"
-  "extensions/allium/package.json"
-)
 
 update_json_version() {
   local file="$1"
@@ -99,7 +84,7 @@ update_cargo_version() {
   fi
 }
 
-echo "Core-tier version bump -> $VERSION"
+echo "Version bump -> $VERSION"
 if $DRY_RUN; then
   echo "(dry run — no files will be modified)"
 fi
@@ -112,6 +97,6 @@ update_cargo_version "Cargo.toml"
 update_json_version "package.json"
 update_json_version "packages/allium-cli/package.json"
 update_json_version "packages/allium-lsp/package.json"
+update_json_version "extensions/allium/package.json"
 echo ""
-echo "Done. Editor-tier packages (allium-vscode) are not touched."
-echo "Bump those manually if needed."
+echo "Done."
