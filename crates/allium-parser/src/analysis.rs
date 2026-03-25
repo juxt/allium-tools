@@ -1006,33 +1006,13 @@ impl Ctx<'_> {
             }
         }
 
-        // Collect triggers emitted by rule ensures (including for/if blocks)
+        // Collect triggers emitted by rule ensures clauses.
+        // Only collect the leading call in each ensures value, matching the
+        // TS regex which captures only the first identifier after `ensures:`.
         let mut emitted: HashSet<&str> = HashSet::new();
         for rule in self.blocks(BlockKind::Rule) {
             for item in &rule.items {
-                match &item.kind {
-                    BlockItemKind::Clause { keyword, value } if keyword == "ensures" => {
-                        collect_call_names(value, &mut emitted);
-                    }
-                    BlockItemKind::ForBlock { items, .. } => {
-                        for sub in items {
-                            collect_call_names_from_item(&sub.kind, &mut emitted);
-                        }
-                    }
-                    BlockItemKind::IfBlock { branches, else_items, .. } => {
-                        for b in branches {
-                            for sub in &b.items {
-                                collect_call_names_from_item(&sub.kind, &mut emitted);
-                            }
-                        }
-                        if let Some(items) = else_items {
-                            for sub in items {
-                                collect_call_names_from_item(&sub.kind, &mut emitted);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+                collect_emitted_trigger_from_item(&item.kind, &mut emitted);
             }
         }
 
@@ -1067,24 +1047,49 @@ impl Ctx<'_> {
     }
 }
 
-fn collect_call_names_from_item<'a>(kind: &'a BlockItemKind, out: &mut HashSet<&'a str>) {
+/// Collect emitted triggers from block items, only looking at ensures clauses
+/// and recursing into for/if blocks for nested ensures.
+fn collect_emitted_trigger_from_item<'a>(kind: &'a BlockItemKind, out: &mut HashSet<&'a str>) {
     match kind {
-        BlockItemKind::Clause { value, .. } => collect_call_names(value, out),
+        BlockItemKind::Clause { keyword, value } if keyword == "ensures" => {
+            collect_leading_ensures_call(value, out);
+        }
         BlockItemKind::ForBlock { items, .. } => {
             for item in items {
-                collect_call_names_from_item(&item.kind, out);
+                collect_emitted_trigger_from_item(&item.kind, out);
             }
         }
         BlockItemKind::IfBlock { branches, else_items, .. } => {
             for b in branches {
                 for item in &b.items {
-                    collect_call_names_from_item(&item.kind, out);
+                    collect_emitted_trigger_from_item(&item.kind, out);
                 }
             }
             if let Some(items) = else_items {
                 for item in items {
-                    collect_call_names_from_item(&item.kind, out);
+                    collect_emitted_trigger_from_item(&item.kind, out);
                 }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract only the leading PascalCase call from an ensures expression,
+/// matching the TS regex which captures only the first identifier followed
+/// by `(` after `ensures:`.
+fn collect_leading_ensures_call<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
+    match expr {
+        Expr::Call { function, .. } => {
+            if let Expr::Ident(id) = function.as_ref() {
+                if starts_uppercase(&id.name) {
+                    out.insert(&id.name);
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            if let Some(first) = items.first() {
+                collect_leading_ensures_call(first, out);
             }
         }
         _ => {}
@@ -1846,6 +1851,39 @@ impl Ctx<'_> {
                     _ => {}
                 }
             }
+
+            // Rules with bare entity bindings (e.g. `when: state: ClerkEventState`)
+            // have an invalid trigger form. The binding name is syntactically present
+            // but doesn't resolve to a meaningful type. Flag the first usage.
+            for item in &rule.items {
+                let BlockItemKind::Clause { keyword, value } = &item.kind else { continue };
+                if keyword != "when" { continue }
+                let Expr::Binding { name: binding_name, value: trigger_value, .. } = value else { continue };
+                if !matches!(trigger_value.as_ref(), Expr::Ident(id) if starts_uppercase(&id.name)) {
+                    continue;
+                }
+                // Find the first requires/ensures clause that references this binding
+                let mut found = false;
+                for check_item in &rule.items {
+                    let BlockItemKind::Clause { keyword: kw, value: v } = &check_item.kind else { continue };
+                    if kw != "requires" && kw != "ensures" { continue }
+                    if expr_contains_ident(v, &binding_name.name) {
+                        self.push(
+                            Diagnostic::error(
+                                check_item.span,
+                                format!(
+                                    "Rule '{rule_name}' references '{}' but no matching binding exists in context, trigger params, default instances, or local lets.",
+                                    binding_name.name
+                                ),
+                            )
+                            .with_code("allium.rule.undefinedBinding"),
+                        );
+                        found = true;
+                        break;
+                    }
+                }
+                if found { break; }
+            }
         }
     }
 }
@@ -1905,9 +1943,33 @@ fn check_unbound_roots(
             check_unbound_roots(right, bound, rule_name, diagnostics);
         }
         Expr::Block { items, .. } => {
+            let mut block_bound = bound.clone();
             for item in items {
-                check_unbound_roots(item, bound, rule_name, diagnostics);
+                if let Expr::LetExpr { name, value, .. } = item {
+                    check_unbound_roots(value, &block_bound, rule_name, diagnostics);
+                    block_bound.insert(name.name.as_str());
+                } else {
+                    check_unbound_roots(item, &block_bound, rule_name, diagnostics);
+                }
             }
+        }
+        Expr::For { binding, collection, body, .. } => {
+            check_unbound_roots(collection, bound, rule_name, diagnostics);
+            // Skip filter (where clause) — fields are implicitly scoped to the binding
+            let mut inner = bound.clone();
+            match binding {
+                ForBinding::Single(id) => { inner.insert(id.name.as_str()); }
+                ForBinding::Destructured(ids, _) => {
+                    for id in ids {
+                        inner.insert(id.name.as_str());
+                    }
+                }
+            }
+            check_unbound_roots(body, &inner, rule_name, diagnostics);
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            check_unbound_roots(left, bound, rule_name, diagnostics);
+            check_unbound_roots(right, bound, rule_name, diagnostics);
         }
         Expr::Call { function, args, .. } => {
             // Don't descend into function position for member access (Entity.method)
@@ -2007,8 +2069,51 @@ impl Ctx<'_> {
                         self.check_duplicate_lets_in_items(items, seen);
                     }
                 }
+                BlockItemKind::Clause { value, .. } => {
+                    self.check_duplicate_lets_in_expr(value, seen);
+                }
                 _ => {}
             }
+        }
+    }
+
+    fn check_duplicate_lets_in_expr<'b>(
+        &mut self,
+        expr: &'b Expr,
+        seen: &mut HashMap<&'b str, Span>,
+    ) {
+        match expr {
+            Expr::LetExpr { name, value, .. } => {
+                if seen.contains_key(name.name.as_str()) {
+                    self.push(
+                        Diagnostic::error(
+                            name.span,
+                            format!("Duplicate let binding '{}' in this rule.", name.name),
+                        )
+                        .with_code("allium.let.duplicateBinding"),
+                    );
+                } else {
+                    seen.insert(&name.name, name.span);
+                }
+                self.check_duplicate_lets_in_expr(value, seen);
+            }
+            Expr::Block { items, .. } => {
+                for item in items {
+                    self.check_duplicate_lets_in_expr(item, seen);
+                }
+            }
+            Expr::For { body, .. } => {
+                self.check_duplicate_lets_in_expr(body, seen);
+            }
+            Expr::Conditional { branches, else_body, .. } => {
+                for b in branches {
+                    self.check_duplicate_lets_in_expr(&b.body, seen);
+                }
+                if let Some(body) = else_body {
+                    self.check_duplicate_lets_in_expr(body, seen);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -2026,10 +2131,6 @@ impl Ctx<'_> {
                     config_params.insert(&name.name);
                 }
             }
-        }
-
-        if config_params.is_empty() {
-            return;
         }
 
         // Walk all expressions looking for config.field references
@@ -2092,7 +2193,7 @@ impl Ctx<'_> {
                 if let Expr::Ident(id) = object.as_ref() {
                     if id.name == "config" && !params.contains(field.name.as_str()) {
                         self.push(
-                            Diagnostic::error(
+                            Diagnostic::warning(
                                 field.span,
                                 format!(
                                     "Config reference 'config.{}' is not declared in any config block.",
@@ -2141,6 +2242,19 @@ impl Ctx<'_> {
                 if let Some(body) = else_body {
                     self.check_config_refs_in_expr(body, params);
                 }
+            }
+            Expr::For { collection, filter, body, .. } => {
+                self.check_config_refs_in_expr(collection, params);
+                if let Some(f) = filter {
+                    self.check_config_refs_in_expr(f, params);
+                }
+                self.check_config_refs_in_expr(body, params);
+            }
+            Expr::LetExpr { value, .. } => {
+                self.check_config_refs_in_expr(value, params);
+            }
+            Expr::Lambda { body, .. } => {
+                self.check_config_refs_in_expr(body, params);
             }
             _ => {}
         }
