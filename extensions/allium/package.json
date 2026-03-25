@@ -188,7 +188,7 @@
   },
   "scripts": {
     "build": "tsc -p ./tsconfig.json",
-    "bundle": "esbuild src/extension.ts --bundle --platform=node --target=node20 --external:vscode --outfile=dist/extension.js",
+    "bundle": "esbuild src/extension.ts --bundle --platform=node --target=node20 --external:vscode --external:allium-parser-wasm --outfile=dist/extension.js",
     "bundle-lsp": "node -e \"const {existsSync,mkdirSync,copyFileSync}=require('fs');const src='../../packages/allium-lsp/dist/bin.js';if(existsSync(src)){mkdirSync('dist',{recursive:true});copyFileSync(src,'dist/allium-lsp.js');console.log('Bundled allium-lsp into dist/allium-lsp.js');}else{console.warn('allium-lsp not yet built, skipping. Run: npm run build -w packages/allium-lsp');}\"",
     "bundle-wasm": "node -e \"const {mkdirSync,copyFileSync}=require('fs');const p='../../packages/allium-parser-wasm';mkdirSync('dist',{recursive:true});copyFileSync(p+'/allium_wasm.js','dist/allium_wasm.js');copyFileSync(p+'/allium_wasm_bg.wasm','dist/allium_wasm_bg.wasm');console.log('Bundled allium-parser-wasm into dist/')\"",
     "build:release": "npm run build && npm run bundle && npm run bundle-lsp && npm run bundle-wasm",
@@ -200,6 +200,7 @@
     "trace:allium": "npm run build && node ./dist/src/trace.js"
   },
   "dependencies": {
+    "allium-parser-wasm": "*",
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
