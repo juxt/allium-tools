@@ -14,7 +14,7 @@ let _parse: ((source: string) => string) | undefined;
 function getWasmParse(): (source: string) => string {
 	if (!_parse) {
 		// eslint-disable-next-line @typescript-eslint/no-require-imports
-		_parse = require("allium-parser-wasm").parse;
+		_parse = require(__dirname + "/allium_wasm.js").parse;
 	}
 	return _parse!;
 }
