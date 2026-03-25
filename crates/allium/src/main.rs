@@ -86,13 +86,21 @@ fn cmd_check(args: &[String]) -> ExitCode {
         };
 
         let result = allium_parser::parse(&source);
+        let analysis_diagnostics = allium_parser::analyze(&result.module);
         let source_map = SourceMap::new(&source);
 
-        for d in &result.diagnostics {
+        let all_diagnostics: Vec<&allium_parser::Diagnostic> = result
+            .diagnostics
+            .iter()
+            .chain(analysis_diagnostics.iter())
+            .collect();
+
+        for d in all_diagnostics {
             let (line, col) = source_map.line_col(d.span.start);
             let severity = match d.severity {
                 Severity::Error => "error",
                 Severity::Warning => "warning",
+                Severity::Info => "info",
             };
             println!(
                 "{}:{}:{}: {severity}: {}",
@@ -106,6 +114,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
             match d.severity {
                 Severity::Error => total_errors += 1,
                 Severity::Warning => total_warnings += 1,
+                Severity::Info => {}
             }
         }
     }

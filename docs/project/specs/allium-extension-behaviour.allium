@@ -307,9 +307,21 @@ rule EmptyEnumIsWarning {
 rule DiscriminatorMustResolveToVariants {
     when: EntityDiscriminatorParsed(entity, discriminator)
     requires: discriminator.names include name_without_matching_variant_declaration
+    requires: discriminator.has_at_least_one_declared_variant = true
 
     ensures: Finding.created(
     code: "allium.sum.discriminatorUnknownVariant",
+    severity: error
+    )
+}
+
+rule V1InlineEnumSyntaxIsError {
+    when: EntityDiscriminatorParsed(entity, discriminator)
+    requires: discriminator.all_names_missing_variant_declarations = true
+    requires: discriminator.base_entity_has_zero_variant_declarations = true
+
+    ensures: Finding.created(
+    code: "allium.sum.v1InlineEnum",
     severity: error
     )
 }
@@ -442,6 +454,7 @@ rule VariantDeclarationRequiresVariantKeyword {
     rule UnreachableStatusValueIsWarning {
         when: EntityStatusEnumParsed(entity_status)
         requires: entity_status.value_not_assigned_by_any_rule_ensures = true
+        requires: entity_status.no_rule_assigns_status_from_variable = true
 
         ensures: Finding.created(
         code: "allium.status.unreachableValue",
@@ -453,6 +466,7 @@ rule VariantDeclarationRequiresVariantKeyword {
         when: EntityStatusEnumParsed(entity_status)
         requires: entity_status.is_non_terminal = true
         requires: entity_status.has_no_observed_transition_exit = true
+        requires: entity_status.no_rule_assigns_status_from_variable = true
 
         ensures: Finding.created(
         code: "allium.status.noExit",
@@ -527,7 +541,8 @@ rule VariantDeclarationRequiresVariantKeyword {
 
         ensures: Finding.created(
         code: "allium.externalEntity.missingSourceHint",
-        severity: warning
+        severity: warning when entity.referenced_in_rule_logic = false,
+        severity: info when entity.referenced_in_rule_logic = true
         )
     }
 
@@ -594,22 +609,27 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule UndefinedRelatedSurfaceIsError {
         when: SurfaceBlockParsed(surface)
-        requires: surface.related_references_unknown_surface = true
+        requires: surface.related_clause_surface_name_unknown = true
 
         ensures: Finding.created(
         code: "allium.surface.relatedUndefined",
         severity: error
         )
+        -- related: clauses are parsed as SurfaceName[(binding)] [when guard];
+        -- only the leading surface name is checked, not binding or guard tokens
     }
 
     rule UnusedSurfaceBindingIsWarning {
         when: SurfaceBlockParsed(surface)
         requires: surface.facing_or_context_binding_unused = true
+        requires: surface.binding_name != "_"
 
         ensures: Finding.created(
         code: "allium.surface.unusedBinding",
         severity: warning
         )
+        -- the discard binding _ is explicitly excluded since it signals
+        -- that the binding is intentionally unused
     }
 
     rule UndefinedSurfacePathIsError {

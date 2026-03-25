@@ -377,7 +377,15 @@ function findStatusStateMachineIssues(
       }
       const binding = assignMatch[1];
       const target = assignMatch[2];
-      const entityName = bindingTypes.get(binding);
+      let entityName = bindingTypes.get(binding);
+      if (!entityName) {
+        for (const [name] of statusByEntity) {
+          if (name.toLowerCase() === binding.toLowerCase()) {
+            entityName = name;
+            break;
+          }
+        }
+      }
       if (!entityName || !statusByEntity.has(entityName)) {
         continue;
       }
@@ -409,6 +417,11 @@ function findStatusStateMachineIssues(
   for (const [entityName, values] of statusByEntity.entries()) {
     const assigned = assignedByEntity.get(entityName) ?? new Set<string>();
     const transitions = transitionsByEntity.get(entityName) ?? new Map();
+
+    const hasVariableAssignment = [...assigned].some((v) => !values.has(v));
+    if (hasVariableAssignment) {
+      continue;
+    }
 
     for (const value of values) {
       if (!assigned.has(value)) {
@@ -692,20 +705,36 @@ function findSumTypeIssues(text: string, lineStarts: number[]): Finding[] {
       discriminatorByEntity.set(entity.name, listed);
       const declaredForBase =
         variantsByBase.get(entity.name) ?? new Set<string>();
-      for (const name of field.names) {
-        if (declaredForBase.has(name)) {
-          continue;
-        }
+      const missingVariants = field.names.filter(
+        (name) => !declaredForBase.has(name),
+      );
+      if (
+        missingVariants.length === field.names.length &&
+        declaredForBase.size === 0
+      ) {
         findings.push(
           rangeFinding(
             lineStarts,
             field.startOffset,
             field.startOffset + field.rawNames.length,
-            "allium.sum.discriminatorUnknownVariant",
-            `Entity '${entity.name}' discriminator references '${name}' without matching 'variant ${name} : ${entity.name}'.`,
+            "allium.sum.v1InlineEnum",
+            `Entity '${entity.name}' field '${field.fieldName}' uses capitalised pipe values with no variant declarations. In v3, capitalised values are variant references requiring 'variant X : ${entity.name}' declarations. Use lowercase values for a plain enum.`,
             "error",
           ),
         );
+      } else {
+        for (const name of missingVariants) {
+          findings.push(
+            rangeFinding(
+              lineStarts,
+              field.startOffset,
+              field.startOffset + field.rawNames.length,
+              "allium.sum.discriminatorUnknownVariant",
+              `Entity '${entity.name}' discriminator references '${name}' without matching 'variant ${name} : ${entity.name}'.`,
+              "error",
+            ),
+          );
+        }
       }
     }
   }
@@ -1660,6 +1689,9 @@ function findSurfaceBindingUsageIssues(
     ];
 
     for (const binding of bindings) {
+      if (binding.name === "_") {
+        continue;
+      }
       const usagePattern = new RegExp(
         `\\b${escapeRegex(binding.name)}\\b`,
         "g",
@@ -2305,10 +2337,15 @@ function findExternalEntitySourceHints(
   if (hasImports) {
     return findings;
   }
+  const ruleBlocks = blocks.filter((block) => block.kind === "rule");
   const pattern = /^\s*external\s+entity\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm;
   for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
     const name = match[1];
     const offset = match.index + match[0].indexOf(name);
+    const namePattern = new RegExp(`\\b${escapeRegex(name)}\\b`);
+    const referencedInRules = ruleBlocks.some((rule) =>
+      namePattern.test(rule.body),
+    );
     findings.push(
       rangeFinding(
         lineStarts,
@@ -2316,7 +2353,7 @@ function findExternalEntitySourceHints(
         offset + name.length,
         "allium.externalEntity.missingSourceHint",
         `External entity '${name}' has no obvious governing specification import in this module.`,
-        "warning",
+        referencedInRules ? "info" : "warning",
       ),
     );
   }
@@ -2902,15 +2939,14 @@ function parseRelatedReferences(
         break;
       }
       if (!trimmed.startsWith("--")) {
-        const identifierPattern = /([A-Za-z_][A-Za-z0-9_]*)/g;
-        for (
-          let ident = identifierPattern.exec(line);
-          ident;
-          ident = identifierPattern.exec(line)
-        ) {
+        const clauseMatch = trimmed.match(
+          /^([A-Za-z_][A-Za-z0-9_]*)(?:\s*\(.*\))?(?:\s+when\s+.*)?$/,
+        );
+        if (clauseMatch) {
+          const nameStart = line.indexOf(clauseMatch[1]);
           refs.push({
-            name: ident[1],
-            offsetInBody: cursor + ident.index,
+            name: clauseMatch[1],
+            offsetInBody: cursor + nameStart,
           });
         }
       }

@@ -6,6 +6,7 @@ use crate::Span;
 pub enum Severity {
     Error,
     Warning,
+    Info,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -22,5 +23,9 @@ impl Diagnostic {
 
     pub fn warning(span: Span, message: impl Into<String>) -> Self {
         Self { span, message: message.into(), severity: Severity::Warning }
+    }
+
+    pub fn info(span: Span, message: impl Into<String>) -> Self {
+        Self { span, message: message.into(), severity: Severity::Info }
     }
 }

@@ -820,3 +820,71 @@ test("accepts transitions_to trigger shape", () => {
   );
   assert.equal(findings.filter((f) => f.code === "allium.rule.unknownTrigger").length, 0);
 });
+
+// Fix 1: related: clause parsing extracts only the surface name
+test("related clause with parenthesised binding and when guard only reports surface name", () => {
+  const findings = analyzeAllium(
+    `surface QuoteVersions {\n  facing user: User\n}\n\nsurface Dashboard {\n  facing user: User\n  related:\n    QuoteVersions(quote) when quote.version_count > 1\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.surface.relatedUndefined"),
+    false,
+  );
+});
+
+test("related clause with unknown surface still reports error", () => {
+  const findings = analyzeAllium(
+    `surface Dashboard {\n  facing user: User\n  related:\n    MissingSurface(quote) when quote.count > 1\n}\n`,
+  );
+  const related = findings.filter(
+    (f) => f.code === "allium.surface.relatedUndefined",
+  );
+  assert.equal(related.length, 1);
+  assert.ok(related[0].message.includes("MissingSurface"));
+});
+
+// Fix 2: v1 capitalised inline enum detection
+test("reports v1 inline enum when capitalised pipe values have no variant declarations", () => {
+  const findings = analyzeAllium(
+    `entity Quote {\n  status: Quoted | OrderSubmitted | Filled\n}\n`,
+  );
+  assert.ok(findings.some((f) => f.code === "allium.sum.v1InlineEnum"));
+});
+
+// Fix 3: discard binding _ should not warn
+test("does not report unused binding for discard binding _", () => {
+  const findings = analyzeAllium(
+    `surface QuoteFeed {\n  facing _: Service\n  exposes:\n    System.status\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.surface.unusedBinding"),
+    false,
+  );
+});
+
+// Fix 4: variable status assignment suppresses unreachable/noExit
+test("does not report unreachable status when assigned from variable", () => {
+  const findings = analyzeAllium(
+    `entity Quote {\n  status: pending | quoted | filled\n}\n\nrule ApplyStatusUpdate {\n  when: update: Quote.status becomes pending\n  ensures: update.status = new_status\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.status.unreachableValue"),
+    false,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.status.noExit"),
+    false,
+  );
+});
+
+// Fix 5: external entity source hint downgraded when referenced in rules
+test("downgrades external entity source hint to info when referenced in rule logic", () => {
+  const findings = analyzeAllium(
+    `external entity Client {\n  id: String\n}\n\nrule IngestQuote {\n  when: RawQuoteReceived(data)\n  ensures:\n    Client.lookup(data.client_id)\n}\n`,
+  );
+  const hint = findings.find(
+    (f) => f.code === "allium.externalEntity.missingSourceHint",
+  );
+  assert.ok(hint);
+  assert.equal(hint?.severity, "info");
+});

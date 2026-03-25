@@ -14,6 +14,7 @@ These packages share a major.minor version that tracks the Allium language versi
 | allium (Rust CLI) | `crates/allium/Cargo.toml` | Cargo workspace (`Cargo.toml`) |
 | allium-cli (Node) | `packages/allium-cli/package.json` | Hardcoded |
 | allium-lsp | `packages/allium-lsp/package.json` | Hardcoded |
+| allium-vscode | `extensions/allium/package.json` | Hardcoded |
 | tree-sitter-allium | Separate repo: [juxt/tree-sitter-allium](https://github.com/juxt/tree-sitter-allium) | Hardcoded |
 
 The canonical major.minor lives in two places:
@@ -25,11 +26,10 @@ These two must always agree on major.minor.
 
 ### Editor tier: versions independently
 
-Editor plugins are thin integration layers that delegate to the LSP and tree-sitter. They version at their own pace, reflecting their own maturity and feature set.
+External editor plugins are thin integration layers that delegate to the LSP and tree-sitter. They version at their own pace, reflecting their own maturity and feature set.
 
 | Package | Manifest |
 |---|---|
-| allium-vscode | `extensions/allium/package.json` |
 | allium-mode | Separate repo: [juxt/allium-mode](https://github.com/juxt/allium-mode) |
 | nvim-allium | Separate repo: [juxt/nvim-allium](https://github.com/juxt/nvim-allium) |
 

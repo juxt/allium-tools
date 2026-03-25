@@ -46,6 +46,7 @@ TARGETS=(
   # Core-tier npm packages
   "packages/allium-cli/package.json"
   "packages/allium-lsp/package.json"
+  "extensions/allium/package.json"
 )
 
 update_json_version() {
