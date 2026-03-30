@@ -2,6 +2,9 @@
 set -euo pipefail
 
 # Update the Homebrew formula with checksums from a GitHub release.
+# CI handles this automatically during normal releases (see
+# .github/workflows/release-artifacts.yml). This script is a manual
+# fallback if the CI job fails.
 #
 # Usage:
 #   ./scripts/update-homebrew-formula.sh [--dry-run] <version> [tap-path]

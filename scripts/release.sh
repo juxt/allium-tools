@@ -128,43 +128,11 @@ else
 fi
 echo ""
 
-# ── Step 4: Publish to crates.io ────────────────────────────────────
-
-echo "==> Publishing to crates.io"
-run cargo publish -p allium-parser
-run cargo publish -p allium-cli
-echo ""
-
-# ── Step 5: Update Homebrew formula ─────────────────────────────────
-
-echo "==> Updating Homebrew formula"
-if $DRY_RUN; then
-  "$ROOT/scripts/update-homebrew-formula.sh" --dry-run "$VERSION"
-else
-  "$ROOT/scripts/update-homebrew-formula.sh" "$VERSION"
-fi
-echo ""
-
-# ── Step 6: Push Homebrew tap ───────────────────────────────────────
-
-TAP_PATH="$(cd "$ROOT/.." && pwd)/homebrew-allium"
-
-echo "==> Pushing Homebrew tap"
-if [[ ! -d "$TAP_PATH" ]]; then
-  echo "  Warning: tap not found at $TAP_PATH, skipping."
-  echo "  Push the formula update manually."
-else
-  run git -C "$TAP_PATH" add -A
-  run git -C "$TAP_PATH" commit -m "allium $VERSION"
-  run git -C "$TAP_PATH" push
-fi
-echo ""
-
 # ── Done ─────────────────────────────────────────────────────────────
 
 echo "Release $TAG complete."
 echo ""
 echo "Published:"
 echo "  - GitHub release: https://github.com/juxt/allium-tools/releases/tag/$TAG"
-echo "  - crates.io:      https://crates.io/crates/allium-cli/$VERSION"
-echo "  - Homebrew:        brew upgrade allium"
+echo "  - crates.io:      updated automatically by CI"
+echo "  - Homebrew:        updated automatically by CI"
