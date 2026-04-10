@@ -56,11 +56,64 @@ jobs:
           name: allium-${{ matrix.target }}
           path: allium-${{ matrix.target }}.tar.gz
 
-      - name: Publish GitHub release asset
-        if: startsWith(github.ref, 'refs/tags/')
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Build WASM parser
+        run: |
+          cargo install wasm-pack
+          wasm-pack build crates/allium-wasm --target nodejs --out-dir ../../packages/allium-parser-wasm
+          node -e "const p=require('./packages/allium-parser-wasm/package.json');p.name='allium-parser-wasm';p.scripts={build:'echo ok',test:'echo ok',lint:'echo ok'};require('fs').writeFileSync('./packages/allium-parser-wasm/package.json',JSON.stringify(p,null,2)+'\n')"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Build release artifacts
+        run: npm run release:artifacts
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: allium-release-artifacts
+          path: artifacts/*
+
+  publish-release:
+    needs: [rust-binaries, build-and-release]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: allium-${{ matrix.target }}.tar.gz
+          files: |
+            artifacts/allium-*/*.tar.gz
+            artifacts/allium-release-artifacts/*
 
   publish-crates:
     needs: rust-binaries
@@ -128,50 +181,3 @@ jobs:
           git add "$FORMULA"
           git commit -m "allium ${VERSION}"
           git push
-
-  build-and-release:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-
-      - name: Build WASM parser
-        run: |
-          cargo install wasm-pack
-          wasm-pack build crates/allium-wasm --target nodejs --out-dir ../../packages/allium-parser-wasm
-          node -e "const p=require('./packages/allium-parser-wasm/package.json');p.name='allium-parser-wasm';p.scripts={build:'echo ok',test:'echo ok',lint:'echo ok'};require('fs').writeFileSync('./packages/allium-parser-wasm/package.json',JSON.stringify(p,null,2)+'\n')"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Test
-        run: npm run test
-
-      - name: Build release artifacts
-        run: npm run release:artifacts
-
-      - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: allium-release-artifacts
-          path: artifacts/*
-
-      - name: Publish GitHub release assets
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/*
