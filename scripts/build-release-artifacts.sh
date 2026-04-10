@@ -36,9 +36,10 @@ echo "Packaging allium-lsp binary..."
 LSP_TARBALL="allium-lsp-${VERSION}.tar.gz"
 (
   cd "$ROOT_DIR/packages/allium-lsp"
-  mkdir -p /tmp/allium-lsp-release
-  cp dist/bin.js /tmp/allium-lsp-release/allium-lsp
-  chmod +x /tmp/allium-lsp-release/allium-lsp
+  mkdir -p /tmp/allium-lsp-release/allium-lsp
+  cp dist/bin.js /tmp/allium-lsp-release/allium-lsp/allium-lsp
+  cp dist/allium_wasm.js dist/allium_wasm_bg.wasm /tmp/allium-lsp-release/allium-lsp/
+  chmod +x /tmp/allium-lsp-release/allium-lsp/allium-lsp
   tar -czf "$ARTIFACT_DIR/$LSP_TARBALL" -C /tmp/allium-lsp-release allium-lsp
   rm -rf /tmp/allium-lsp-release
 )
