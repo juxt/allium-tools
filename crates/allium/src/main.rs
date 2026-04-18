@@ -6,34 +6,143 @@ use allium_parser::lexer::SourceMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+const HELP: &str = "\
+allium - validate, parse and analyse Allium specification files
+
+Usage: allium <command> [arguments]
+       allium [-h | --help] [-V | --version]
+
+Commands:
+  check    Validate spec files and report diagnostics
+  parse    Parse a spec file and print the AST as JSON
+  plan     Derive test obligations from a spec
+  model    Extract the domain model as structured data
+  help     Print help for the CLI or for a specific command
+
+Options:
+  -h, --help     Show this help message and exit
+  -V, --version  Print version information and exit
+
+Run `allium help <command>` or `allium <command> --help` for per-command help.
+";
+
+const CHECK_HELP: &str = "\
+allium check - validate spec files and report diagnostics
+
+Usage: allium check <path>...
+
+Each <path> is a .allium file or a directory. Directories are searched
+recursively for .allium files. Findings are printed one per line as:
+  <path>:<line>:<column>: <severity> <code> <message>
+
+Exit codes:
+  0  No errors or warnings
+  1  One or more errors or warnings were reported
+  2  No inputs provided, or no .allium files could be resolved
+";
+
+const PARSE_HELP: &str = "\
+allium parse - parse a spec file and print the AST as JSON
+
+Usage: allium parse <file.allium>
+
+Prints a JSON document describing the parsed module and any diagnostics
+produced during parsing.
+";
+
+const PLAN_HELP: &str = "\
+allium plan - derive test obligations from a spec
+
+Usage: allium plan <file.allium>
+
+Prints a JSON document describing the test plan implied by the spec,
+including invariants, rule pre- and post-conditions, and transitions.
+";
+
+const MODEL_HELP: &str = "\
+allium model - extract the domain model as structured data
+
+Usage: allium model <file.allium>
+
+Prints a JSON document describing entities, value types and generators
+derived from the spec.
+";
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
-        eprintln!("Usage: allium check <file.allium>...");
-        eprintln!("       allium check <directory>");
-        eprintln!("       allium parse <file.allium>");
-        eprintln!("       allium plan <file.allium>");
-        eprintln!("       allium model <file.allium>");
-        eprintln!("       allium --version");
+    if args.is_empty() {
+        eprintln!("allium: missing command");
+        eprintln!("Run `allium --help` for usage.");
         return ExitCode::from(2);
     }
 
-    if args[0] == "--version" || args[0] == "-V" {
-        println!("allium {} (language versions: 1, 2, 3)", env!("CARGO_PKG_VERSION"));
-        return ExitCode::SUCCESS;
+    match args[0].as_str() {
+        "--help" | "-h" => {
+            print!("{HELP}");
+            return ExitCode::SUCCESS;
+        }
+        "--version" | "-V" => {
+            println!(
+                "allium {} (language versions: 1, 2, 3)",
+                env!("CARGO_PKG_VERSION")
+            );
+            return ExitCode::SUCCESS;
+        }
+        "help" => return cmd_help(&args[1..]),
+        _ => {}
     }
 
-    match args[0].as_str() {
-        "check" => cmd_check(&args[1..]),
-        "parse" => cmd_parse(&args[1..]),
-        "plan" => cmd_plan(&args[1..]),
-        "model" => cmd_model(&args[1..]),
+    let subcommand = args[0].as_str();
+    let rest = &args[1..];
+
+    match subcommand {
+        "check" | "parse" | "plan" | "model" => {
+            if rest.iter().any(|a| a == "--help" || a == "-h") {
+                print!("{}", subcommand_help(subcommand));
+                return ExitCode::SUCCESS;
+            }
+            match subcommand {
+                "check" => cmd_check(rest),
+                "parse" => cmd_parse(rest),
+                "plan" => cmd_plan(rest),
+                "model" => cmd_model(rest),
+                _ => unreachable!(),
+            }
+        }
         other => {
-            eprintln!("Unknown command: {other}");
-            eprintln!("Available commands: check, parse, plan, model");
+            eprintln!("allium: unknown command `{other}`");
+            eprintln!("Run `allium --help` for available commands.");
             ExitCode::from(2)
         }
+    }
+}
+
+fn cmd_help(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        None => {
+            print!("{HELP}");
+            ExitCode::SUCCESS
+        }
+        Some("check") | Some("parse") | Some("plan") | Some("model") => {
+            print!("{}", subcommand_help(args[0].as_str()));
+            ExitCode::SUCCESS
+        }
+        Some(other) => {
+            eprintln!("allium: unknown command `{other}`");
+            eprintln!("Run `allium --help` for available commands.");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn subcommand_help(name: &str) -> &'static str {
+    match name {
+        "check" => CHECK_HELP,
+        "parse" => PARSE_HELP,
+        "plan" => PLAN_HELP,
+        "model" => MODEL_HELP,
+        _ => HELP,
     }
 }
 

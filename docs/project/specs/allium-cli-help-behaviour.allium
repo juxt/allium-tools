@@ -1,0 +1,69 @@
+-- allium: 1
+-- allium-cli-help-behaviour.allium
+-- Scope: Top-level `allium` CLI dispatch and help behaviour (crates/allium).
+-- Includes:
+--   - --help / -h / help dispatch
+--   - Per-subcommand help
+--   - Exit codes and stream (stdout/stderr) routing
+--   - Missing-command and unknown-command handling
+-- Excludes:
+--   - Behaviour of individual subcommands (see allium-check-tool-behaviour.allium etc.)
+--   - Node-based standalone CLIs (allium-check, allium-format, allium-trace, allium-drift, allium-diagram)
+
+rule HelpFlagPrintsRootHelpToStdout {
+    when: AlliumInvokedWithHelpFlag()
+
+    ensures: RootHelpPrintedTo(stream: stdout)
+    ensures: ProcessExit(code: 0)
+}
+
+rule HelpSubcommandWithoutTopicPrintsRootHelp {
+    when: AlliumInvokedWithHelpSubcommandAndNoTopic()
+
+    ensures: RootHelpPrintedTo(stream: stdout)
+    ensures: ProcessExit(code: 0)
+}
+
+rule HelpSubcommandForKnownCommandPrintsCommandHelp {
+    when: AlliumInvokedWithHelpSubcommandAndKnownTopic()
+
+    ensures: CommandHelpPrintedTo(stream: stdout)
+    ensures: ProcessExit(code: 0)
+}
+
+rule SubcommandHelpFlagPrintsCommandHelp {
+    when: AlliumInvokedWithKnownCommandAndHelpFlag()
+
+    ensures: CommandHelpPrintedTo(stream: stdout)
+    ensures: ProcessExit(code: 0)
+}
+
+rule MissingCommandPrintsHintToStderr {
+    when: AlliumInvokedWithoutArgs()
+
+    ensures: MissingCommandMessagePrintedTo(stream: stderr)
+    ensures: HelpHintPrintedTo(stream: stderr)
+    ensures: ProcessExit(code: 2)
+}
+
+rule UnknownCommandPrintsHintToStderr {
+    when: AlliumInvokedWithUnknownCommand()
+
+    ensures: UnknownCommandMessagePrintedTo(stream: stderr)
+    ensures: HelpHintPrintedTo(stream: stderr)
+    ensures: ProcessExit(code: 2)
+}
+
+rule HelpSubcommandForUnknownCommandFails {
+    when: AlliumInvokedWithHelpSubcommandAndUnknownTopic()
+
+    ensures: UnknownCommandMessagePrintedTo(stream: stderr)
+    ensures: ProcessExit(code: 2)
+}
+
+rule VersionFlagPrintsVersionToStdout {
+    when: AlliumInvokedWithVersionFlag()
+
+    ensures: VersionPrintedTo(stream: stdout)
+    ensures: ProcessExit(code: 0)
+}
