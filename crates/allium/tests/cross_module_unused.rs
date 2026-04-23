@@ -118,6 +118,124 @@ fn cross_module_ref_suppresses_unused_entity() {
     );
 }
 
+// -----------------------------------------------------------------------
+// Unqualified entity references in rule bodies
+// -----------------------------------------------------------------------
+
+#[test]
+fn unqualified_entity_ref_in_rule_suppresses_unused() {
+    let dir = TempDir::new("unqualified-rule");
+    dir.write("core.allium", "-- allium: 3\nentity InputPartition {\n  current_offset: Integer\n}\n");
+    dir.write(
+        "usher.allium",
+        "-- allium: 3\nuse \"./core.allium\" as core\n\nrule Advance {\n  when: record: Record\n  ensures: InputPartition.current_offset = record.offset\n}\n",
+    );
+
+    let output = allium()
+        .args(["check", dir.path().to_str().unwrap()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diags = parse_diagnostics(&stdout);
+
+    assert!(
+        !diags.iter().any(|d| d.code == "allium.entity.unused" && d.message.contains("InputPartition")),
+        "InputPartition referenced unqualified in rule body should not be flagged.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+}
+
+// -----------------------------------------------------------------------
+// Dot-notation alias.Type references in surface exposes
+// -----------------------------------------------------------------------
+
+#[test]
+fn alias_dot_member_ref_suppresses_unused() {
+    let dir = TempDir::new("alias-dot");
+    dir.write("core.allium", "-- allium: 3\nentity EntityMap {\n  entries: Set<String>\n}\n");
+    dir.write(
+        "surface.allium",
+        "-- allium: 3\nuse \"./core.allium\" as core\n\nsurface Dashboard {\n  facing user: User\n  exposes:\n    core.EntityMap\n}\n",
+    );
+
+    let output = allium()
+        .args(["check", dir.path().to_str().unwrap()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diags = parse_diagnostics(&stdout);
+
+    assert!(
+        !diags.iter().any(|d| d.code == "allium.entity.unused" && d.message.contains("EntityMap")),
+        "EntityMap referenced via core.EntityMap should not be flagged.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+}
+
+// -----------------------------------------------------------------------
+// Unqualified type ref in contract signature
+// -----------------------------------------------------------------------
+
+#[test]
+fn unqualified_type_in_contract_suppresses_unused() {
+    let dir = TempDir::new("contract-type");
+    dir.write("core.allium", "-- allium: 3\nentity EntityMap {\n  entries: Set<String>\n}\n\nvalue EventOutcome {\n  success: Boolean\n}\n");
+    dir.write(
+        "contracts.allium",
+        "-- allium: 3\nuse \"./core.allium\" as core\n\ncontract DeterministicEvaluation {\n  evaluate: EntityMap\n}\n",
+    );
+
+    let output = allium()
+        .args(["check", dir.path().to_str().unwrap()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diags = parse_diagnostics(&stdout);
+
+    assert!(
+        !diags.iter().any(|d| d.code == "allium.entity.unused" && d.message.contains("EntityMap")),
+        "EntityMap referenced in contract signature should not be flagged.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+    // EventOutcome is not referenced — should still warn.
+    assert!(
+        diags.iter().any(|d| d.code == "allium.definition.unused" && d.message.contains("EventOutcome")),
+        "EventOutcome is genuinely unused and should still warn.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+}
+
+// -----------------------------------------------------------------------
+// Local declaration shadows import — should not over-suppress
+// -----------------------------------------------------------------------
+
+#[test]
+fn local_declaration_does_not_suppress_imported_same_name() {
+    let dir = TempDir::new("local-shadows");
+    // shared.allium declares Order
+    dir.write("shared.allium", "-- allium: 3\nentity Order {\n  total: Decimal\n}\n");
+    // consumer.allium also declares its own Order locally and references it.
+    // shared's Order is NOT referenced — it should still warn.
+    dir.write(
+        "consumer.allium",
+        "-- allium: 3\nuse \"./shared.allium\" as shared\n\nentity Order {\n  amount: Decimal\n}\n\nrule Process {\n  when: o: Order\n  ensures: o.amount > 0\n}\n",
+    );
+
+    let output = allium()
+        .args(["check", dir.path().to_str().unwrap()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diags = parse_diagnostics(&stdout);
+
+    // shared.allium's Order is not referenced (consumer's Order shadows it).
+    assert!(
+        diags.iter().any(|d| d.code == "allium.entity.unused" && d.message.contains("Order")),
+        "shared's Order should still be flagged — consumer's local Order shadows it.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn cross_module_ref_in_ensures_suppresses_unused() {
     let dir = TempDir::new("suppress-ensures");

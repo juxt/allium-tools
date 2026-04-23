@@ -3643,6 +3643,77 @@ pub fn collect_qualified_references(module: &Module) -> Vec<(String, String)> {
     refs
 }
 
+/// Collect all uppercase identifiers referenced in expressions across a module.
+///
+/// Used by multi-file checking to detect unqualified cross-module references:
+/// a name like `InputPartition` used without a qualifier may resolve to an
+/// imported module if it isn't declared locally.
+pub fn collect_all_referenced_idents(module: &Module) -> HashSet<String> {
+    let mut names: HashSet<&str> = HashSet::new();
+    for d in &module.declarations {
+        match d {
+            Decl::Block(b) => {
+                for item in &b.items {
+                    collect_uppercase_idents_from_item(&item.kind, &mut names);
+                }
+            }
+            Decl::Variant(v) => {
+                if let Some(name) = expr_as_ident(&v.base) {
+                    names.insert(name);
+                }
+                for item in &v.items {
+                    collect_uppercase_idents_from_item(&item.kind, &mut names);
+                }
+            }
+            Decl::Invariant(inv) => {
+                collect_uppercase_idents_from_expr(&inv.body, &mut names);
+            }
+            Decl::Default(def) => {
+                if let Some(tn) = &def.type_name {
+                    names.insert(tn.name.as_str());
+                }
+                collect_uppercase_idents_from_expr(&def.value, &mut names);
+            }
+            _ => {}
+        }
+    }
+    names.into_iter().map(|s| s.to_string()).collect()
+}
+
+/// Collect all type names declared by a module (entities, external entities,
+/// values, enums, actors, contracts, variants).
+///
+/// Used by multi-file checking to determine which declarations from a target
+/// module could be the resolution target for unqualified references in an
+/// importing file.
+pub fn collect_declared_names(module: &Module) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for d in &module.declarations {
+        match d {
+            Decl::Block(b) => {
+                if matches!(
+                    b.kind,
+                    BlockKind::Entity
+                        | BlockKind::ExternalEntity
+                        | BlockKind::Value
+                        | BlockKind::Enum
+                        | BlockKind::Actor
+                        | BlockKind::Contract
+                ) {
+                    if let Some(n) = &b.name {
+                        names.insert(n.name.clone());
+                    }
+                }
+            }
+            Decl::Variant(v) => {
+                names.insert(v.name.name.clone());
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
 fn collect_qrefs_from_item(kind: &BlockItemKind, out: &mut Vec<(String, String)>) {
     match kind {
         BlockItemKind::Clause { value, .. }
@@ -3698,7 +3769,14 @@ fn collect_qrefs_from_expr(expr: &Expr, out: &mut Vec<(String, String)>) {
                 out.push((qualifier.clone(), q.name.clone()));
             }
         }
-        Expr::MemberAccess { object, .. } | Expr::OptionalAccess { object, .. } => {
+        Expr::MemberAccess { object, field, .. }
+        | Expr::OptionalAccess { object, field, .. } => {
+            // Detect alias.TypeName pattern (e.g. core.EntityMap in exposes)
+            if let Expr::Ident(id) = object.as_ref() {
+                if starts_uppercase(&field.name) {
+                    out.push((id.name.clone(), field.name.clone()));
+                }
+            }
             collect_qrefs_from_expr(object, out);
         }
         Expr::Call { function, args, .. } => {
@@ -5170,6 +5248,35 @@ mod tests {
         let result = parse(&input);
         let refs = collect_qualified_references(&result.module);
         assert!(refs.iter().any(|(q, n)| q == "billing" && n == "InvoiceWorkflow"));
+    }
+
+    #[test]
+    fn collect_qualified_refs_from_alias_dot_member() {
+        let src = "use \"./core.allium\" as core\n\nsurface Dashboard {\n  facing user: User\n  exposes:\n    core.EntityMap\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs = collect_qualified_references(&result.module);
+        assert!(refs.iter().any(|(q, n)| q == "core" && n == "EntityMap"));
+    }
+
+    #[test]
+    fn collect_all_idents_includes_unqualified_entity_ref() {
+        let src = "use \"./core.allium\" as core\n\nrule Process {\n  when: r: Record\n  ensures: InputPartition.current_offset = r.offset\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let idents = collect_all_referenced_idents(&result.module);
+        assert!(idents.contains("InputPartition"));
+    }
+
+    #[test]
+    fn collect_declared_names_returns_entity_and_value_names() {
+        let src = "entity Order {\n  x: String\n}\n\nvalue Money {\n  amount: Decimal\n}\n\nenum Status {\n  open\n  closed\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let names = collect_declared_names(&result.module);
+        assert!(names.contains("Order"));
+        assert!(names.contains("Money"));
+        assert!(names.contains("Status"));
     }
 
     #[test]

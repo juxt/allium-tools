@@ -257,12 +257,24 @@ fn run_multi_file(
     if any_issues { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }
 
-/// Build both cross-module maps in a single pass over the parsed files.
+/// Build both cross-module maps by examining all parsed files.
 fn build_cross_module_context(parsed: &[ParsedFile]) -> CrossModuleContext {
     // Set of canonical paths in the check set, for resolving use targets.
     let check_set: HashSet<PathBuf> = parsed
         .iter()
         .map(|pf| canonical_key(&pf.path))
+        .collect();
+
+    // Pre-compute each file's declared names so we can match unqualified
+    // references against imported module declarations.
+    let declared: HashMap<PathBuf, HashSet<String>> = parsed
+        .iter()
+        .map(|pf| {
+            (
+                canonical_key(&pf.path),
+                allium_parser::collect_declared_names(&pf.result.module),
+            )
+        })
         .collect();
 
     let mut external_refs: HashMap<PathBuf, HashSet<String>> = HashMap::new();
@@ -276,8 +288,9 @@ fn build_cross_module_context(parsed: &[ParsedFile]) -> CrossModuleContext {
         let file_key = canonical_key(&pf.path);
 
         // Collect use declarations: alias → use-path string, and resolve each
-        // against the check set.
+        // against the check set. Also build alias → canonical target key.
         let mut aliases: HashMap<&str, String> = HashMap::new();
+        let mut alias_targets: HashMap<&str, PathBuf> = HashMap::new();
         let mut resolved_for_file: HashSet<String> = HashSet::new();
 
         for d in &pf.result.module.declarations {
@@ -291,18 +304,38 @@ fn build_cross_module_context(parsed: &[ParsedFile]) -> CrossModuleContext {
                 }
 
                 if let Some(alias) = &u.alias {
+                    alias_targets.insert(alias.name.as_str(), target_key);
                     aliases.insert(alias.name.as_str(), path_text);
                 }
             }
         }
 
-        // Collect qualified references and attribute them to target files.
+        // 1. Qualified references (core/InputEvent) and alias-member
+        //    references (core.EntityMap) — both produce (qualifier, name)
+        //    pairs from collect_qualified_references.
         let qrefs = allium_parser::collect_qualified_references(&pf.result.module);
         for (qualifier, name) in &qrefs {
-            if let Some(use_path) = aliases.get(qualifier.as_str()) {
-                let target = base.join(use_path);
-                let key = canonical_key(&target);
-                external_refs.entry(key).or_default().insert(name.clone());
+            if let Some(target_key) = alias_targets.get(qualifier.as_str()) {
+                external_refs.entry(target_key.clone()).or_default().insert(name.clone());
+            }
+        }
+
+        // 2. Unqualified references — any uppercase ident used in this file
+        //    that matches a declaration in an imported module. This covers
+        //    bare entity names in rule bodies and type names in contract
+        //    signatures. Subtract locally-declared names first so that a
+        //    local declaration doesn't spuriously suppress a same-named
+        //    declaration in an imported module.
+        let all_idents = allium_parser::collect_all_referenced_idents(&pf.result.module);
+        let local_names = allium_parser::collect_declared_names(&pf.result.module);
+        let imported_idents: HashSet<&String> = all_idents.difference(&local_names).collect();
+        for target_key in alias_targets.values() {
+            if let Some(target_decls) = declared.get(target_key) {
+                for name in &imported_idents {
+                    if target_decls.contains(name.as_str()) {
+                        external_refs.entry(target_key.clone()).or_default().insert((*name).clone());
+                    }
+                }
             }
         }
 
