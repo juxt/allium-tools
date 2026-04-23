@@ -794,14 +794,14 @@ fn emit_rule_obligations(plan: &mut TestPlan, block: &BlockDecl, ctx: &ModuleCon
     });
 
     // Walk items for specific obligations
-    walk_rule_items(plan, &name, &block.items, block.span, &deps);
+    walk_rule_items(plan, &name, &block.items, &deps);
 }
 
-fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _block_span: Span, deps: &RuleDependencies) {
-    walk_rule_items_inner(plan, rule_name, items, _block_span, deps, &mut 0, &mut 0);
+fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], deps: &RuleDependencies) {
+    walk_rule_items_inner(plan, rule_name, items, deps, &mut 0, &mut 0);
 }
 
-fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], _block_span: Span, deps: &RuleDependencies, failure_ordinal: &mut u32, creation_ordinal: &mut u32) {
+fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], deps: &RuleDependencies, failure_ordinal: &mut u32, creation_ordinal: &mut u32) {
     for item in items {
         match &item.kind {
             BlockItemKind::Clause { keyword, .. } if keyword == "requires" => {
@@ -874,14 +874,14 @@ fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockIte
                 }
             }
             BlockItemKind::ForBlock { items, .. } => {
-                walk_rule_items_inner(plan, rule_name, items, _block_span, deps, failure_ordinal, creation_ordinal);
+                walk_rule_items_inner(plan, rule_name, items, deps, failure_ordinal, creation_ordinal);
             }
             BlockItemKind::IfBlock { branches, else_items } => {
                 for branch in branches {
-                    walk_rule_items_inner(plan, rule_name, &branch.items, _block_span, deps, failure_ordinal, creation_ordinal);
+                    walk_rule_items_inner(plan, rule_name, &branch.items, deps, failure_ordinal, creation_ordinal);
                 }
                 if let Some(else_items) = else_items {
-                    walk_rule_items_inner(plan, rule_name, else_items, _block_span, deps, failure_ordinal, creation_ordinal);
+                    walk_rule_items_inner(plan, rule_name, else_items, deps, failure_ordinal, creation_ordinal);
                 }
             }
             _ => {}

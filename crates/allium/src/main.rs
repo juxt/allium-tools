@@ -1,4 +1,4 @@
-mod generators;
+mod domain_model;
 mod test_plan;
 
 use allium_parser::diagnostic::Severity;
@@ -165,7 +165,127 @@ fn subcommand_help(name: &str) -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Multi-file commands: check, analyse
+// ---------------------------------------------------------------------------
+
+/// Per-file analysis result fed back from the closure to the multi-file loop.
+struct FileResult {
+    diagnostics: Vec<serde_json::Value>,
+    findings: Vec<serde_json::Value>,
+    has_issues: bool,
+}
+
+/// Shared loop for commands that process multiple .allium files.
+fn run_multi_file(
+    command: &str,
+    args: &[String],
+    analyse_file: impl Fn(&Path, &str, &allium_parser::ParseResult, &SourceMap) -> FileResult,
+) -> ExitCode {
+    let files = resolve_files(args);
+    if files.is_empty() {
+        eprintln!("No .allium files found.");
+        return ExitCode::from(2);
+    }
+
+    let mut any_issues = false;
+
+    for path in &files {
+        let source = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{}: {e}", path.display());
+                any_issues = true;
+                continue;
+            }
+        };
+
+        let result = allium_parser::parse(&source);
+        let source_map = SourceMap::new(&source);
+        let file_result = analyse_file(path, &source, &result, &source_map);
+
+        if file_result.has_issues {
+            any_issues = true;
+        }
+
+        let output = serde_json::json!({
+            "command": command,
+            "spec_file": path.display().to_string(),
+            "diagnostics": file_result.diagnostics,
+            "findings": file_result.findings,
+        });
+
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+    }
+
+    if any_issues { ExitCode::from(1) } else { ExitCode::SUCCESS }
+}
+
+fn cmd_check(args: &[String]) -> ExitCode {
+    run_multi_file("check", args, |path, source, result, source_map| {
+        let analysis = allium_parser::analyze(&result.module, source);
+        let diagnostics: Vec<serde_json::Value> = result
+            .diagnostics
+            .iter()
+            .chain(analysis.iter())
+            .map(|d| diagnostic_to_json(d, path, source_map))
+            .collect();
+        let has_issues = diagnostics.iter().any(|d| {
+            d["severity"] == "error" || d["severity"] == "warning"
+        });
+        FileResult { diagnostics, findings: vec![], has_issues }
+    })
+}
+
+fn cmd_analyse(args: &[String]) -> ExitCode {
+    run_multi_file("analyse", args, |path, source, result, source_map| {
+        let analyse_result = allium_parser::analyse(&result.module, source);
+        let diagnostics: Vec<serde_json::Value> = result
+            .diagnostics
+            .iter()
+            .chain(analyse_result.diagnostics.iter())
+            .map(|d| diagnostic_to_json(d, path, source_map))
+            .collect();
+        let has_issues = !analyse_result.findings.is_empty();
+        FileResult { diagnostics, findings: analyse_result.findings, has_issues }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Single-file commands: parse, plan, model
+// ---------------------------------------------------------------------------
+
+/// Shared handler for commands that take a single .allium file, parse it, and
+/// print a JSON-serialisable result.
+fn run_single_file(
+    usage: &str,
+    args: &[String],
+    transform: impl FnOnce(&allium_parser::Module, &str) -> serde_json::Value,
+) -> ExitCode {
+    if args.len() != 1 {
+        eprintln!("Usage: {usage}");
+        return ExitCode::from(2);
+    }
+
+    let path = Path::new(&args[0]);
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{}: {e}", path.display());
+            return ExitCode::from(1);
+        }
+    };
+
+    let result = allium_parser::parse(&source);
+    let output = transform(&result.module, &source);
+    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+    ExitCode::SUCCESS
+}
+
 fn cmd_parse(args: &[String]) -> ExitCode {
+    // Parse is slightly different: it serialises the full ParseResult, not a
+    // transform of the module. Keep it inline rather than forcing it through
+    // run_single_file.
     if args.len() != 1 {
         eprintln!("Usage: allium parse <file.allium>");
         return ExitCode::from(2);
@@ -181,121 +301,27 @@ fn cmd_parse(args: &[String]) -> ExitCode {
     };
 
     let result = allium_parser::parse(&source);
-    match serde_json::to_string_pretty(&result) {
-        Ok(json) => {
-            println!("{json}");
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("Failed to serialise AST: {e}");
-            ExitCode::from(1)
-        }
-    }
+    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    ExitCode::SUCCESS
 }
 
-fn cmd_check(args: &[String]) -> ExitCode {
-    let files = resolve_files(args);
-    if files.is_empty() {
-        eprintln!("No .allium files found.");
-        return ExitCode::from(2);
-    }
-
-    let mut has_issues = false;
-
-    for path in &files {
-        let source = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("{}: {e}", path.display());
-                has_issues = true;
-                continue;
-            }
-        };
-
-        let result = allium_parser::parse(&source);
-        let analysis_diagnostics = allium_parser::analyze(&result.module, &source);
-        let source_map = SourceMap::new(&source);
-
-        let diagnostics: Vec<serde_json::Value> = result
-            .diagnostics
-            .iter()
-            .chain(analysis_diagnostics.iter())
-            .map(|d| diagnostic_to_json(d, path, &source_map))
-            .collect();
-
-        if diagnostics.iter().any(|d| {
-            d["severity"] == "error" || d["severity"] == "warning"
-        }) {
-            has_issues = true;
-        }
-
-        let output = serde_json::json!({
-            "command": "check",
-            "spec_file": path.display().to_string(),
-            "diagnostics": diagnostics,
-            "findings": [],
-        });
-
-        println!("{}", serde_json::to_string_pretty(&output).unwrap());
-    }
-
-    if has_issues {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    }
+fn cmd_plan(args: &[String]) -> ExitCode {
+    run_single_file("allium plan <file.allium>", args, |module, source| {
+        let plan = test_plan::generate_test_plan(module, source);
+        serde_json::to_value(plan).unwrap()
+    })
 }
 
-fn cmd_analyse(args: &[String]) -> ExitCode {
-    let files = resolve_files(args);
-    if files.is_empty() {
-        eprintln!("No .allium files found.");
-        return ExitCode::from(2);
-    }
-
-    let mut has_findings = false;
-
-    for path in &files {
-        let source = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("{}: {e}", path.display());
-                has_findings = true;
-                continue;
-            }
-        };
-
-        let result = allium_parser::parse(&source);
-        let analyse_result = allium_parser::analyse(&result.module, &source);
-        let source_map = SourceMap::new(&source);
-
-        let diagnostics: Vec<serde_json::Value> = result
-            .diagnostics
-            .iter()
-            .chain(analyse_result.diagnostics.iter())
-            .map(|d| diagnostic_to_json(d, path, &source_map))
-            .collect();
-
-        if !analyse_result.findings.is_empty() {
-            has_findings = true;
-        }
-
-        let output = serde_json::json!({
-            "command": "analyse",
-            "spec_file": path.display().to_string(),
-            "diagnostics": diagnostics,
-            "findings": analyse_result.findings,
-        });
-
-        println!("{}", serde_json::to_string_pretty(&output).unwrap());
-    }
-
-    if has_findings {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    }
+fn cmd_model(args: &[String]) -> ExitCode {
+    run_single_file("allium model <file.allium>", args, |module, source| {
+        let model = domain_model::extract_domain_model(module, source);
+        serde_json::to_value(model).unwrap()
+    })
 }
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
 
 fn diagnostic_to_json(
     d: &allium_parser::Diagnostic,
@@ -318,64 +344,6 @@ fn diagnostic_to_json(
             "col": col + 1,
         }
     })
-}
-
-fn cmd_plan(args: &[String]) -> ExitCode {
-    if args.len() != 1 {
-        eprintln!("Usage: allium plan <file.allium>");
-        return ExitCode::from(2);
-    }
-
-    let path = Path::new(&args[0]);
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{}: {e}", path.display());
-            return ExitCode::from(1);
-        }
-    };
-
-    let result = allium_parser::parse(&source);
-    let plan = test_plan::generate_test_plan(&result.module, &source);
-    match serde_json::to_string_pretty(&plan) {
-        Ok(json) => {
-            println!("{json}");
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("Failed to serialise test plan: {e}");
-            ExitCode::from(1)
-        }
-    }
-}
-
-fn cmd_model(args: &[String]) -> ExitCode {
-    if args.len() != 1 {
-        eprintln!("Usage: allium model <file.allium>");
-        return ExitCode::from(2);
-    }
-
-    let path = Path::new(&args[0]);
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{}: {e}", path.display());
-            return ExitCode::from(1);
-        }
-    };
-
-    let result = allium_parser::parse(&source);
-    let spec = generators::generate_generators(&result.module, &source);
-    match serde_json::to_string_pretty(&spec) {
-        Ok(json) => {
-            println!("{json}");
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("Failed to serialise model: {e}");
-            ExitCode::from(1)
-        }
-    }
 }
 
 fn resolve_files(args: &[String]) -> Vec<PathBuf> {

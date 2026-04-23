@@ -1472,7 +1472,6 @@ impl<'s> Parser<'s> {
             self.pos = saved_pos;
             // Check for regular `name: value`
             if self.peek_at(1).kind == TokenKind::Colon {
-                // Nope, the (1) is LParen not Colon. Re-examine.
             }
             // Fall back: treat as `name: value` where value starts with a call
             self.parse_assign_or_clause_item(start)

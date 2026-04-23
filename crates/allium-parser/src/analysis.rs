@@ -40,7 +40,7 @@ pub fn analyze(module: &Module, source: &str) -> Vec<Diagnostic> {
 /// Returns diagnostics and typed findings with evidence.
 pub fn analyse(module: &Module, source: &str) -> crate::diagnostic::AnalyseResult {
     let diagnostics = analyze(module, source);
-    let findings = find_process_issues(module, source);
+    let findings = find_process_issues(module);
     crate::diagnostic::AnalyseResult {
         diagnostics,
         findings,
@@ -124,7 +124,7 @@ impl<'a> EntityInfo<'a> {
 }
 
 /// Compute process-level findings: data flow, reachability, conflicts, invariants.
-fn find_process_issues(module: &Module, _source: &str) -> Vec<crate::diagnostic::Finding> {
+fn find_process_issues(module: &Module) -> Vec<crate::diagnostic::Finding> {
     let mut ctx = Ctx::new(module);
     let info = EntityInfo::from_module(module);
     ctx.collect_process_findings(&info);
@@ -793,13 +793,6 @@ impl Ctx<'_> {
     }
 }
 
-fn status_values_for_binding_simple<'a>(
-    _status_by_entity: &'a HashMap<&'a str, HashSet<&'a str>>,
-) -> HashMap<&'a str, (Vec<&'a Ident>, HashSet<&'a str>)> {
-    // Binding types are resolved from the when clause, not this map
-    HashMap::new()
-}
-
 // ---------------------------------------------------------------------------
 // Finding-producing methods (parallel to the check_* methods above)
 // ---------------------------------------------------------------------------
@@ -900,8 +893,7 @@ impl Ctx<'_> {
                 collect_requires_conditions(
                     value,
                     &binding_types,
-                    &status_values,
-                    &field_types,
+                    status_values,
                     &mut |binding, field, val| {
                         if field == "status" {
                             requires_statuses
@@ -1308,7 +1300,6 @@ impl Ctx<'_> {
             ensures_statuses: HashMap<String, String>,
         }
 
-        let binding_map = status_values_for_binding_simple(&status_by_entity);
         let mut conflict_rules: Vec<ConflictRule> = Vec::new();
 
         for rule in self.blocks(BlockKind::Rule) {
@@ -1316,7 +1307,9 @@ impl Ctx<'_> {
                 Some(n) => n.name.as_str(),
                 None => continue,
             };
-            let binding_types = collect_rule_binding_types(rule, &binding_map);
+            // Conflict detection resolves entities by name matching against
+            // status_by_entity, not through binding types from when clauses.
+            let binding_types = collect_rule_binding_types(rule, &HashMap::new());
 
             let mut trigger_kind = ConflictTriggerKind::Unknown;
             let mut requires_statuses: HashMap<String, HashSet<String>> = HashMap::new();
@@ -1472,7 +1465,6 @@ impl Ctx<'_> {
                             value,
                             &binding_types,
                             &binding_map,
-                            &field_types,
                             &mut |binding, field, val| {
                                 let entity = resolve_binding_entity(
                                     binding,
@@ -2034,7 +2026,6 @@ fn collect_requires_conditions<'a>(
     expr: &'a Expr,
     binding_types: &HashMap<&'a str, &'a str>,
     status_values: &HashMap<&str, (HashSet<&str>, Vec<&Ident>)>,
-    _field_types: &HashMap<&str, HashMap<&str, &str>>,
     cb: &mut impl FnMut(&'a str, &'a str, &'a str),
 ) {
     match expr {
@@ -2069,12 +2060,12 @@ fn collect_requires_conditions<'a>(
             // Comparisons like balance >= amount are not field-value conditions
         }
         Expr::LogicalOp { left, right, .. } => {
-            collect_requires_conditions(left, binding_types, status_values, _field_types, cb);
-            collect_requires_conditions(right, binding_types, status_values, _field_types, cb);
+            collect_requires_conditions(left, binding_types, status_values, cb);
+            collect_requires_conditions(right, binding_types, status_values, cb);
         }
         Expr::Block { items, .. } => {
             for item in items {
-                collect_requires_conditions(item, binding_types, status_values, _field_types, cb);
+                collect_requires_conditions(item, binding_types, status_values, cb);
             }
         }
         _ => {}
