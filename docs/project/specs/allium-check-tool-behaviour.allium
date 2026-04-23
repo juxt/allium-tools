@@ -231,3 +231,23 @@ rule StandaloneCheckerMatchesExtensionRuleSet {
     ensures: FindingObserved(code: "allium.field.unused", severity: info)
     ensures: FindingObserved(code: "allium.rule.unreachableTrigger", severity: info)
 }
+
+rule CrossModuleReferenceSuppressesUnusedWarning {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: inputs resolve to multiple files
+    requires: file_a declares entity_or_value
+    requires: file_b references entity_or_value via qualified name (e.g. alias/Name)
+    requires: file_b has use declaration mapping alias to file_a
+
+    ensures: FindingNotObserved(code: "allium.entity.unused", entity: entity_or_value)
+    ensures: FindingNotObserved(code: "allium.definition.unused", definition: entity_or_value)
+}
+
+rule UnresolvedUsePathWarnsInMultiFileMode {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: file contains use declaration with path
+    requires: path does not resolve to a file in the check set
+
+    ensures: FindingObserved(code: "allium.use.unresolvedPath", severity: warning)
+    ensures: FindingMessage includes path
+}
