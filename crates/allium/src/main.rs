@@ -3,6 +3,7 @@ mod test_plan;
 
 use allium_parser::diagnostic::Severity;
 use allium_parser::lexer::SourceMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -176,11 +177,30 @@ struct FileResult {
     has_issues: bool,
 }
 
+/// A parsed file ready for analysis.
+struct ParsedFile {
+    path: PathBuf,
+    source: String,
+    result: allium_parser::ParseResult,
+}
+
+/// Cross-module context computed once and passed to each file's analysis.
+struct CrossModuleContext {
+    /// Per-file: declaration names referenced by other modules.
+    external_refs: HashMap<PathBuf, HashSet<String>>,
+    /// Per-file: use path strings that resolved to files in the check set.
+    resolved_use_paths: HashMap<PathBuf, HashSet<String>>,
+}
+
 /// Shared loop for commands that process multiple .allium files.
+///
+/// Parses all files first, builds the cross-module reference map, then
+/// analyses each file with knowledge of which declarations are referenced
+/// externally and which use paths resolved.
 fn run_multi_file(
     command: &str,
     args: &[String],
-    analyse_file: impl Fn(&Path, &str, &allium_parser::ParseResult, &SourceMap) -> FileResult,
+    analyse_file: impl Fn(&Path, &str, &allium_parser::ParseResult, &SourceMap, &HashSet<String>, &HashSet<String>) -> FileResult,
 ) -> ExitCode {
     let files = resolve_files(args);
     if files.is_empty() {
@@ -188,6 +208,8 @@ fn run_multi_file(
         return ExitCode::from(2);
     }
 
+    // Pass 1: parse all files.
+    let mut parsed: Vec<ParsedFile> = Vec::new();
     let mut any_issues = false;
 
     for path in &files {
@@ -199,10 +221,24 @@ fn run_multi_file(
                 continue;
             }
         };
-
         let result = allium_parser::parse(&source);
-        let source_map = SourceMap::new(&source);
-        let file_result = analyse_file(path, &source, &result, &source_map);
+        parsed.push(ParsedFile {
+            path: path.clone(),
+            source,
+            result,
+        });
+    }
+
+    // Pass 2: build cross-module context.
+    let ctx = build_cross_module_context(&parsed);
+
+    // Pass 3: analyse each file with cross-module context.
+    for pf in &parsed {
+        let source_map = SourceMap::new(&pf.source);
+        let key = canonical_key(&pf.path);
+        let refs = ctx.external_refs.get(&key).cloned().unwrap_or_default();
+        let use_paths = ctx.resolved_use_paths.get(&key).cloned().unwrap_or_default();
+        let file_result = analyse_file(&pf.path, &pf.source, &pf.result, &source_map, &refs, &use_paths);
 
         if file_result.has_issues {
             any_issues = true;
@@ -210,7 +246,7 @@ fn run_multi_file(
 
         let output = serde_json::json!({
             "command": command,
-            "spec_file": path.display().to_string(),
+            "spec_file": pf.path.display().to_string(),
             "diagnostics": file_result.diagnostics,
             "findings": file_result.findings,
         });
@@ -221,9 +257,76 @@ fn run_multi_file(
     if any_issues { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }
 
+/// Build both cross-module maps in a single pass over the parsed files.
+fn build_cross_module_context(parsed: &[ParsedFile]) -> CrossModuleContext {
+    // Set of canonical paths in the check set, for resolving use targets.
+    let check_set: HashSet<PathBuf> = parsed
+        .iter()
+        .map(|pf| canonical_key(&pf.path))
+        .collect();
+
+    let mut external_refs: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+    let mut resolved_use_paths: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+
+    for pf in parsed {
+        // For bare filenames (no directory component), parent() returns "".
+        // Joining "" with a relative use path still works because canonicalize
+        // resolves it against the process working directory.
+        let base = pf.path.parent().unwrap_or(Path::new("."));
+        let file_key = canonical_key(&pf.path);
+
+        // Collect use declarations: alias → use-path string, and resolve each
+        // against the check set.
+        let mut aliases: HashMap<&str, String> = HashMap::new();
+        let mut resolved_for_file: HashSet<String> = HashSet::new();
+
+        for d in &pf.result.module.declarations {
+            if let allium_parser::ast::Decl::Use(u) = d {
+                let path_text = u.path.text();
+                let target = base.join(&path_text);
+                let target_key = canonical_key(&target);
+
+                if check_set.contains(&target_key) {
+                    resolved_for_file.insert(path_text.clone());
+                }
+
+                if let Some(alias) = &u.alias {
+                    aliases.insert(alias.name.as_str(), path_text);
+                }
+            }
+        }
+
+        // Collect qualified references and attribute them to target files.
+        let qrefs = allium_parser::collect_qualified_references(&pf.result.module);
+        for (qualifier, name) in &qrefs {
+            if let Some(use_path) = aliases.get(qualifier.as_str()) {
+                let target = base.join(use_path);
+                let key = canonical_key(&target);
+                external_refs.entry(key).or_default().insert(name.clone());
+            }
+        }
+
+        resolved_use_paths.insert(file_key, resolved_for_file);
+    }
+
+    CrossModuleContext {
+        external_refs,
+        resolved_use_paths,
+    }
+}
+
+/// Normalise a path for use as a map key. Uses canonicalize when possible,
+/// falls back to the raw path. This assumes that all files in a single check
+/// invocation will either all canonicalise successfully or all fail — if some
+/// canonicalise and others don't (e.g. broken symlinks), the same underlying
+/// file could produce different keys and cross-module lookups would miss.
+fn canonical_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn cmd_check(args: &[String]) -> ExitCode {
-    run_multi_file("check", args, |path, source, result, source_map| {
-        let analysis = allium_parser::analyze(&result.module, source);
+    run_multi_file("check", args, |path, source, result, source_map, external_refs, resolved_use_paths| {
+        let analysis = allium_parser::analyze_with_cross_module(&result.module, source, external_refs, resolved_use_paths);
         let diagnostics: Vec<serde_json::Value> = result
             .diagnostics
             .iter()
@@ -238,8 +341,8 @@ fn cmd_check(args: &[String]) -> ExitCode {
 }
 
 fn cmd_analyse(args: &[String]) -> ExitCode {
-    run_multi_file("analyse", args, |path, source, result, source_map| {
-        let analyse_result = allium_parser::analyse(&result.module, source);
+    run_multi_file("analyse", args, |path, source, result, source_map, external_refs, resolved_use_paths| {
+        let analyse_result = allium_parser::analyse_with_cross_module(&result.module, source, external_refs, resolved_use_paths);
         let diagnostics: Vec<serde_json::Value> = result
             .diagnostics
             .iter()

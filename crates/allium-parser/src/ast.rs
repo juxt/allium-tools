@@ -571,6 +571,21 @@ pub struct StringLiteral {
     pub parts: Vec<StringPart>,
 }
 
+impl StringLiteral {
+    /// Extract the plain text content, dropping any interpolation segments.
+    /// For use paths this is safe since interpolation in `use` declarations is
+    /// not a supported pattern.
+    pub fn text(&self) -> String {
+        let mut s = String::new();
+        for part in &self.parts {
+            if let StringPart::Text(t) = part {
+                s.push_str(t);
+            }
+        }
+        s
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub enum StringPart {
     Text(String),

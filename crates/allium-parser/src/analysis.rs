@@ -15,8 +15,38 @@ use crate::Span;
 /// Run structural checks on a parsed module (`allium check`).
 /// Returns line-level diagnostics only.
 pub fn analyze(module: &Module, source: &str) -> Vec<Diagnostic> {
-    let mut ctx = Ctx::new(module);
+    let empty = HashSet::new();
+    analyze_with_external_refs(module, source, &empty)
+}
 
+/// Run structural checks, accounting for cross-module references.
+///
+/// `external_refs` contains declaration names from this module that are
+/// referenced by other modules via qualified names (e.g. `core/InputEvent`).
+/// These names are excluded from unused-declaration warnings.
+pub fn analyze_with_external_refs(
+    module: &Module,
+    source: &str,
+    external_refs: &HashSet<String>,
+) -> Vec<Diagnostic> {
+    run_checks(Ctx::new(module, external_refs, None), source)
+}
+
+/// Run structural checks with full cross-module context.
+///
+/// `external_refs` — declaration names referenced by other modules (suppresses
+/// unused warnings). `resolved_use_paths` — use path strings that resolved to
+/// files in the check set (enables unresolved-path warnings).
+pub fn analyze_with_cross_module(
+    module: &Module,
+    source: &str,
+    external_refs: &HashSet<String>,
+    resolved_use_paths: &HashSet<String>,
+) -> Vec<Diagnostic> {
+    run_checks(Ctx::new(module, external_refs, Some(resolved_use_paths)), source)
+}
+
+fn run_checks(mut ctx: Ctx<'_>, source: &str) -> Vec<Diagnostic> {
     ctx.check_related_surface_references();
     ctx.check_discriminator_variants();
     ctx.check_surface_binding_usage();
@@ -27,6 +57,7 @@ pub fn analyze(module: &Module, source: &str) -> Vec<Diagnostic> {
     ctx.check_unused_fields();
     ctx.check_unused_entities();
     ctx.check_unused_definitions();
+    ctx.check_unresolved_use_paths();
     ctx.check_deferred_location_hints();
     ctx.check_rule_invalid_triggers();
     ctx.check_rule_undefined_bindings();
@@ -39,7 +70,34 @@ pub fn analyze(module: &Module, source: &str) -> Vec<Diagnostic> {
 /// Run structural checks plus process-level analysis (`allium analyse`).
 /// Returns diagnostics and typed findings with evidence.
 pub fn analyse(module: &Module, source: &str) -> crate::diagnostic::AnalyseResult {
-    let diagnostics = analyze(module, source);
+    let empty = HashSet::new();
+    analyse_with_external_refs(module, source, &empty)
+}
+
+/// Run structural checks plus process-level analysis, accounting for
+/// cross-module references.
+pub fn analyse_with_external_refs(
+    module: &Module,
+    source: &str,
+    external_refs: &HashSet<String>,
+) -> crate::diagnostic::AnalyseResult {
+    let diagnostics = analyze_with_external_refs(module, source, external_refs);
+    let findings = find_process_issues(module);
+    crate::diagnostic::AnalyseResult {
+        diagnostics,
+        findings,
+    }
+}
+
+/// Run structural checks plus process-level analysis with full cross-module
+/// context.
+pub fn analyse_with_cross_module(
+    module: &Module,
+    source: &str,
+    external_refs: &HashSet<String>,
+    resolved_use_paths: &HashSet<String>,
+) -> crate::diagnostic::AnalyseResult {
+    let diagnostics = analyze_with_cross_module(module, source, external_refs, resolved_use_paths);
     let findings = find_process_issues(module);
     crate::diagnostic::AnalyseResult {
         diagnostics,
@@ -125,7 +183,8 @@ impl<'a> EntityInfo<'a> {
 
 /// Compute process-level findings: data flow, reachability, conflicts, invariants.
 fn find_process_issues(module: &Module) -> Vec<crate::diagnostic::Finding> {
-    let mut ctx = Ctx::new(module);
+    let empty = HashSet::new();
+    let mut ctx = Ctx::new(module, &empty, None);
     let info = EntityInfo::from_module(module);
     ctx.collect_process_findings(&info);
     ctx.collect_conflict_findings(&info);
@@ -190,14 +249,25 @@ fn collect_suppression_directives<'a>(source: &'a str, sm: &SourceMap) -> HashMa
 
 struct Ctx<'a> {
     module: &'a Module,
+    external_refs: &'a HashSet<String>,
+    /// `None` = single-file mode (skip unresolved-path check).
+    /// `Some(set)` = multi-file mode; `set` contains use path strings that
+    /// resolved to files in the check set.
+    resolved_use_paths: Option<&'a HashSet<String>>,
     diagnostics: Vec<Diagnostic>,
     findings: Vec<crate::diagnostic::Finding>,
 }
 
 impl<'a> Ctx<'a> {
-    fn new(module: &'a Module) -> Self {
+    fn new(
+        module: &'a Module,
+        external_refs: &'a HashSet<String>,
+        resolved_use_paths: Option<&'a HashSet<String>>,
+    ) -> Self {
         Self {
             module,
+            external_refs,
+            resolved_use_paths,
             diagnostics: Vec::new(),
             findings: Vec::new(),
         }
@@ -2660,6 +2730,36 @@ impl Ctx<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// 5b. Unresolved use paths
+// ---------------------------------------------------------------------------
+
+impl Ctx<'_> {
+    /// Warn when a `use` declaration's path does not resolve to a file in the
+    /// current check set. Skipped when `resolved_use_paths` is `None` (single-
+    /// file mode or legacy callers).
+    fn check_unresolved_use_paths(&mut self) {
+        let Some(resolved) = self.resolved_use_paths else {
+            return;
+        };
+        for d in &self.module.declarations {
+            let Decl::Use(u) = d else { continue };
+            let path_text = u.path.text();
+            if !resolved.contains(&path_text) {
+                self.push(
+                    Diagnostic::warning(
+                        u.path.span,
+                        format!(
+                            "Use path \"{path_text}\" does not resolve to a file in the current check set.",
+                        ),
+                    )
+                    .with_code("allium.use.unresolvedPath"),
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 6. Type reference checks (undeclared types in entity/value fields)
 // ---------------------------------------------------------------------------
 
@@ -3218,6 +3318,10 @@ fn collect_accessed_fields_from_expr<'a>(expr: &'a Expr, out: &mut HashSet<&'a s
 impl Ctx<'_> {
     fn check_unused_entities(&mut self) {
         let mut all_idents = self.collect_all_referenced_idents();
+        // Names referenced by other modules via qualified names
+        for name in self.external_refs {
+            all_idents.insert(name.as_str());
+        }
         // Entities that serve as variant bases are "used"
         for v in self.variants() {
             let base = expr_as_ident(&v.base).or_else(|| {
@@ -3266,7 +3370,11 @@ impl Ctx<'_> {
     }
 
     fn check_unused_definitions(&mut self) {
-        let all_idents = self.collect_all_referenced_idents();
+        let mut all_idents = self.collect_all_referenced_idents();
+        // Names referenced by other modules via qualified names
+        for name in self.external_refs {
+            all_idents.insert(name.as_str());
+        }
         let mut findings = Vec::new();
 
         for d in &self.module.declarations {
@@ -3490,6 +3598,220 @@ fn collect_uppercase_idents_from_expr<'a>(expr: &'a Expr, out: &mut HashSet<&'a 
         }
         Expr::QualifiedName(q) => {
             out.insert(&q.name);
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-module qualified-name collection
+// ---------------------------------------------------------------------------
+
+/// Collect all qualified-name references (`qualifier/Name`) from a module.
+///
+/// Returns `(qualifier, name)` pairs. Used by multi-file checking to build the
+/// cross-module reference map so that shared declarations are not flagged as
+/// unused.
+pub fn collect_qualified_references(module: &Module) -> Vec<(String, String)> {
+    let mut refs = Vec::new();
+    for d in &module.declarations {
+        match d {
+            Decl::Block(b) => {
+                for item in &b.items {
+                    collect_qrefs_from_item(&item.kind, &mut refs);
+                }
+            }
+            Decl::Variant(v) => {
+                collect_qrefs_from_expr(&v.base, &mut refs);
+                for item in &v.items {
+                    collect_qrefs_from_item(&item.kind, &mut refs);
+                }
+            }
+            Decl::Invariant(inv) => {
+                collect_qrefs_from_expr(&inv.body, &mut refs);
+            }
+            Decl::Default(def) => {
+                collect_qrefs_from_expr(&def.value, &mut refs);
+            }
+            Decl::Deferred(def) => {
+                collect_qrefs_from_expr(&def.path, &mut refs);
+            }
+            // Use, OpenQuestion — no expressions that could hold qualified names.
+            _ => {}
+        }
+    }
+    refs
+}
+
+fn collect_qrefs_from_item(kind: &BlockItemKind, out: &mut Vec<(String, String)>) {
+    match kind {
+        BlockItemKind::Clause { value, .. }
+        | BlockItemKind::Assignment { value, .. }
+        | BlockItemKind::ParamAssignment { value, .. }
+        | BlockItemKind::Let { value, .. }
+        | BlockItemKind::PathAssignment { value, .. }
+        | BlockItemKind::InvariantBlock { body: value, .. }
+        | BlockItemKind::FieldWithWhen { value, .. } => {
+            collect_qrefs_from_expr(value, out);
+        }
+        BlockItemKind::ForBlock {
+            collection,
+            filter,
+            items,
+            ..
+        } => {
+            collect_qrefs_from_expr(collection, out);
+            if let Some(f) = filter {
+                collect_qrefs_from_expr(f, out);
+            }
+            for item in items {
+                collect_qrefs_from_item(&item.kind, out);
+            }
+        }
+        BlockItemKind::IfBlock {
+            branches,
+            else_items,
+        } => {
+            for b in branches {
+                collect_qrefs_from_expr(&b.condition, out);
+                for item in &b.items {
+                    collect_qrefs_from_item(&item.kind, out);
+                }
+            }
+            if let Some(items) = else_items {
+                for item in items {
+                    collect_qrefs_from_item(&item.kind, out);
+                }
+            }
+        }
+        // ContractsClause, EnumVariant, Annotation, OpenQuestion,
+        // TransitionsBlock — none of these contain expressions that could hold
+        // qualified names.
+        _ => {}
+    }
+}
+
+fn collect_qrefs_from_expr(expr: &Expr, out: &mut Vec<(String, String)>) {
+    match expr {
+        Expr::QualifiedName(q) => {
+            if let Some(ref qualifier) = q.qualifier {
+                out.push((qualifier.clone(), q.name.clone()));
+            }
+        }
+        Expr::MemberAccess { object, .. } | Expr::OptionalAccess { object, .. } => {
+            collect_qrefs_from_expr(object, out);
+        }
+        Expr::Call { function, args, .. } => {
+            collect_qrefs_from_expr(function, out);
+            for a in args {
+                match a {
+                    CallArg::Positional(e) => collect_qrefs_from_expr(e, out),
+                    CallArg::Named(n) => collect_qrefs_from_expr(&n.value, out),
+                }
+            }
+        }
+        Expr::JoinLookup { entity, fields, .. } => {
+            collect_qrefs_from_expr(entity, out);
+            for f in fields {
+                if let Some(v) = &f.value {
+                    collect_qrefs_from_expr(v, out);
+                }
+            }
+        }
+        Expr::BinaryOp { left, right, .. }
+        | Expr::Comparison { left, right, .. }
+        | Expr::LogicalOp { left, right, .. }
+        | Expr::Pipe { left, right, .. }
+        | Expr::NullCoalesce { left, right, .. } => {
+            collect_qrefs_from_expr(left, out);
+            collect_qrefs_from_expr(right, out);
+        }
+        Expr::Not { operand, .. }
+        | Expr::Exists { operand, .. }
+        | Expr::NotExists { operand, .. }
+        | Expr::TypeOptional { inner: operand, .. } => {
+            collect_qrefs_from_expr(operand, out);
+        }
+        Expr::In { element, collection, .. } | Expr::NotIn { element, collection, .. } => {
+            collect_qrefs_from_expr(element, out);
+            collect_qrefs_from_expr(collection, out);
+        }
+        Expr::Where { source, condition, .. }
+        | Expr::With {
+            source,
+            predicate: condition,
+            ..
+        } => {
+            collect_qrefs_from_expr(source, out);
+            collect_qrefs_from_expr(condition, out);
+        }
+        Expr::WhenGuard { action, condition, .. } => {
+            collect_qrefs_from_expr(action, out);
+            collect_qrefs_from_expr(condition, out);
+        }
+        Expr::Binding { value, .. } | Expr::LetExpr { value, .. } => {
+            collect_qrefs_from_expr(value, out);
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_qrefs_from_expr(item, out);
+            }
+        }
+        Expr::Conditional {
+            branches,
+            else_body,
+            ..
+        } => {
+            for b in branches {
+                collect_qrefs_from_expr(&b.condition, out);
+                collect_qrefs_from_expr(&b.body, out);
+            }
+            if let Some(body) = else_body {
+                collect_qrefs_from_expr(body, out);
+            }
+        }
+        Expr::For {
+            collection,
+            filter,
+            body,
+            ..
+        } => {
+            collect_qrefs_from_expr(collection, out);
+            if let Some(f) = filter {
+                collect_qrefs_from_expr(f, out);
+            }
+            collect_qrefs_from_expr(body, out);
+        }
+        Expr::Lambda { body, .. } => {
+            collect_qrefs_from_expr(body, out);
+        }
+        Expr::TransitionsTo {
+            subject, new_state, ..
+        }
+        | Expr::Becomes {
+            subject, new_state, ..
+        } => {
+            collect_qrefs_from_expr(subject, out);
+            collect_qrefs_from_expr(new_state, out);
+        }
+        Expr::GenericType { name, args, .. } => {
+            collect_qrefs_from_expr(name, out);
+            for a in args {
+                collect_qrefs_from_expr(a, out);
+            }
+        }
+        Expr::SetLiteral { elements, .. } => {
+            for e in elements {
+                collect_qrefs_from_expr(e, out);
+            }
+        }
+        Expr::ObjectLiteral { fields, .. } => {
+            for f in fields {
+                collect_qrefs_from_expr(&f.value, out);
+            }
+        }
+        Expr::ProjectionMap { source, .. } => {
+            collect_qrefs_from_expr(source, out);
         }
         _ => {}
     }
@@ -4717,6 +5039,264 @@ mod tests {
     fn unused_entity_reported() {
         let ds = analyze_src("entity Orphan {\n  x: String\n}\n");
         assert!(has_code(&ds, "allium.entity.unused"));
+    }
+
+    #[test]
+    fn external_ref_suppresses_unused_entity() {
+        let src = "entity InputEvent {\n  payload: String\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs: HashSet<String> = ["InputEvent".to_string()].into_iter().collect();
+        let ds = analyze_with_external_refs(&result.module, &input, &refs);
+        assert!(!has_code(&ds, "allium.entity.unused"));
+    }
+
+    #[test]
+    fn external_ref_suppresses_unused_definition() {
+        let src = "value Snapshot {\n  version: Integer\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs: HashSet<String> = ["Snapshot".to_string()].into_iter().collect();
+        let ds = analyze_with_external_refs(&result.module, &input, &refs);
+        assert!(!has_code(&ds, "allium.definition.unused"));
+    }
+
+    #[test]
+    fn unreferenced_entity_still_warns_without_external_ref() {
+        let src = "entity InputEvent {\n  payload: String\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs: HashSet<String> = ["SomethingElse".to_string()].into_iter().collect();
+        let ds = analyze_with_external_refs(&result.module, &input, &refs);
+        assert!(has_code(&ds, "allium.entity.unused"));
+    }
+
+    #[test]
+    fn collect_qualified_refs_from_rule_clause() {
+        let src = "use \"./core.allium\" as core\n\nrule Handle {\n  when: event: core/InputEvent\n  ensures: event.payload = \"ok\"\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs = collect_qualified_references(&result.module);
+        assert!(refs.iter().any(|(q, n)| q == "core" && n == "InputEvent"));
+    }
+
+    #[test]
+    fn collect_qualified_refs_from_field_type() {
+        let src = "use \"./types.allium\" as types\n\nentity Order {\n  snapshot: types/EntitySnapshot\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs = collect_qualified_references(&result.module);
+        assert!(refs.iter().any(|(q, n)| q == "types" && n == "EntitySnapshot"));
+    }
+
+    #[test]
+    fn collect_qualified_refs_from_requires() {
+        let src = "use \"./auth.allium\" as auth\n\nrule Guard {\n  when: request: Request\n  requires: request.token in auth/ValidTokens\n  ensures: request.granted = true\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs = collect_qualified_references(&result.module);
+        assert!(refs.iter().any(|(q, n)| q == "auth" && n == "ValidTokens"));
+    }
+
+    #[test]
+    fn collect_qualified_refs_from_for_block() {
+        let src = "use \"./core.allium\" as core\n\nrule Batch {\n  when: batch: Batch\n  for item in core/ItemList:\n    ensures: item.processed = true\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs = collect_qualified_references(&result.module);
+        assert!(refs.iter().any(|(q, n)| q == "core" && n == "ItemList"));
+    }
+
+    #[test]
+    fn collect_qualified_refs_from_member_access() {
+        let src = "use \"./core.allium\" as core\n\nentity Order {\n  limit: core/config.max_order_size\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs = collect_qualified_references(&result.module);
+        assert!(refs.iter().any(|(q, n)| q == "core" && n == "config"));
+    }
+
+    #[test]
+    fn collect_qualified_refs_multiple_from_same_module() {
+        let src = "use \"./core.allium\" as core\n\nentity Handler {\n  input: core/InputEvent\n  output: core/OutputEvent\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs = collect_qualified_references(&result.module);
+        assert!(refs.iter().any(|(q, n)| q == "core" && n == "InputEvent"));
+        assert!(refs.iter().any(|(q, n)| q == "core" && n == "OutputEvent"));
+    }
+
+    #[test]
+    fn collect_qualified_refs_multiple_modules() {
+        let src = "use \"./core.allium\" as core\nuse \"./auth.allium\" as auth\n\nentity Handler {\n  event: core/InputEvent\n  session: auth/Session\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs = collect_qualified_references(&result.module);
+        assert!(refs.iter().any(|(q, n)| q == "core" && n == "InputEvent"));
+        assert!(refs.iter().any(|(q, n)| q == "auth" && n == "Session"));
+    }
+
+    #[test]
+    fn collect_qualified_refs_empty_when_none() {
+        let src = "entity Order {\n  total: Decimal\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs = collect_qualified_references(&result.module);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn collect_qualified_refs_from_ensures() {
+        let src = "use \"./core.allium\" as core\n\nrule Transition {\n  when: order: Order\n  ensures: order.status = core/Active\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs = collect_qualified_references(&result.module);
+        assert!(refs.iter().any(|(q, n)| q == "core" && n == "Active"));
+    }
+
+    #[test]
+    fn collect_qualified_refs_from_invariant() {
+        let src = "use \"./limits.allium\" as limits\n\ninvariant MaxSize {\n  for o in Order: o.size <= limits/config.max_size\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs = collect_qualified_references(&result.module);
+        assert!(refs.iter().any(|(q, n)| q == "limits" && n == "config"));
+    }
+
+    #[test]
+    fn collect_qualified_refs_from_deferred() {
+        let src = "use \"./billing.allium\" as billing\n\ndeferred billing/InvoiceWorkflow\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs = collect_qualified_references(&result.module);
+        assert!(refs.iter().any(|(q, n)| q == "billing" && n == "InvoiceWorkflow"));
+    }
+
+    #[test]
+    fn external_ref_only_suppresses_matching_name() {
+        // Two entities declared, only one referenced externally
+        let src = "entity Used {\n  x: String\n}\n\nentity Orphan {\n  y: String\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs: HashSet<String> = ["Used".to_string()].into_iter().collect();
+        let ds = analyze_with_external_refs(&result.module, &input, &refs);
+        assert!(!ds.iter().any(|d| d.code == Some("allium.entity.unused")
+            && d.message.contains("Used")));
+        assert!(ds.iter().any(|d| d.code == Some("allium.entity.unused")
+            && d.message.contains("Orphan")));
+    }
+
+    #[test]
+    fn external_ref_suppresses_unused_external_entity() {
+        let src = "external entity PaymentGateway {\n  charge(amount: Decimal): Boolean\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs: HashSet<String> = ["PaymentGateway".to_string()].into_iter().collect();
+        let ds = analyze_with_external_refs(&result.module, &input, &refs);
+        assert!(!has_code(&ds, "allium.entity.unused"));
+    }
+
+    #[test]
+    fn external_ref_suppresses_unused_enum() {
+        let src = "enum Priority {\n  low\n  medium\n  high\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let refs: HashSet<String> = ["Priority".to_string()].into_iter().collect();
+        let ds = analyze_with_external_refs(&result.module, &input, &refs);
+        assert!(!has_code(&ds, "allium.definition.unused"));
+    }
+
+    #[test]
+    fn empty_external_refs_same_as_plain_analyze() {
+        let src = "entity Orphan {\n  x: String\n}\nvalue Unused {\n  y: Integer\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let plain = analyze(&result.module, &input);
+        let with_empty = analyze_with_external_refs(&result.module, &input, &HashSet::new());
+        assert_eq!(plain.len(), with_empty.len());
+        for (a, b) in plain.iter().zip(with_empty.iter()) {
+            assert_eq!(a.code, b.code);
+            assert_eq!(a.message, b.message);
+        }
+    }
+
+    // -- Unresolved use paths --
+
+    #[test]
+    fn resolved_use_path_no_warning() {
+        let src = "use \"./core.allium\" as core\n\nentity Handler {\n  x: String\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let resolved: HashSet<String> = ["./core.allium".to_string()].into_iter().collect();
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved);
+        assert!(!has_code(&ds, "allium.use.unresolvedPath"));
+    }
+
+    #[test]
+    fn unresolved_use_path_warns() {
+        let src = "use \"./missing.allium\" as missing\n\nentity Handler {\n  x: String\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        // Only "./other.allium" is resolved — "./missing.allium" is not.
+        let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved);
+        assert!(has_code(&ds, "allium.use.unresolvedPath"));
+    }
+
+    #[test]
+    fn unresolved_use_path_skipped_in_single_file_mode() {
+        // analyze_with_external_refs (no resolved set) skips the check.
+        let src = "use \"./missing.allium\" as missing\n\nentity Handler {\n  x: String\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let ds = analyze_with_external_refs(&result.module, &input, &HashSet::new());
+        assert!(!has_code(&ds, "allium.use.unresolvedPath"));
+    }
+
+    #[test]
+    fn unresolved_use_path_fires_with_empty_resolved_set() {
+        // analyze_with_cross_module with empty set = multi-file mode where
+        // nothing resolved — should still flag unresolved paths.
+        let src = "use \"./missing.allium\" as missing\n\nentity Handler {\n  x: String\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new());
+        assert!(has_code(&ds, "allium.use.unresolvedPath"));
+    }
+
+    #[test]
+    fn unresolved_use_path_message_includes_path() {
+        let src = "use \"./nowhere.allium\" as nowhere\n\nentity Handler {\n  x: String\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved);
+        let diag = ds.iter().find(|d| d.code == Some("allium.use.unresolvedPath")).unwrap();
+        assert!(diag.message.contains("nowhere.allium"), "message should name the path: {}", diag.message);
+    }
+
+    #[test]
+    fn unresolved_use_path_suppressible() {
+        let src = "-- allium-ignore allium.use.unresolvedPath\nuse \"./missing.allium\" as missing\n\nentity Handler {\n  x: String\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved);
+        assert!(!has_code(&ds, "allium.use.unresolvedPath"));
+    }
+
+    #[test]
+    fn multiple_use_paths_mixed_resolution() {
+        let src = "use \"./found.allium\" as found\nuse \"./lost.allium\" as lost\n\nentity Handler {\n  x: String\n}\n";
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let resolved: HashSet<String> = ["./found.allium".to_string()].into_iter().collect();
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved);
+        let unresolved: Vec<_> = ds.iter()
+            .filter(|d| d.code == Some("allium.use.unresolvedPath"))
+            .collect();
+        assert_eq!(unresolved.len(), 1, "only lost.allium should be unresolved");
+        assert!(unresolved[0].message.contains("lost.allium"));
     }
 
     // -- Deferred location hints --
