@@ -8,7 +8,6 @@ The Allium language is at version 3. All packages in this repo share a single ve
 |---|---|---|
 | allium-parser | `crates/allium-parser/Cargo.toml` | Cargo workspace (`Cargo.toml`) |
 | allium (Rust CLI) | `crates/allium/Cargo.toml` | Cargo workspace (`Cargo.toml`) |
-| allium-cli (Node) | `packages/allium-cli/package.json` | Hardcoded |
 | allium-lsp | `packages/allium-lsp/package.json` | Hardcoded |
 | allium-vscode | `extensions/allium/package.json` | Hardcoded |
 

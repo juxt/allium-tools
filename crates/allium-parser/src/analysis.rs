@@ -8,22 +8,20 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, Finding};
 use crate::lexer::SourceMap;
 use crate::Span;
 
-/// Run all semantic checks on a parsed module and return any diagnostics.
+/// Run structural checks on a parsed module (`allium check`).
+/// Returns line-level diagnostics only.
 pub fn analyze(module: &Module, source: &str) -> Vec<Diagnostic> {
     let mut ctx = Ctx::new(module);
 
-    // Existing checks
     ctx.check_related_surface_references();
     ctx.check_discriminator_variants();
     ctx.check_surface_binding_usage();
     ctx.check_status_state_machine();
     ctx.check_external_entity_source_hints();
-
-    // New checks
     ctx.check_type_references();
     ctx.check_unreachable_triggers();
     ctx.check_unused_fields();
@@ -34,10 +32,105 @@ pub fn analyze(module: &Module, source: &str) -> Vec<Diagnostic> {
     ctx.check_rule_undefined_bindings();
     ctx.check_duplicate_let_bindings();
     ctx.check_config_undefined_references();
-    // TODO: surface unused path check needs proper cross-reference resolution
-    // ctx.check_surface_unused_paths();
 
     apply_suppressions(ctx.diagnostics, source)
+}
+
+/// Run structural checks plus process-level analysis (`allium analyse`).
+/// Returns diagnostics and typed findings with evidence.
+pub fn analyse(module: &Module, source: &str) -> crate::diagnostic::AnalyseResult {
+    let diagnostics = analyze(module, source);
+    let findings = find_process_issues(module);
+    crate::diagnostic::AnalyseResult {
+        diagnostics,
+        findings,
+    }
+}
+
+/// Shared entity data collected once and used by all finding methods.
+struct EntityInfo<'a> {
+    /// entity name → (status values set, status value idents)
+    status_values: HashMap<&'a str, (HashSet<&'a str>, Vec<&'a Ident>)>,
+    /// entity name → (field name → referenced entity type name)
+    field_types: HashMap<&'a str, HashMap<&'a str, &'a str>>,
+    /// entity name → transition edge list [(from, to)]
+    graph_edges: HashMap<&'a str, Vec<(&'a str, &'a str)>>,
+    /// entity name → terminal state set
+    terminals: HashMap<&'a str, HashSet<&'a str>>,
+}
+
+impl<'a> EntityInfo<'a> {
+    fn from_module(module: &'a Module) -> Self {
+        let mut status_values: HashMap<&str, (HashSet<&str>, Vec<&Ident>)> = HashMap::new();
+        let mut field_types: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
+        let mut graph_edges: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
+        let mut terminals: HashMap<&str, HashSet<&str>> = HashMap::new();
+
+        let entities = module.declarations.iter().filter_map(|d| match d {
+            Decl::Block(b) if b.kind == BlockKind::Entity => Some(b),
+            _ => None,
+        });
+        for entity in entities {
+            let name = match &entity.name {
+                Some(n) => n.name.as_str(),
+                None => continue,
+            };
+            for item in &entity.items {
+                match &item.kind {
+                    BlockItemKind::Assignment { name: f, value } if f.name == "status" => {
+                        let mut idents = Vec::new();
+                        collect_pipe_idents(value, &mut idents);
+                        if idents.len() >= 2
+                            && !idents.iter().any(|id| starts_uppercase(&id.name))
+                        {
+                            let set: HashSet<&str> =
+                                idents.iter().map(|id| id.name.as_str()).collect();
+                            status_values.insert(name, (set, idents));
+                        }
+                    }
+                    BlockItemKind::Assignment { name: f, value } => {
+                        if let Some(t) = extract_field_entity_type(value) {
+                            field_types.entry(name).or_default().insert(f.name.as_str(), t);
+                        }
+                    }
+                    BlockItemKind::TransitionsBlock(graph) => {
+                        let edges: Vec<(&str, &str)> = graph
+                            .edges
+                            .iter()
+                            .map(|e| (e.from.name.as_str(), e.to.name.as_str()))
+                            .collect();
+                        graph_edges.insert(name, edges);
+                        let terms: HashSet<&str> =
+                            graph.terminal.iter().map(|t| t.name.as_str()).collect();
+                        if !terms.is_empty() {
+                            terminals.insert(name, terms);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Self { status_values, field_types, graph_edges, terminals }
+    }
+
+    /// Status values as a simple entity → set map (without idents).
+    fn status_by_entity(&self) -> HashMap<&'a str, HashSet<&'a str>> {
+        self.status_values
+            .iter()
+            .map(|(k, (set, _))| (*k, set.clone()))
+            .collect()
+    }
+}
+
+/// Compute process-level findings: data flow, reachability, conflicts, invariants.
+fn find_process_issues(module: &Module) -> Vec<crate::diagnostic::Finding> {
+    let mut ctx = Ctx::new(module);
+    let info = EntityInfo::from_module(module);
+    ctx.collect_process_findings(&info);
+    ctx.collect_conflict_findings(&info);
+    ctx.collect_invariant_findings(&info);
+    std::mem::take(&mut ctx.findings)
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +191,7 @@ fn collect_suppression_directives<'a>(source: &'a str, sm: &SourceMap) -> HashMa
 struct Ctx<'a> {
     module: &'a Module,
     diagnostics: Vec<Diagnostic>,
+    findings: Vec<crate::diagnostic::Finding>,
 }
 
 impl<'a> Ctx<'a> {
@@ -105,6 +199,7 @@ impl<'a> Ctx<'a> {
         Self {
             module,
             diagnostics: Vec::new(),
+            findings: Vec::new(),
         }
     }
 
@@ -134,6 +229,10 @@ impl<'a> Ctx<'a> {
 
     fn push(&mut self, d: Diagnostic) {
         self.diagnostics.push(d);
+    }
+
+    fn push_finding(&mut self, finding: Finding) {
+        self.findings.push(finding);
     }
 
     /// All declared type names (entities, values, enums, actors, variants, externals)
@@ -471,29 +570,60 @@ impl Ctx<'_> {
 impl Ctx<'_> {
     fn check_status_state_machine(&mut self) {
         let mut status_by_entity: HashMap<&str, (Vec<&Ident>, HashSet<&str>)> = HashMap::new();
+        let mut terminal_by_entity: HashMap<&str, HashSet<&str>> = HashMap::new();
+        let mut has_transitions: HashSet<&str> = HashSet::new();
+        let mut declared_edges: HashMap<&str, HashSet<(&str, &str)>> = HashMap::new();
+        let mut field_entity_types: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
         for entity in self.blocks(BlockKind::Entity) {
             let entity_name = match &entity.name {
                 Some(n) => n.name.as_str(),
                 None => continue,
             };
             for item in &entity.items {
-                let BlockItemKind::Assignment { name, value } = &item.kind else {
-                    continue;
-                };
-                if name.name != "status" {
-                    continue;
+                match &item.kind {
+                    BlockItemKind::Assignment { name, value } if name.name == "status" => {
+                        let mut idents = Vec::new();
+                        collect_pipe_idents(value, &mut idents);
+                        if idents.len() < 2 {
+                            continue;
+                        }
+                        if idents.iter().any(|id| starts_uppercase(&id.name)) {
+                            continue;
+                        }
+                        let set: HashSet<&str> =
+                            idents.iter().map(|id| id.name.as_str()).collect();
+                        status_by_entity.insert(entity_name, (idents, set));
+                    }
+                    BlockItemKind::Assignment { name, value } => {
+                        // Collect field → entity type mappings for nested access
+                        if let Some(type_name) = extract_field_entity_type(value) {
+                            field_entity_types
+                                .entry(entity_name)
+                                .or_default()
+                                .insert(name.name.as_str(), type_name);
+                        }
+                    }
+                    BlockItemKind::TransitionsBlock(graph) => {
+                        has_transitions.insert(entity_name);
+                        let terminals: HashSet<&str> =
+                            graph.terminal.iter().map(|t| t.name.as_str()).collect();
+                        if !terminals.is_empty() {
+                            terminal_by_entity.insert(entity_name, terminals);
+                        }
+                        let edges: HashSet<(&str, &str)> = graph
+                            .edges
+                            .iter()
+                            .map(|e| (e.from.name.as_str(), e.to.name.as_str()))
+                            .collect();
+                        declared_edges.insert(entity_name, edges);
+                    }
+                    _ => {}
                 }
-                let mut idents = Vec::new();
-                collect_pipe_idents(value, &mut idents);
-                if idents.len() < 2 {
-                    continue;
-                }
-                if idents.iter().any(|id| starts_uppercase(&id.name)) {
-                    continue;
-                }
-                let set: HashSet<&str> = idents.iter().map(|id| id.name.as_str()).collect();
-                status_by_entity.insert(entity_name, (idents, set));
             }
+        }
+        // Prune field_entity_types to only include fields whose type has a status enum
+        for fields in field_entity_types.values_mut() {
+            fields.retain(|_, type_name| status_by_entity.contains_key(type_name));
         }
 
         if status_by_entity.is_empty() {
@@ -503,6 +633,7 @@ impl Ctx<'_> {
         let mut assigned_by_entity: HashMap<&str, HashSet<&str>> = HashMap::new();
         let mut transitions_by_entity: HashMap<&str, HashMap<&str, HashSet<&str>>> =
             HashMap::new();
+        let mut created_issues: Vec<Diagnostic> = Vec::new();
 
         for rule in self.blocks(BlockKind::Rule) {
             let binding_types = collect_rule_binding_types(rule, &status_by_entity);
@@ -519,6 +650,7 @@ impl Ctx<'_> {
                     value,
                     &binding_types,
                     &status_by_entity,
+                    &field_entity_types,
                     &mut |binding, status| {
                         requires_by_binding
                             .entry(binding)
@@ -539,6 +671,7 @@ impl Ctx<'_> {
                     value,
                     &binding_types,
                     &status_by_entity,
+                    &field_entity_types,
                     &mut |binding, target, entity| {
                         assigned_by_entity
                             .entry(entity)
@@ -556,6 +689,18 @@ impl Ctx<'_> {
                             }
                         }
                     },
+                );
+                visit_created_calls(
+                    value,
+                    &status_by_entity,
+                    &has_transitions,
+                    &mut |entity, status| {
+                        assigned_by_entity
+                            .entry(entity)
+                            .or_default()
+                            .insert(status);
+                    },
+                    &mut created_issues,
                 );
             }
         }
@@ -587,7 +732,13 @@ impl Ctx<'_> {
                     );
                 }
 
-                if is_likely_terminal(&id.name) {
+                let is_terminal = terminal_by_entity
+                    .get(entity_name)
+                    .map_or_else(
+                        || is_likely_terminal(&id.name),
+                        |terminals| terminals.contains(id.name.as_str()),
+                    );
+                if is_terminal {
                     continue;
                 }
                 let exits = transition_map.get(id.name.as_str());
@@ -606,6 +757,1480 @@ impl Ctx<'_> {
                 );
             }
         }
+
+        // Check rule-produced transitions against declared graph edges
+        for (entity_name, transition_map) in &transitions_by_entity {
+            if let Some(edges) = declared_edges.get(entity_name) {
+                if let Some((idents, _)) = status_by_entity.get(entity_name) {
+                    for (from, targets) in transition_map {
+                        for to in targets {
+                            if from != to && !edges.contains(&(*from, *to)) {
+                                // Find the span for the source status in the declaration
+                                let span = idents
+                                    .iter()
+                                    .find(|id| id.name == *from)
+                                    .map(|id| id.span)
+                                    .unwrap_or(idents[0].span);
+                                self.push(
+                                    Diagnostic::warning(
+                                        span,
+                                        format!(
+                                            "Rule produces transition '{from}' → '{to}' on entity '{entity_name}', but this edge is not in the declared transition graph.",
+                                        ),
+                                    )
+                                    .with_code("allium.status.undeclaredTransition"),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for issue in created_issues {
+            self.push(issue);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Finding-producing methods (parallel to the check_* methods above)
+// ---------------------------------------------------------------------------
+
+impl Ctx<'_> {
+    fn collect_process_findings(&mut self, info: &EntityInfo<'_>) {
+        let status_values = &info.status_values;
+        let field_types = &info.field_types;
+        let graph_edges = &info.graph_edges;
+        let terminals = &info.terminals;
+
+        if status_values.is_empty() {
+            return;
+        }
+
+        // 2. Collect triggers provided by surfaces (and surface names)
+        let mut surface_triggers: HashSet<&str> = HashSet::new();
+        let mut surface_names: Vec<String> = Vec::new();
+        for surface in self.blocks(BlockKind::Surface) {
+            if let Some(n) = &surface.name {
+                surface_names.push(n.name.clone());
+            }
+            for item in &surface.items {
+                let BlockItemKind::Clause { keyword, value } = &item.kind else {
+                    continue;
+                };
+                if keyword == "provides" {
+                    collect_call_names(value, &mut surface_triggers);
+                }
+            }
+        }
+
+        // 3. Collect emitted triggers from rule ensures
+        let mut emitted_triggers: HashSet<&str> = HashSet::new();
+        for rule in self.blocks(BlockKind::Rule) {
+            for item in &rule.items {
+                collect_emitted_trigger_from_item(&item.kind, &mut emitted_triggers);
+            }
+        }
+
+        // 4. Collect per-rule info (with per-rule field assignments for searched evidence)
+        let mut assigned_fields: HashSet<String> = HashSet::new();
+
+        struct RuleData<'b> {
+            name: &'b str,
+            trigger_reachable: bool,
+            requires_fields: Vec<(String, String, String)>,
+            transitions: Vec<(String, String, String)>,
+            field_assignments: HashSet<String>,
+            entity_bindings: Vec<String>,
+        }
+        let mut rules: Vec<RuleData> = Vec::new();
+
+        for rule in self.blocks(BlockKind::Rule) {
+            let rule_name = match &rule.name {
+                Some(n) => n.name.as_str(),
+                None => continue,
+            };
+            let mut trigger_name: Option<&str> = None;
+            let mut requires_statuses: HashMap<&str, HashSet<&str>> = HashMap::new();
+            let mut requires_fields: Vec<(String, String, String)> = Vec::new();
+            let mut ensures_statuses: Vec<(&str, &str)> = Vec::new();
+            let mut rule_assigned: HashSet<String> = HashSet::new();
+
+            for item in &rule.items {
+                let BlockItemKind::Clause { keyword, value } = &item.kind else {
+                    continue;
+                };
+                if keyword == "when" {
+                    let names = extract_trigger_names(value);
+                    if let Some((name, _)) = names.first() {
+                        trigger_name = Some(*name);
+                    }
+                }
+            }
+
+            let trigger_reachable = trigger_name.map_or(true, |t| {
+                surface_triggers.contains(t) || emitted_triggers.contains(t)
+            });
+
+            let binding_types = collect_rule_binding_types(rule, &status_values_for_binding(&status_values));
+
+            // Collect entity bindings for unreachable_trigger affected_entities
+            let entity_bindings: Vec<String> = binding_types
+                .values()
+                .map(|v| v.to_string())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+
+            for item in &rule.items {
+                let BlockItemKind::Clause { keyword, value } = &item.kind else {
+                    continue;
+                };
+                if keyword != "requires" {
+                    continue;
+                }
+                collect_requires_conditions(
+                    value,
+                    &binding_types,
+                    status_values,
+                    &mut |binding, field, val| {
+                        if field == "status" {
+                            requires_statuses
+                                .entry(binding)
+                                .or_default()
+                                .insert(val);
+                        } else {
+                            let entity = resolve_binding_entity_from_status(
+                                binding, None, &binding_types, &status_values,
+                            );
+                            if let Some(e) = entity {
+                                requires_fields.push((
+                                    e.to_string(),
+                                    field.to_string(),
+                                    val.to_string(),
+                                ));
+                            }
+                        }
+                    },
+                );
+            }
+
+            for item in &rule.items {
+                let BlockItemKind::Clause { keyword, value } = &item.kind else {
+                    continue;
+                };
+                if keyword != "ensures" {
+                    continue;
+                }
+                collect_field_assignments(
+                    value,
+                    &binding_types,
+                    &status_values,
+                    &field_types,
+                    &mut |entity, field, value| {
+                        let key = format!("{entity}.{field}");
+                        assigned_fields.insert(key.clone());
+                        rule_assigned.insert(key);
+                        if field == "status" && value != "_variable_" {
+                            assigned_fields.insert(format!("{entity}.status.{value}"));
+                        }
+                    },
+                );
+                collect_ensures_status(
+                    value,
+                    &binding_types,
+                    &status_values,
+                    &field_types,
+                    &mut |binding, target| {
+                        ensures_statuses.push((binding, target));
+                    },
+                );
+            }
+
+            let mut transitions = Vec::new();
+            for (binding, target) in &ensures_statuses {
+                let entity = resolve_binding_entity_from_status(
+                    binding,
+                    Some(target),
+                    &binding_types,
+                    &status_values,
+                );
+                if let Some(e) = entity {
+                    if let Some(sources) = requires_statuses.get(binding) {
+                        for source in sources {
+                            transitions.push((
+                                e.to_string(),
+                                source.to_string(),
+                                target.to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            rules.push(RuleData {
+                name: rule_name,
+                trigger_reachable,
+                requires_fields,
+                transitions,
+                field_assignments: rule_assigned,
+                entity_bindings,
+            });
+        }
+
+        // Track .created() status fields as assigned (and per-rule created tracking)
+        let mut created_fields: HashSet<String> = HashSet::new();
+        for rule in self.blocks(BlockKind::Rule) {
+            for item in &rule.items {
+                let BlockItemKind::Clause { keyword, value } = &item.kind else {
+                    continue;
+                };
+                if keyword != "ensures" {
+                    continue;
+                }
+                collect_created_field_assignments(value, &status_values, &mut assigned_fields);
+                collect_created_field_assignments(value, &status_values, &mut created_fields);
+            }
+        }
+
+        // Collect surface-provided fields
+        let mut surface_provided_fields: HashSet<String> = HashSet::new();
+        for surface in self.blocks(BlockKind::Surface) {
+            for item in &surface.items {
+                let BlockItemKind::Clause { keyword, value } = &item.kind else {
+                    continue;
+                };
+                if keyword == "provides" {
+                    collect_surface_provided_fields(value, &status_values, &mut surface_provided_fields);
+                }
+            }
+        }
+
+        // Helper: build searched evidence for a given entity.field
+        let build_searched = |entity: &str, field: &str| -> Vec<serde_json::Value> {
+            let key = format!("{entity}.{field}");
+            let mut searched = Vec::new();
+
+            // Check rule_ensures
+            let matching_rule: Option<&RuleData> = rules.iter().find(|r| {
+                r.field_assignments.contains(&key)
+            });
+            if let Some(r) = matching_rule {
+                if !r.trigger_reachable {
+                    searched.push(serde_json::json!({
+                        "kind": "rule_ensures",
+                        "found": r.name,
+                        "but": "trigger has no providing surface"
+                    }));
+                } else {
+                    searched.push(serde_json::json!({
+                        "kind": "rule_ensures",
+                        "found": r.name
+                    }));
+                }
+            } else {
+                searched.push(serde_json::json!({
+                    "kind": "rule_ensures",
+                    "found": false
+                }));
+            }
+
+            // Check surface_provides
+            searched.push(serde_json::json!({
+                "kind": "surface_provides",
+                "found": surface_provided_fields.contains(&key)
+            }));
+
+            // Check created_calls
+            searched.push(serde_json::json!({
+                "kind": "created_calls",
+                "found": created_fields.contains(&key)
+            }));
+
+            searched
+        };
+
+        // Dead transition findings
+        for (entity, edges) in graph_edges {
+            let _statuses = match status_values.get(entity) {
+                Some(v) => v,
+                None => continue,
+            };
+
+            for (from, to) in edges {
+                let witnesses: Vec<&RuleData> = rules
+                    .iter()
+                    .filter(|r| {
+                        r.transitions
+                            .iter()
+                            .any(|(e, f, t)| e == *entity && f == *from && t == *to)
+                    })
+                    .collect();
+
+                if witnesses.is_empty() {
+                    continue;
+                }
+
+                let any_achievable = witnesses.iter().any(|r| {
+                    r.requires_fields.iter().all(|(e, f, _v)| {
+                        assigned_fields.contains(&format!("{e}.{f}"))
+                    })
+                });
+
+                if !any_achievable {
+                    let witness_names: Vec<String> =
+                        witnesses.iter().map(|r| r.name.to_string()).collect();
+                    let unsatisfiable: Vec<serde_json::Value> = witnesses
+                        .iter()
+                        .flat_map(|r| {
+                            r.requires_fields.iter().filter(|(e, f, _)| {
+                                !assigned_fields.contains(&format!("{e}.{f}"))
+                            })
+                        })
+                        .map(|(e, f, v)| {
+                            serde_json::json!({
+                                "entity": e,
+                                "field": f,
+                                "value": v,
+                                "searched": build_searched(e, f),
+                            })
+                        })
+                        .collect();
+
+                    self.push_finding(serde_json::json!({
+                        "type": "dead_transition",
+                        "summary": format!(
+                            "Transition '{from}' → '{to}' on entity '{entity}' is declared but unachievable"
+                        ),
+                        "edge": {"entity": entity, "from": from, "to": to},
+                        "witnessing_rules": witness_names,
+                        "unsatisfiable_requires": unsatisfiable,
+                        "affected_entities": [entity],
+                    }));
+                }
+            }
+        }
+
+        // Missing producer findings
+        for r in &rules {
+            for (entity, field, value) in &r.requires_fields {
+                let key = format!("{entity}.{field}");
+                if !assigned_fields.contains(&key) {
+                    self.push_finding(serde_json::json!({
+                        "type": "missing_producer",
+                        "summary": format!("Nothing establishes {entity}.{field} = {value}"),
+                        "requires": {"rule": r.name, "field": field, "value": value},
+                        "searched": build_searched(entity, field),
+                        "affected_entities": [entity],
+                    }));
+                }
+            }
+        }
+
+        // Deadlock findings
+        for (entity, edges) in graph_edges {
+            let entity_terminals = match terminals.get(entity) {
+                Some(t) => t,
+                None => continue,
+            };
+            let (statuses, _idents) = match status_values.get(entity) {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let achievable_edges: HashSet<(&str, &str)> = edges
+                .iter()
+                .filter(|(_from, to)| {
+                    let producers: Vec<&RuleData> = rules
+                        .iter()
+                        .filter(|r| {
+                            r.transitions
+                                .iter()
+                                .any(|(e, _f, t)| e == *entity && t == *to)
+                        })
+                        .collect();
+                    if producers.is_empty() {
+                        return assigned_fields.contains(&format!("{entity}.status.{to}"));
+                    }
+                    producers.iter().any(|r| {
+                        r.requires_fields.iter().all(|(e, f, _v)| {
+                            assigned_fields.contains(&format!("{e}.{f}"))
+                        })
+                    })
+                })
+                .copied()
+                .collect();
+
+            for status in statuses {
+                if entity_terminals.contains(status) {
+                    continue;
+                }
+                let mut visited = HashSet::new();
+                let mut queue = vec![*status];
+                let mut found_terminal = false;
+                while let Some(current) = queue.pop() {
+                    if !visited.insert(current) {
+                        continue;
+                    }
+                    if entity_terminals.contains(current) {
+                        found_terminal = true;
+                        break;
+                    }
+                    for (from, to) in &achievable_edges {
+                        if *from == current {
+                            queue.push(to);
+                        }
+                    }
+                }
+                if !found_terminal {
+                    let has_inbound = achievable_edges
+                        .iter()
+                        .any(|(_, to)| *to == *status);
+
+                    if has_inbound || statuses.len() <= 6 {
+                        // Build outbound edges with per-edge reasons
+                        let outbound: Vec<serde_json::Value> = edges
+                            .iter()
+                            .filter(|(f, _)| *f == *status)
+                            .map(|(f, t)| {
+                                let witness_rules: Vec<(&str, &[(String, String, String)])> =
+                                    rules
+                                        .iter()
+                                        .filter(|r| {
+                                            r.transitions.iter().any(|(e, _ef, et)| {
+                                                e == *entity && et == *t
+                                            })
+                                        })
+                                        .map(|r| {
+                                            (r.name, r.requires_fields.as_slice())
+                                        })
+                                        .collect();
+                                let reason = edge_blocked_reason(
+                                    &witness_rules, &assigned_fields,
+                                );
+                                serde_json::json!({
+                                    "from": f,
+                                    "to": t,
+                                    "reason": reason,
+                                })
+                            })
+                            .collect();
+
+                        // Detect cycles via DFS through achievable edges
+                        let cycle = detect_cycle(*status, &achievable_edges);
+
+                        self.push_finding(serde_json::json!({
+                            "type": "deadlock",
+                            "summary": format!(
+                                "Entity '{entity}' can reach state '{status}' but has no achievable path to any terminal state"
+                            ),
+                            "state": status,
+                            "outbound_edges": outbound,
+                            "cycle": cycle,
+                            "affected_entities": [entity],
+                        }));
+                    }
+                }
+            }
+        }
+
+        // Unreachable trigger findings — aggregate per trigger
+        let mut unreachable_by_trigger: HashMap<&str, Vec<(&str, Vec<String>)>> = HashMap::new();
+        for rule in self.blocks(BlockKind::Rule) {
+            let rule_name = match &rule.name {
+                Some(n) => n.name.as_str(),
+                None => continue,
+            };
+            for item in &rule.items {
+                let BlockItemKind::Clause { keyword, value } = &item.kind else {
+                    continue;
+                };
+                if keyword != "when" {
+                    continue;
+                }
+                let trigger_names = extract_trigger_names(value);
+                for (name, _span) in trigger_names {
+                    if !surface_triggers.contains(name) && !emitted_triggers.contains(name) {
+                        // Find entity bindings for this rule
+                        let rule_data = rules.iter().find(|r| r.name == rule_name);
+                        let bindings = rule_data
+                            .map(|r| r.entity_bindings.clone())
+                            .unwrap_or_default();
+                        unreachable_by_trigger
+                            .entry(name)
+                            .or_default()
+                            .push((rule_name, bindings));
+                    }
+                }
+            }
+        }
+        for (trigger, rule_entries) in &unreachable_by_trigger {
+            let listening_rules: Vec<&str> = rule_entries.iter().map(|(n, _)| *n).collect();
+            let affected_entities: Vec<String> = rule_entries
+                .iter()
+                .flat_map(|(_, bindings)| bindings.iter().cloned())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            self.push_finding(serde_json::json!({
+                "type": "unreachable_trigger",
+                "summary": format!(
+                    "Trigger '{trigger}' is not provided by any surface"
+                ),
+                "trigger": trigger,
+                "listening_rules": listening_rules,
+                "surfaces_checked": surface_names,
+                "affected_entities": affected_entities,
+            }));
+        }
+    }
+
+    fn collect_conflict_findings(&mut self, info: &EntityInfo<'_>) {
+        let status_by_entity = info.status_by_entity();
+
+        if status_by_entity.is_empty() {
+            return;
+        }
+
+        struct ConflictRule<'b> {
+            name: &'b str,
+            trigger_kind: ConflictTriggerKind<'b>,
+            requires_statuses: HashMap<String, HashSet<String>>,
+            ensures_statuses: HashMap<String, String>,
+        }
+
+        let mut conflict_rules: Vec<ConflictRule> = Vec::new();
+
+        for rule in self.blocks(BlockKind::Rule) {
+            let rule_name = match &rule.name {
+                Some(n) => n.name.as_str(),
+                None => continue,
+            };
+            // Conflict detection resolves entities by name matching against
+            // status_by_entity, not through binding types from when clauses.
+            let binding_types = collect_rule_binding_types(rule, &HashMap::new());
+
+            let mut trigger_kind = ConflictTriggerKind::Unknown;
+            let mut requires_statuses: HashMap<String, HashSet<String>> = HashMap::new();
+            let mut ensures_statuses: HashMap<String, String> = HashMap::new();
+
+            for item in &rule.items {
+                let BlockItemKind::Clause { keyword, value } = &item.kind else {
+                    continue;
+                };
+                match keyword.as_str() {
+                    "when" => {
+                        trigger_kind = classify_trigger(value);
+                    }
+                    "requires" => {
+                        collect_requires_statuses_for_conflict(
+                            value,
+                            &binding_types,
+                            &status_by_entity,
+                            &mut requires_statuses,
+                        );
+                    }
+                    "ensures" => {
+                        collect_ensures_statuses_for_conflict(
+                            value,
+                            &binding_types,
+                            &status_by_entity,
+                            &mut ensures_statuses,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
+            conflict_rules.push(ConflictRule {
+                name: rule_name,
+                trigger_kind,
+                requires_statuses,
+                ensures_statuses,
+            });
+        }
+
+        // Pairwise comparison
+        let mut reported: HashSet<(usize, usize)> = HashSet::new();
+        for i in 0..conflict_rules.len() {
+            for j in (i + 1)..conflict_rules.len() {
+                let a = &conflict_rules[i];
+                let b = &conflict_rules[j];
+
+                if matches!(
+                    (&a.trigger_kind, &b.trigger_kind),
+                    (ConflictTriggerKind::Call(_), ConflictTriggerKind::Call(_))
+                ) {
+                    continue;
+                }
+
+                // Find the overlapping state for the finding
+                let mut overlap_state: Option<(&str, &str)> = None;
+                let mut compatible = false;
+                for (entity, a_statuses) in &a.requires_statuses {
+                    if let Some(b_statuses) = b.requires_statuses.get(entity) {
+                        let intersection: Vec<&String> =
+                            a_statuses.intersection(b_statuses).collect();
+                        if !intersection.is_empty() {
+                            compatible = true;
+                            overlap_state = Some((entity.as_str(), intersection[0].as_str()));
+                            break;
+                        }
+                    }
+                }
+                if !compatible {
+                    continue;
+                }
+
+                for (entity, a_target) in &a.ensures_statuses {
+                    if let Some(b_target) = b.ensures_statuses.get(entity) {
+                        if a_target != b_target && !reported.contains(&(i, j)) {
+                            reported.insert((i, j));
+                            let state = overlap_state
+                                .map(|(_, s)| s.to_string())
+                                .unwrap_or_default();
+                            let mut values = serde_json::Map::new();
+                            values.insert(a.name.to_string(), serde_json::json!(a_target));
+                            values.insert(b.name.to_string(), serde_json::json!(b_target));
+
+                            self.push_finding(serde_json::json!({
+                                "type": "conflict",
+                                "summary": format!(
+                                    "Rules '{}' and '{}' can both fire when entity '{entity}' is in state '{state}', setting status to conflicting values",
+                                    a.name, b.name,
+                                ),
+                                "rule_a": a.name,
+                                "rule_b": b.name,
+                                "field": "status",
+                                "state": state,
+                                "values": values,
+                                "affected_entities": [entity],
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_invariant_findings(&mut self, info: &EntityInfo<'_>) {
+        let status_by_entity = info.status_by_entity();
+        let field_types = &info.field_types;
+
+        struct RuleEffect<'b> {
+            name: &'b str,
+            status_sets: Vec<(String, String)>,
+            field_sets: HashSet<String>,
+            requires: Vec<(String, String, String)>,
+        }
+
+        let binding_map: HashMap<&str, (HashSet<&str>, Vec<&Ident>)> = status_by_entity
+            .iter()
+            .map(|(k, v)| (*k, (v.clone(), Vec::new())))
+            .collect();
+        let binding_map_for_types: HashMap<&str, (Vec<&Ident>, HashSet<&str>)> = status_by_entity
+            .iter()
+            .map(|(k, v)| (*k, (Vec::new(), v.clone())))
+            .collect();
+        let mut rule_effects: Vec<RuleEffect> = Vec::new();
+
+        for rule in self.blocks(BlockKind::Rule) {
+            let rule_name = match &rule.name {
+                Some(n) => n.name.as_str(),
+                None => continue,
+            };
+            let binding_types = collect_rule_binding_types(rule, &binding_map_for_types);
+            let mut status_sets = Vec::new();
+            let mut field_sets = HashSet::new();
+            let mut requires = Vec::new();
+
+            for item in &rule.items {
+                let BlockItemKind::Clause { keyword, value } = &item.kind else {
+                    continue;
+                };
+                match keyword.as_str() {
+                    "ensures" => {
+                        collect_rule_effects(
+                            value,
+                            &binding_types,
+                            &status_by_entity,
+                            &field_types,
+                            &mut status_sets,
+                            &mut field_sets,
+                        );
+                    }
+                    "requires" => {
+                        collect_requires_conditions(
+                            value,
+                            &binding_types,
+                            &binding_map,
+                            &mut |binding, field, val| {
+                                let entity = resolve_binding_entity(
+                                    binding,
+                                    None,
+                                    &binding_types,
+                                    &binding_map_for_types,
+                                );
+                                if let Some(e) = entity {
+                                    requires.push((
+                                        e.to_string(),
+                                        field.to_string(),
+                                        val.to_string(),
+                                    ));
+                                }
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
+            rule_effects.push(RuleEffect {
+                name: rule_name,
+                status_sets,
+                field_sets,
+                requires,
+            });
+        }
+
+        // Check top-level invariants
+        for decl in &self.module.declarations {
+            let Decl::Invariant(inv) = decl else {
+                continue;
+            };
+
+            if let Some(pattern) = extract_uniqueness_invariant(&inv.body) {
+                let key_entity_type: Option<&str> = status_by_entity
+                    .keys()
+                    .find_map(|entity_name| {
+                        field_types
+                            .get(entity_name)
+                            .and_then(|fields| fields.get(pattern.key_field).copied())
+                    });
+
+                for effect in &rule_effects {
+                    for (entity, target) in &effect.status_sets {
+                        if target == pattern.prohibited_status {
+                            let has_guard = key_entity_type.map_or(false, |ket| {
+                                effect.field_sets.iter().any(|f| {
+                                    f.starts_with(&format!("{ket}."))
+                                }) || effect.requires.iter().any(|(e, _f, _v)| {
+                                    e == ket
+                                })
+                            });
+
+                            if !has_guard {
+                                let needed = format!(
+                                    "Rule should set {}.status to prevent concurrent {} states",
+                                    key_entity_type.unwrap_or("related entity"),
+                                    pattern.prohibited_status,
+                                );
+                                self.push_finding(serde_json::json!({
+                                    "type": "invariant_risk",
+                                    "summary": format!(
+                                        "Rule '{}' could violate invariant '{}'",
+                                        effect.name, inv.name.name,
+                                    ),
+                                    "rule": effect.name,
+                                    "invariant": inv.name.name,
+                                    "mechanism": format!(
+                                        "Sets {entity}.status to '{target}' without preventing concurrent instances"
+                                    ),
+                                    "guard_analysis": {
+                                        "has_guard": false,
+                                        "needed": needed,
+                                    },
+                                    "affected_entities": [entity],
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Compute a human-readable reason why a graph edge is blocked.
+///
+/// `witness_rules` contains `(rule_name, requires_fields)` for each rule
+/// that witnesses the transition to `to` on `entity`.
+fn edge_blocked_reason(
+    witness_rules: &[(&str, &[(String, String, String)])],
+    assigned_fields: &HashSet<String>,
+) -> String {
+    if witness_rules.is_empty() {
+        return "no witnessing rule".to_string();
+    }
+
+    for (name, requires_fields) in witness_rules {
+        for (e, f, v) in *requires_fields {
+            if !assigned_fields.contains(&format!("{e}.{f}")) {
+                return format!(
+                    "rule {name} requires {e}.{f} = {v}, never established",
+                );
+            }
+        }
+    }
+
+    "no achievable witnessing rule".to_string()
+}
+
+/// Detect a cycle in the achievable-edge graph starting from `start`.
+/// Returns the cycle as a list of states, or `None` if no cycle exists.
+fn detect_cycle<'a>(
+    start: &'a str,
+    edges: &HashSet<(&'a str, &'a str)>,
+) -> Option<Vec<&'a str>> {
+    // DFS with back-edge detection
+    let mut stack: Vec<(&str, Vec<&str>)> = vec![(start, vec![start])];
+    let mut visited: HashSet<&str> = HashSet::new();
+
+    while let Some((current, path)) = stack.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+        for (from, to) in edges {
+            if *from != current {
+                continue;
+            }
+            if let Some(pos) = path.iter().position(|s| *s == *to) {
+                // Found a back-edge — extract the cycle
+                let mut cycle: Vec<&str> = path[pos..].to_vec();
+                cycle.push(to);
+                return Some(cycle);
+            }
+            let mut next_path = path.clone();
+            next_path.push(to);
+            // Re-insert current so it can be visited on this new path
+            visited.remove(to);
+            stack.push((to, next_path));
+        }
+    }
+    None
+}
+
+/// Collect fields that surfaces provide via trigger call bindings.
+fn collect_surface_provided_fields(
+    expr: &Expr,
+    status_values: &HashMap<&str, (HashSet<&str>, Vec<&Ident>)>,
+    out: &mut HashSet<String>,
+) {
+    match expr {
+        Expr::Call { function, args, .. } => {
+            if let Expr::Ident(fn_name) = function.as_ref() {
+                // Surface provides a trigger like TriggerName(entity) — the entity
+                // bindings' fields are "provided" by this surface
+                for arg in args {
+                    if let CallArg::Positional(Expr::Ident(binding)) = arg {
+                        // Check if this binding matches a known entity
+                        if status_values.contains_key(binding.name.as_str()) {
+                            // Mark all fields of this entity as surface-provided
+                            out.insert(format!("{}.status", binding.name));
+                        }
+                    }
+                    if let CallArg::Named(named) = arg {
+                        if let Expr::Ident(val) = &named.value {
+                            if status_values.contains_key(val.name.as_str()) {
+                                out.insert(format!("{}.{}", val.name, named.name.name));
+                            }
+                        }
+                    }
+                }
+                // Also just note that this trigger name is surface-provided
+                let _ = fn_name;
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_surface_provided_fields(item, status_values, out);
+            }
+        }
+        Expr::WhenGuard { action, .. } => {
+            collect_surface_provided_fields(action, status_values, out);
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_surface_provided_fields(&b.body, status_values, out);
+            }
+            if let Some(body) = else_body {
+                collect_surface_provided_fields(body, status_values, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract status assignments and field assignments from a rule's ensures clause.
+fn collect_rule_effects(
+    expr: &Expr,
+    binding_types: &HashMap<&str, &str>,
+    status_by_entity: &HashMap<&str, HashSet<&str>>,
+    field_types: &HashMap<&str, HashMap<&str, &str>>,
+    status_sets: &mut Vec<(String, String)>,
+    field_sets: &mut HashSet<String>,
+) {
+    match expr {
+        Expr::Comparison {
+            left,
+            op: ComparisonOp::Eq,
+            right,
+            ..
+        } => {
+            if let Some(target) = expr_as_ident(right) {
+                if let Some((binding, field)) = expr_as_member_access(left) {
+                    let entity = resolve_binding_entity(
+                        binding,
+                        if field == "status" { Some(target) } else { None },
+                        binding_types,
+                        &status_by_entity
+                            .iter()
+                            .map(|(k, v)| (*k, (Vec::new(), v.clone())))
+                            .collect(),
+                    );
+                    if let Some(e) = entity {
+                        if field == "status" {
+                            status_sets.push((e.to_string(), target.to_string()));
+                        }
+                        field_sets.insert(format!("{e}.{field}"));
+                    }
+                }
+                // Nested: binding.field.subfield = value
+                if let Some((root, mid, field)) = expr_as_nested_member_access(left) {
+                    let root_entity = resolve_binding_entity(
+                        root,
+                        None,
+                        binding_types,
+                        &status_by_entity
+                            .iter()
+                            .map(|(k, v)| (*k, (Vec::new(), v.clone())))
+                            .collect(),
+                    );
+                    if let Some(re) = root_entity {
+                        if let Some(nested) =
+                            field_types.get(re).and_then(|f| f.get(mid).copied())
+                        {
+                            if field == "status" {
+                                status_sets.push((nested.to_string(), target.to_string()));
+                            }
+                            field_sets.insert(format!("{nested}.{field}"));
+                        }
+                    }
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_rule_effects(
+                    item, binding_types, status_by_entity, field_types, status_sets, field_sets,
+                );
+            }
+        }
+        Expr::Conditional {
+            branches,
+            else_body,
+            ..
+        } => {
+            for branch in branches {
+                collect_rule_effects(
+                    &branch.body, binding_types, status_by_entity, field_types, status_sets,
+                    field_sets,
+                );
+            }
+            if let Some(body) = else_body {
+                collect_rule_effects(
+                    body, binding_types, status_by_entity, field_types, status_sets, field_sets,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A uniqueness invariant pattern:
+/// `for a in X: for b in X: a != b and a.key = b.key implies not (a.status = V and b.status = V)`
+struct UniquenessPattern<'a> {
+    prohibited_status: &'a str,
+    key_field: &'a str,
+}
+
+/// Try to extract a uniqueness invariant pattern from an invariant body.
+fn extract_uniqueness_invariant<'a>(expr: &'a Expr) -> Option<UniquenessPattern<'a>> {
+    // Match: for a in X: for b in X: ... implies not (... and ...)
+    let Expr::For { body, .. } = expr else {
+        return None;
+    };
+    let Expr::For { body: inner_body, .. } = body.as_ref() else {
+        return None;
+    };
+
+    // The inner body should be an implies expression
+    let Expr::LogicalOp {
+        op: LogicalOp::Implies,
+        left: premise,
+        right: conclusion,
+        ..
+    } = inner_body.as_ref()
+    else {
+        return None;
+    };
+
+    // The conclusion should be `not (a.status = V and b.status = V)`
+    let Expr::Not { operand, .. } = conclusion.as_ref() else {
+        return None;
+    };
+
+    // Extract the prohibited status from the negated conjunction
+    let prohibited = extract_prohibited_status(operand)?;
+
+    // Extract the key field from the premise (a.key = b.key)
+    let key_field = extract_key_field(premise)?;
+
+    Some(UniquenessPattern {
+        prohibited_status: prohibited,
+        key_field,
+    })
+}
+
+/// Extract the prohibited status value from `a.status = V and b.status = V`.
+fn extract_prohibited_status(expr: &Expr) -> Option<&str> {
+    let Expr::LogicalOp {
+        op: LogicalOp::And,
+        left,
+        right,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+
+    // Both sides should be status comparisons with the same value
+    let l_status = extract_status_value(left)?;
+    let r_status = extract_status_value(right)?;
+
+    if l_status == r_status {
+        Some(l_status)
+    } else {
+        None
+    }
+}
+
+fn extract_status_value(expr: &Expr) -> Option<&str> {
+    if let Expr::Comparison {
+        left,
+        op: ComparisonOp::Eq,
+        right,
+        ..
+    } = expr
+    {
+        if let Some((_, "status")) = expr_as_member_access(left) {
+            return expr_as_ident(right);
+        }
+    }
+    None
+}
+
+/// Extract the key entity type from `a != b and a.key = b.key`.
+fn extract_key_field(expr: &Expr) -> Option<&str> {
+    let Expr::LogicalOp {
+        op: LogicalOp::And,
+        left: _,
+        right,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+
+    // right should be a.key = b.key where key is a relationship to an entity
+    if let Expr::Comparison {
+        left,
+        op: ComparisonOp::Eq,
+        right: _,
+        ..
+    } = right.as_ref()
+    {
+        if let Some((_, field)) = expr_as_member_access(left) {
+            // The field name is the relationship name. We need the entity type.
+            // For simplicity, use the field name capitalised as the entity type.
+            // A more robust approach would look up the field type.
+            return Some(field);
+        }
+    }
+    None
+}
+
+#[derive(PartialEq)]
+enum ConflictTriggerKind<'a> {
+    Call(&'a str),
+    Temporal,
+    Unknown,
+}
+
+fn classify_trigger(expr: &Expr) -> ConflictTriggerKind<'_> {
+    match expr {
+        Expr::Call { function, .. } => {
+            if let Expr::Ident(id) = function.as_ref() {
+                return ConflictTriggerKind::Call(&id.name);
+            }
+            ConflictTriggerKind::Unknown
+        }
+        Expr::Binding { value, .. } => classify_trigger(value),
+        Expr::Comparison { .. }
+        | Expr::Becomes { .. }
+        | Expr::TransitionsTo { .. } => ConflictTriggerKind::Temporal,
+        _ => ConflictTriggerKind::Unknown,
+    }
+}
+
+fn collect_requires_statuses_for_conflict(
+    expr: &Expr,
+    binding_types: &HashMap<&str, &str>,
+    status_by_entity: &HashMap<&str, HashSet<&str>>,
+    out: &mut HashMap<String, HashSet<String>>,
+) {
+    match expr {
+        Expr::Comparison {
+            left,
+            op: ComparisonOp::Eq,
+            right,
+            ..
+        } => {
+            if let (Some((binding, "status")), Some(target)) =
+                (expr_as_member_access(left), expr_as_ident(right))
+            {
+                let entity = resolve_binding_entity(
+                    binding,
+                    Some(target),
+                    binding_types,
+                    &status_by_entity
+                        .iter()
+                        .map(|(k, v)| (*k, (Vec::new(), v.clone())))
+                        .collect(),
+                );
+                if let Some(e) = entity {
+                    out.entry(e.to_string()).or_default().insert(target.to_string());
+                }
+            }
+        }
+        Expr::LogicalOp { left, right, .. } => {
+            collect_requires_statuses_for_conflict(left, binding_types, status_by_entity, out);
+            collect_requires_statuses_for_conflict(right, binding_types, status_by_entity, out);
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_requires_statuses_for_conflict(item, binding_types, status_by_entity, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_ensures_statuses_for_conflict(
+    expr: &Expr,
+    binding_types: &HashMap<&str, &str>,
+    status_by_entity: &HashMap<&str, HashSet<&str>>,
+    out: &mut HashMap<String, String>,
+) {
+    match expr {
+        Expr::Comparison {
+            left,
+            op: ComparisonOp::Eq,
+            right,
+            ..
+        } => {
+            if let (Some((binding, "status")), Some(target)) =
+                (expr_as_member_access(left), expr_as_ident(right))
+            {
+                let entity = resolve_binding_entity(
+                    binding,
+                    Some(target),
+                    binding_types,
+                    &status_by_entity
+                        .iter()
+                        .map(|(k, v)| (*k, (Vec::new(), v.clone())))
+                        .collect(),
+                );
+                if let Some(e) = entity {
+                    out.insert(e.to_string(), target.to_string());
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_ensures_statuses_for_conflict(item, binding_types, status_by_entity, out);
+            }
+        }
+        Expr::Conditional {
+            branches,
+            else_body,
+            ..
+        } => {
+            for branch in branches {
+                collect_ensures_statuses_for_conflict(
+                    &branch.body, binding_types, status_by_entity, out,
+                );
+            }
+            if let Some(body) = else_body {
+                collect_ensures_statuses_for_conflict(body, binding_types, status_by_entity, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Convert status_values to the format expected by collect_rule_binding_types.
+fn status_values_for_binding<'a>(
+    status_values: &'a HashMap<&'a str, (HashSet<&'a str>, Vec<&'a Ident>)>,
+) -> HashMap<&'a str, (Vec<&'a Ident>, HashSet<&'a str>)> {
+    status_values
+        .iter()
+        .map(|(k, (set, idents))| (*k, (idents.clone(), set.clone())))
+        .collect()
+}
+
+/// Resolve a binding to an entity name using binding_types, case-insensitive
+/// match, and optionally target status inference.
+fn resolve_binding_entity_from_status<'a>(
+    binding: &str,
+    target: Option<&str>,
+    binding_types: &HashMap<&'a str, &'a str>,
+    status_values: &HashMap<&'a str, (HashSet<&'a str>, Vec<&Ident>)>,
+) -> Option<&'a str> {
+    binding_types
+        .get(binding)
+        .copied()
+        .or_else(|| {
+            status_values
+                .keys()
+                .find(|name| name.eq_ignore_ascii_case(binding))
+                .copied()
+        })
+        .or_else(|| {
+            let target = target?;
+            let mut candidates = status_values
+                .iter()
+                .filter(|(_, (values, _))| values.contains(target));
+            let first = candidates.next()?;
+            if candidates.next().is_none() {
+                Some(first.0)
+            } else {
+                None
+            }
+        })
+}
+
+/// Collect requires conditions from a requires expression.
+fn collect_requires_conditions<'a>(
+    expr: &'a Expr,
+    binding_types: &HashMap<&'a str, &'a str>,
+    status_values: &HashMap<&str, (HashSet<&str>, Vec<&Ident>)>,
+    cb: &mut impl FnMut(&'a str, &'a str, &'a str),
+) {
+    match expr {
+        Expr::Comparison {
+            left,
+            op: ComparisonOp::Eq,
+            right,
+            ..
+        } => {
+            if let Some(target) = expr_as_ident(right) {
+                if let Some((binding, field)) = expr_as_member_access(left) {
+                    cb(binding, field, target);
+                } else if let Some((root, _mid, field)) =
+                    expr_as_nested_member_access(left)
+                {
+                    if field == "status" {
+                        cb(root, "status", target);
+                    }
+                }
+            }
+            // Also handle literal true/false on the right
+            if let Expr::BoolLiteral { value: true, .. } = right.as_ref() {
+                if let Some((binding, field)) = expr_as_member_access(left) {
+                    cb(binding, field, "true");
+                }
+            }
+        }
+        Expr::Comparison {
+            op: ComparisonOp::GtEq,
+            ..
+        } => {
+            // Comparisons like balance >= amount are not field-value conditions
+        }
+        Expr::LogicalOp { left, right, .. } => {
+            collect_requires_conditions(left, binding_types, status_values, cb);
+            collect_requires_conditions(right, binding_types, status_values, cb);
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_requires_conditions(item, binding_types, status_values, cb);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect field assignments from ensures expressions.
+fn collect_field_assignments<'a>(
+    expr: &'a Expr,
+    binding_types: &HashMap<&'a str, &'a str>,
+    status_values: &HashMap<&str, (HashSet<&str>, Vec<&Ident>)>,
+    field_types: &HashMap<&str, HashMap<&str, &str>>,
+    cb: &mut impl FnMut(&str, &str, &str),
+) {
+    match expr {
+        Expr::Comparison {
+            left,
+            op: ComparisonOp::Eq,
+            right,
+            ..
+        } => {
+            if let Some((binding, field)) = expr_as_member_access(left) {
+                let entity = resolve_binding_entity_from_status(
+                    binding, None, binding_types, status_values,
+                );
+                if let Some(entity) = entity {
+                    let val = expr_as_ident(right).unwrap_or("_variable_");
+                    cb(entity, field, val);
+                }
+            }
+            // Nested: binding.field.subfield = value
+            if let Some((root, mid, field)) = expr_as_nested_member_access(left) {
+                let root_entity = resolve_binding_entity_from_status(
+                    root, None, binding_types, status_values,
+                );
+                if let Some(root_entity) = root_entity {
+                    if let Some(nested) =
+                        field_types.get(root_entity).and_then(|f| f.get(mid).copied())
+                    {
+                        let val = expr_as_ident(right).unwrap_or("_variable_");
+                        cb(nested, field, val);
+                    }
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_field_assignments(item, binding_types, status_values, field_types, cb);
+            }
+        }
+        Expr::Conditional {
+            branches,
+            else_body,
+            ..
+        } => {
+            for branch in branches {
+                collect_field_assignments(
+                    &branch.body, binding_types, status_values, field_types, cb,
+                );
+            }
+            if let Some(body) = else_body {
+                collect_field_assignments(body, binding_types, status_values, field_types, cb);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect status assignments from ensures (simplified version for transition building).
+fn collect_ensures_status<'a>(
+    expr: &'a Expr,
+    binding_types: &HashMap<&'a str, &'a str>,
+    status_values: &HashMap<&str, (HashSet<&str>, Vec<&Ident>)>,
+    field_types: &HashMap<&str, HashMap<&str, &str>>,
+    cb: &mut impl FnMut(&'a str, &'a str),
+) {
+    match expr {
+        Expr::Comparison {
+            left,
+            op: ComparisonOp::Eq,
+            right,
+            ..
+        } => {
+            if let Some(target) = expr_as_ident(right) {
+                // Only track direct binding.status (not nested) to avoid
+                // cross-contamination when root binding accesses different entities
+                if let Some((binding, "status")) = expr_as_member_access(left) {
+                    cb(binding, target);
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_ensures_status(item, binding_types, status_values, field_types, cb);
+            }
+        }
+        Expr::Conditional {
+            branches,
+            else_body,
+            ..
+        } => {
+            for branch in branches {
+                collect_ensures_status(
+                    &branch.body, binding_types, status_values, field_types, cb,
+                );
+            }
+            if let Some(body) = else_body {
+                collect_ensures_status(body, binding_types, status_values, field_types, cb);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect field assignments from .created() calls.
+fn collect_created_field_assignments<'a>(
+    expr: &'a Expr,
+    status_values: &HashMap<&str, (HashSet<&str>, Vec<&Ident>)>,
+    assigned: &mut HashSet<String>,
+) {
+    match expr {
+        Expr::Call { function, args, .. } => {
+            if let Expr::MemberAccess { object, field, .. } = function.as_ref() {
+                if field.name == "created" {
+                    if let Expr::Ident(entity_id) = object.as_ref() {
+                        let entity = entity_id.name.as_str();
+                        if status_values.contains_key(entity) {
+                            for arg in args {
+                                if let CallArg::Named(named) = arg {
+                                    assigned.insert(format!(
+                                        "{entity}.{}", named.name.name
+                                    ));
+                                    // Track per-value for status assignments
+                                    if named.name.name == "status" {
+                                        if let Expr::Ident(val) = &named.value {
+                                            assigned.insert(format!(
+                                                "{entity}.status.{}", val.name
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_created_field_assignments(item, status_values, assigned);
+            }
+        }
+        Expr::Conditional {
+            branches,
+            else_body,
+            ..
+        } => {
+            for branch in branches {
+                collect_created_field_assignments(&branch.body, status_values, assigned);
+            }
+            if let Some(body) = else_body {
+                collect_created_field_assignments(body, status_values, assigned);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -679,6 +2304,7 @@ fn visit_status_assignments<'a>(
     expr: &'a Expr,
     binding_types: &HashMap<&'a str, &'a str>,
     status_by_entity: &HashMap<&'a str, (Vec<&Ident>, HashSet<&'a str>)>,
+    field_entity_types: &HashMap<&'a str, HashMap<&'a str, &'a str>>,
     cb: &mut impl FnMut(&'a str, &'a str, &'a str),
 ) {
     match expr {
@@ -688,23 +2314,50 @@ fn visit_status_assignments<'a>(
             right,
             ..
         } => {
-            if let (Some((binding, "status")), Some(target)) =
-                (expr_as_member_access(left), expr_as_ident(right))
-            {
-                let entity = binding_types.get(binding).copied().or_else(|| {
-                    status_by_entity
-                        .keys()
-                        .find(|name| name.eq_ignore_ascii_case(binding))
-                        .copied()
-                });
-                if let Some(entity) = entity {
-                    cb(binding, target, entity);
+            if let Some(target) = expr_as_ident(right) {
+                // Direct: binding.status = value
+                if let Some((binding, "status")) = expr_as_member_access(left) {
+                    let entity = resolve_binding_entity(
+                        binding,
+                        Some(target),
+                        binding_types,
+                        status_by_entity,
+                    );
+                    if let Some(entity) = entity {
+                        cb(binding, target, entity);
+                    }
+                }
+                // Nested: binding.field.status = value
+                // Only add to assigned_by_entity, NOT to transitions
+                // (using root binding for transitions causes cross-contamination)
+                else if let Some((root, field, "status")) =
+                    expr_as_nested_member_access(left)
+                {
+                    let root_entity = resolve_binding_entity(
+                        root, None, binding_types, status_by_entity,
+                    );
+                    if let Some(root_entity) = root_entity {
+                        if let Some(nested_entity) = field_entity_types
+                            .get(root_entity)
+                            .and_then(|fields| fields.get(field).copied())
+                        {
+                            // Only track assignment, skip transition building
+                            // by using a sentinel binding key
+                            cb("_nested_", target, nested_entity);
+                        }
+                    }
                 }
             }
         }
         Expr::Block { items, .. } => {
             for item in items {
-                visit_status_assignments(item, binding_types, status_by_entity, cb);
+                visit_status_assignments(
+                    item,
+                    binding_types,
+                    status_by_entity,
+                    field_entity_types,
+                    cb,
+                );
             }
         }
         Expr::Conditional {
@@ -713,10 +2366,115 @@ fn visit_status_assignments<'a>(
             ..
         } => {
             for branch in branches {
-                visit_status_assignments(&branch.body, binding_types, status_by_entity, cb);
+                visit_status_assignments(
+                    &branch.body,
+                    binding_types,
+                    status_by_entity,
+                    field_entity_types,
+                    cb,
+                );
             }
             if let Some(body) = else_body {
-                visit_status_assignments(body, binding_types, status_by_entity, cb);
+                visit_status_assignments(
+                    body,
+                    binding_types,
+                    status_by_entity,
+                    field_entity_types,
+                    cb,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walk an ensures expression tree looking for `Entity.created(status: value)` calls.
+/// Adds valid status values to the assigned set via `on_status`. Collects diagnostics
+/// for missing or invalid status arguments into `issues`.
+fn visit_created_calls<'a>(
+    expr: &'a Expr,
+    status_by_entity: &HashMap<&'a str, (Vec<&Ident>, HashSet<&'a str>)>,
+    has_transitions: &HashSet<&'a str>,
+    on_status: &mut impl FnMut(&'a str, &'a str),
+    issues: &mut Vec<Diagnostic>,
+) {
+    match expr {
+        Expr::Call {
+            function, args, span, ..
+        } => {
+            if let Expr::MemberAccess { object, field, .. } = function.as_ref() {
+                if field.name == "created" {
+                    if let Expr::Ident(entity_ident) = object.as_ref() {
+                        let entity_name = entity_ident.name.as_str();
+                        if let Some((_, values)) = status_by_entity.get(entity_name) {
+                            let status_arg = args.iter().find_map(|arg| {
+                                if let CallArg::Named(named) = arg {
+                                    if named.name.name == "status" {
+                                        return Some(named);
+                                    }
+                                }
+                                None
+                            });
+
+                            match status_arg {
+                                Some(named) => {
+                                    if let Expr::Ident(status_ident) = &named.value {
+                                        let status = status_ident.name.as_str();
+                                        if values.contains(status) {
+                                            on_status(entity_name, status);
+                                        } else {
+                                            issues.push(
+                                                Diagnostic::error(
+                                                    named.value.span(),
+                                                    format!(
+                                                        ".created() on entity '{entity_name}' sets status to '{status}', which is not a declared status value.",
+                                                    ),
+                                                )
+                                                .with_code("allium.created.invalidStatus"),
+                                            );
+                                        }
+                                    }
+                                }
+                                None => {
+                                    if has_transitions.contains(entity_name) {
+                                        issues.push(
+                                            Diagnostic::warning(
+                                                *span,
+                                                format!(
+                                                    ".created() on entity '{entity_name}' omits the status field, but the entity has a transition graph. The initial state is unspecified.",
+                                                ),
+                                            )
+                                            .with_code("allium.created.missingStatus"),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                visit_created_calls(item, status_by_entity, has_transitions, on_status, issues);
+            }
+        }
+        Expr::Conditional {
+            branches,
+            else_body,
+            ..
+        } => {
+            for branch in branches {
+                visit_created_calls(
+                    &branch.body,
+                    status_by_entity,
+                    has_transitions,
+                    on_status,
+                    issues,
+                );
+            }
+            if let Some(body) = else_body {
+                visit_created_calls(body, status_by_entity, has_transitions, on_status, issues);
             }
         }
         _ => {}
@@ -727,6 +2485,7 @@ fn visit_status_comparisons<'a>(
     expr: &'a Expr,
     binding_types: &HashMap<&'a str, &'a str>,
     status_by_entity: &HashMap<&'a str, (Vec<&Ident>, HashSet<&'a str>)>,
+    field_entity_types: &HashMap<&'a str, HashMap<&'a str, &'a str>>,
     cb: &mut impl FnMut(&'a str, &'a str),
 ) {
     match expr {
@@ -736,25 +2495,33 @@ fn visit_status_comparisons<'a>(
             right,
             ..
         } => {
-            if let (Some((binding, "status")), Some(target)) =
-                (expr_as_member_access(left), expr_as_ident(right))
-            {
-                let known = binding_types.contains_key(binding)
-                    || status_by_entity
-                        .keys()
-                        .any(|name| name.eq_ignore_ascii_case(binding));
-                if known {
-                    cb(binding, target);
+            if let Some(target) = expr_as_ident(right) {
+                // Direct: binding.status = value
+                if let Some((binding, "status")) = expr_as_member_access(left) {
+                    let known = resolve_binding_entity(
+                        binding,
+                        Some(target),
+                        binding_types,
+                        status_by_entity,
+                    )
+                    .is_some();
+                    if known {
+                        cb(binding, target);
+                    }
                 }
+                // Nested patterns (binding.field.status) are NOT tracked for
+                // transition building to avoid cross-contamination when the
+                // same root binding accesses different entities. Nested
+                // assignments are still tracked for reachability.
             }
         }
         Expr::LogicalOp { left, right, .. } => {
-            visit_status_comparisons(left, binding_types, status_by_entity, cb);
-            visit_status_comparisons(right, binding_types, status_by_entity, cb);
+            visit_status_comparisons(left, binding_types, status_by_entity, field_entity_types, cb);
+            visit_status_comparisons(right, binding_types, status_by_entity, field_entity_types, cb);
         }
         Expr::Block { items, .. } => {
             for item in items {
-                visit_status_comparisons(item, binding_types, status_by_entity, cb);
+                visit_status_comparisons(item, binding_types, status_by_entity, field_entity_types, cb);
             }
         }
         _ => {}
@@ -765,6 +2532,77 @@ fn expr_as_member_access(expr: &Expr) -> Option<(&str, &str)> {
     match expr {
         Expr::MemberAccess { object, field, .. } => {
             expr_as_ident(object).map(|obj| (obj, field.name.as_str()))
+        }
+        _ => None,
+    }
+}
+
+/// Extract `binding.field.last` from a double-level member access.
+fn expr_as_nested_member_access(expr: &Expr) -> Option<(&str, &str, &str)> {
+    if let Expr::MemberAccess {
+        object, field: last, ..
+    } = expr
+    {
+        if let Expr::MemberAccess {
+            object: root_obj,
+            field: mid,
+            ..
+        } = object.as_ref()
+        {
+            if let Expr::Ident(root) = root_obj.as_ref() {
+                return Some((&root.name, &mid.name, &last.name));
+            }
+        }
+    }
+    None
+}
+
+/// Resolve a binding name to an entity name using available strategies:
+/// 1. Explicit binding type from when clause
+/// 2. Case-insensitive match against entity names
+/// 3. Infer from target status value (if unique to one entity)
+fn resolve_binding_entity<'a>(
+    binding: &str,
+    target: Option<&str>,
+    binding_types: &HashMap<&'a str, &'a str>,
+    status_by_entity: &HashMap<&'a str, (Vec<&Ident>, HashSet<&'a str>)>,
+) -> Option<&'a str> {
+    binding_types
+        .get(binding)
+        .copied()
+        .or_else(|| {
+            status_by_entity
+                .keys()
+                .find(|name| name.eq_ignore_ascii_case(binding))
+                .copied()
+        })
+        .or_else(|| {
+            // Infer from target status: if the value belongs to exactly one entity, use it
+            let target = target?;
+            let mut candidates = status_by_entity
+                .iter()
+                .filter(|(_, (_, values))| values.contains(target));
+            let first = candidates.next()?;
+            if candidates.next().is_none() {
+                Some(first.0)
+            } else {
+                None
+            }
+        })
+}
+
+/// Extract the entity type name from a field declaration value.
+/// Handles `Payment`, `InterviewSlot with candidacy = this`, etc.
+fn extract_field_entity_type(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Ident(id) if starts_uppercase(&id.name) => Some(&id.name),
+        Expr::JoinLookup { entity, .. } => {
+            if let Expr::Ident(id) = entity.as_ref() {
+                if starts_uppercase(&id.name) {
+                    return Some(&id.name);
+                }
+            }
+            None
         }
         _ => None,
     }
@@ -2262,195 +4100,6 @@ impl Ctx<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// 15. Surface unused paths
-// ---------------------------------------------------------------------------
-
-impl Ctx<'_> {
-    fn check_surface_unused_paths(&mut self) {
-        // Collect all field access paths from rules
-        let mut rule_paths: HashSet<String> = HashSet::new();
-        for rule in self.blocks(BlockKind::Rule) {
-            for item in &rule.items {
-                collect_dotpaths_from_item(&item.kind, &mut rule_paths);
-            }
-        }
-
-        for surface in self.blocks(BlockKind::Surface) {
-            let surface_name = match &surface.name {
-                Some(n) => &n.name,
-                None => continue,
-            };
-
-            // Collect binding names
-            let mut binding_names: HashSet<&str> = HashSet::new();
-            for item in &surface.items {
-                let BlockItemKind::Clause { keyword, value } = &item.kind else {
-                    continue;
-                };
-                if keyword == "facing" || keyword == "context" {
-                    if let Expr::Binding { name, .. } = value {
-                        binding_names.insert(&name.name);
-                    }
-                }
-            }
-
-            for item in &surface.items {
-                let BlockItemKind::Clause { keyword, value } = &item.kind else {
-                    continue;
-                };
-                if keyword != "exposes" {
-                    continue;
-                }
-                check_unused_surface_paths(
-                    value,
-                    &binding_names,
-                    &rule_paths,
-                    surface_name,
-                    &mut self.diagnostics,
-                );
-            }
-        }
-    }
-}
-
-fn check_unused_surface_paths(
-    expr: &Expr,
-    binding_names: &HashSet<&str>,
-    rule_paths: &HashSet<String>,
-    surface_name: &str,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    match expr {
-        Expr::MemberAccess { object, field, .. } => {
-            // Check if root is a binding
-            if let Expr::Ident(root) = object.as_ref() {
-                if binding_names.contains(root.name.as_str()) {
-                    let path = format!("{}.{}", root.name, field.name);
-                    // Check if any rule references this field
-                    let field_used = rule_paths.iter().any(|p| p.ends_with(&format!(".{}", field.name)));
-                    if !field_used {
-                        diagnostics.push(
-                            Diagnostic::info(
-                                expr.span(),
-                                format!(
-                                    "Surface '{surface_name}' path '{path}' is not observed in rule field references.",
-                                ),
-                            )
-                            .with_code("allium.surface.unusedPath"),
-                        );
-                    }
-                }
-            }
-        }
-        Expr::Block { items, .. } => {
-            for item in items {
-                check_unused_surface_paths(item, binding_names, rule_paths, surface_name, diagnostics);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_dotpaths_from_item(kind: &BlockItemKind, out: &mut HashSet<String>) {
-    match kind {
-        BlockItemKind::Clause { value, .. }
-        | BlockItemKind::Assignment { value, .. }
-        | BlockItemKind::Let { value, .. }
-        | BlockItemKind::FieldWithWhen { value, .. } => {
-            collect_dotpaths_from_expr(value, out);
-        }
-        BlockItemKind::ForBlock {
-            collection,
-            filter,
-            items,
-            ..
-        } => {
-            collect_dotpaths_from_expr(collection, out);
-            if let Some(f) = filter {
-                collect_dotpaths_from_expr(f, out);
-            }
-            for item in items {
-                collect_dotpaths_from_item(&item.kind, out);
-            }
-        }
-        BlockItemKind::IfBlock {
-            branches,
-            else_items,
-        } => {
-            for b in branches {
-                collect_dotpaths_from_expr(&b.condition, out);
-                for item in &b.items {
-                    collect_dotpaths_from_item(&item.kind, out);
-                }
-            }
-            if let Some(items) = else_items {
-                for item in items {
-                    collect_dotpaths_from_item(&item.kind, out);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_dotpaths_from_expr(expr: &Expr, out: &mut HashSet<String>) {
-    match expr {
-        Expr::MemberAccess { object, field, .. } => {
-            out.insert(format!("{}.{}", expr_root_name(object).unwrap_or("?"), field.name));
-            collect_dotpaths_from_expr(object, out);
-        }
-        Expr::Comparison { left, right, .. } => {
-            collect_dotpaths_from_expr(left, out);
-            collect_dotpaths_from_expr(right, out);
-        }
-        Expr::LogicalOp { left, right, .. } => {
-            collect_dotpaths_from_expr(left, out);
-            collect_dotpaths_from_expr(right, out);
-        }
-        Expr::Block { items, .. } => {
-            for item in items {
-                collect_dotpaths_from_expr(item, out);
-            }
-        }
-        Expr::Call { function, args, .. } => {
-            collect_dotpaths_from_expr(function, out);
-            for a in args {
-                match a {
-                    CallArg::Positional(e) => collect_dotpaths_from_expr(e, out),
-                    CallArg::Named(n) => {
-                        // Named args in Entity.created(field: value) reference the field
-                        out.insert(format!("_.{}", n.name.name));
-                        collect_dotpaths_from_expr(&n.value, out);
-                    }
-                }
-            }
-        }
-        Expr::In { element, collection, .. } | Expr::NotIn { element, collection, .. } => {
-            collect_dotpaths_from_expr(element, out);
-            collect_dotpaths_from_expr(collection, out);
-        }
-        Expr::Conditional { branches, else_body, .. } => {
-            for b in branches {
-                collect_dotpaths_from_expr(&b.condition, out);
-                collect_dotpaths_from_expr(&b.body, out);
-            }
-            if let Some(body) = else_body {
-                collect_dotpaths_from_expr(body, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn expr_root_name(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Ident(id) => Some(&id.name),
-        Expr::MemberAccess { object, .. } => expr_root_name(object),
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Shared helpers: AST walking
 // ---------------------------------------------------------------------------
 
@@ -2626,6 +4275,20 @@ mod tests {
         diagnostics.iter().filter(|d| d.code == Some(code)).count()
     }
 
+    fn analyse_src(src: &str) -> crate::diagnostic::AnalyseResult {
+        let input = if src.starts_with("-- allium:") {
+            src.to_string()
+        } else {
+            format!("-- allium: 3\n{src}")
+        };
+        let result = parse(&input);
+        analyse(&result.module, &input)
+    }
+
+    fn has_finding(result: &crate::diagnostic::AnalyseResult, finding_type: &str) -> bool {
+        result.findings.iter().any(|f| f["type"] == finding_type)
+    }
+
     // -- Suppression --
 
     #[test]
@@ -2688,6 +4351,315 @@ mod tests {
         );
         assert!(!has_code(&ds, "allium.status.unreachableValue"));
         assert!(!has_code(&ds, "allium.status.noExit"));
+    }
+
+    // -- .created() status tracing (enhancement 1) --
+
+    #[test]
+    fn created_with_status_suppresses_unreachable() {
+        let ds = analyze_src(
+            "entity Order {\n  status: pending | confirmed\n  customer: String\n  \
+             transitions status {\n    pending -> confirmed\n    terminal: confirmed\n  }\n}\n\n\
+             rule PlaceOrder {\n  when: CustomerPlacesOrder(customer)\n  ensures:\n    \
+             Order.created(\n      status: pending,\n      customer: customer\n    )\n}\n\n\
+             rule ConfirmOrder {\n  when: SellerConfirms(seller, order)\n  \
+             requires: order.status = pending\n  ensures: order.status = confirmed\n}\n",
+        );
+        assert!(!has_code(&ds, "allium.status.unreachableValue"));
+    }
+
+    #[test]
+    fn created_omitting_status_warns() {
+        let ds = analyze_src(
+            "entity Order {\n  status: pending | confirmed\n  customer: String\n  \
+             transitions status {\n    pending -> confirmed\n    terminal: confirmed\n  }\n}\n\n\
+             rule PlaceOrder {\n  when: CustomerPlacesOrder(customer)\n  ensures:\n    \
+             Order.created(\n      customer: customer\n    )\n}\n",
+        );
+        assert!(has_code(&ds, "allium.created.missingStatus"));
+    }
+
+    #[test]
+    fn created_multiple_initial_statuses() {
+        let ds = analyze_src(
+            "entity Proposal {\n  status: draft | submitted | reviewed\n  author: String\n  \
+             transitions status {\n    draft -> submitted\n    submitted -> reviewed\n    \
+             terminal: reviewed\n  }\n}\n\n\
+             rule CreateDraft {\n  when: AuthorStarts(author)\n  ensures:\n    \
+             Proposal.created(status: draft, author: author)\n}\n\n\
+             rule SubmitDirectly {\n  when: AuthorSubmits(author)\n  ensures:\n    \
+             Proposal.created(status: submitted, author: author)\n}\n\n\
+             rule Review {\n  when: ReviewerReviews(proposal)\n  \
+             requires: proposal.status = submitted\n  ensures: proposal.status = reviewed\n}\n",
+        );
+        // draft and submitted are set via .created(), reviewed via ensures — none should be unreachable
+        assert!(!has_code(&ds, "allium.status.unreachableValue"));
+    }
+
+    #[test]
+    fn created_invalid_status_errors() {
+        let ds = analyze_src(
+            "entity Task {\n  status: open | in_progress | done\n  title: String\n  \
+             transitions status {\n    open -> in_progress\n    in_progress -> done\n    \
+             terminal: done\n  }\n}\n\n\
+             rule ImportTask {\n  when: SystemImports(title)\n  ensures:\n    \
+             Task.created(status: archived, title: title)\n}\n",
+        );
+        assert!(has_code(&ds, "allium.created.invalidStatus"));
+    }
+
+    #[test]
+    fn created_without_transitions_no_missing_status_warning() {
+        // Entity without transition graph: .created() omitting status should not warn
+        let ds = analyze_src(
+            "entity Note {\n  status: draft | published\n  content: String\n}\n\n\
+             rule CreateNote {\n  when: UserCreates(content)\n  ensures:\n    \
+             Note.created(content: content)\n}\n",
+        );
+        assert!(!has_code(&ds, "allium.created.missingStatus"));
+    }
+
+    // -- Terminal state suppression (enhancement 2) --
+
+    #[test]
+    fn terminal_declared_suppresses_no_exit() {
+        let ds = analyze_src(
+            "entity Subscription {\n  status: active | paused | completed | cancelled\n  \
+             transitions status {\n    active -> paused\n    paused -> active\n    \
+             active -> completed\n    active -> cancelled\n    paused -> cancelled\n    \
+             terminal: completed, cancelled\n  }\n}\n\n\
+             rule Activate {\n  when: UserActivates(user, subscription)\n  \
+             requires: subscription.status = paused\n  ensures: subscription.status = active\n}\n\n\
+             rule Pause {\n  when: UserPauses(user, subscription)\n  \
+             requires: subscription.status = active\n  ensures: subscription.status = paused\n}\n\n\
+             rule Complete {\n  when: PeriodEnds(subscription)\n  \
+             requires: subscription.status = active\n  ensures: subscription.status = completed\n}\n\n\
+             rule Cancel {\n  when: UserCancels(user, subscription)\n  \
+             requires: subscription.status = active\n  ensures: subscription.status = cancelled\n}\n",
+        );
+        assert!(!has_code(&ds, "allium.status.noExit"));
+    }
+
+    #[test]
+    fn non_terminal_no_exit_still_warns() {
+        let ds = analyze_src(
+            "entity Ticket {\n  status: open | stuck | resolved\n  \
+             transitions status {\n    open -> stuck\n    open -> resolved\n    \
+             terminal: resolved\n  }\n}\n\n\
+             rule Escalate {\n  when: AgentEscalates(agent, ticket)\n  \
+             requires: ticket.status = open\n  ensures: ticket.status = stuck\n}\n\n\
+             rule Resolve {\n  when: AgentResolves(agent, ticket)\n  \
+             requires: ticket.status = open\n  ensures: ticket.status = resolved\n}\n",
+        );
+        // 'stuck' is not terminal and has no exit — should warn
+        assert!(has_code(&ds, "allium.status.noExit"));
+    }
+
+    // -- Cross-entity rule matching (enhancement 3) --
+
+    #[test]
+    fn cross_entity_trigger_param_recognised() {
+        let ds = analyze_src(
+            "entity InterviewSlot {\n  status: scheduled | confirmed | completed\n  \
+             transitions status {\n    scheduled -> confirmed\n    \
+             confirmed -> completed\n    terminal: completed\n  }\n}\n\n\
+             rule CreateSlot {\n  when: RecruiterSchedules(time)\n  ensures:\n    \
+             InterviewSlot.created(status: scheduled)\n}\n\n\
+             rule ConfirmSlot {\n  when: InterviewerConfirms(interviewer, slot)\n  \
+             requires: slot.status = scheduled\n  ensures: slot.status = confirmed\n}\n\n\
+             rule CompleteSlot {\n  when: InterviewerSubmits(interviewer, slot)\n  \
+             requires: slot.status = confirmed\n  ensures: slot.status = completed\n}\n",
+        );
+        // Cross-entity rules should be recognised — no false positives on InterviewSlot
+        assert!(!ds.iter().any(|d| {
+            d.code == Some("allium.status.unreachableValue")
+                && d.message.contains("InterviewSlot")
+        }));
+        assert!(!ds.iter().any(|d| {
+            d.code == Some("allium.status.noExit") && d.message.contains("InterviewSlot")
+        }));
+    }
+
+    #[test]
+    fn cross_entity_undeclared_transition() {
+        let ds = analyze_src(
+            "entity InterviewSlot {\n  status: scheduled | confirmed | completed\n  \
+             transitions status {\n    scheduled -> confirmed\n    \
+             confirmed -> completed\n    terminal: completed\n  }\n}\n\n\
+             rule ConfirmSlot {\n  when: InterviewerConfirms(interviewer, slot)\n  \
+             requires: slot.status = completed\n  ensures: slot.status = confirmed\n}\n",
+        );
+        assert!(has_code(&ds, "allium.status.undeclaredTransition"));
+    }
+
+    #[test]
+    fn nested_entity_status_recognised() {
+        let ds = analyze_src(
+            "entity Order {\n  status: placed | paid\n  payment: Payment\n  \
+             transitions status {\n    placed -> paid\n    terminal: paid\n  }\n}\n\n\
+             entity Payment {\n  status: pending | captured | failed\n  \
+             transitions status {\n    pending -> captured\n    pending -> failed\n    \
+             terminal: captured, failed\n  }\n}\n\n\
+             rule CapturePayment {\n  when: GatewayConfirms(order, ref)\n  \
+             requires: order.payment.status = pending\n  \
+             ensures: order.payment.status = captured\n}\n",
+        );
+        // Nested access should be recognised — no false positives on Payment
+        assert!(!ds.iter().any(|d| {
+            (d.code == Some("allium.status.unreachableValue")
+                || d.code == Some("allium.status.noExit"))
+                && d.message.contains("'captured'")
+        }));
+    }
+
+    // -- Process completeness (enhancements 4-6) --
+
+    #[test]
+    fn dead_transition_missing_producer() {
+        let r = analyse_src(
+            "entity App {\n  status: submitted | screening | approved | rejected\n  \
+             verified: Boolean\n  \
+             transitions status {\n    submitted -> screening\n    screening -> approved\n    \
+             screening -> rejected\n    terminal: approved, rejected\n  }\n}\n\n\
+             rule Begin {\n  when: ReviewerStarts(reviewer, app)\n  \
+             requires: app.status = submitted\n  ensures: app.status = screening\n}\n\n\
+             rule Approve {\n  when: ReviewerApproves(reviewer, app)\n  \
+             requires:\n    app.status = screening\n    app.verified = true\n  \
+             ensures: app.status = approved\n}\n\n\
+             rule Reject {\n  when: ReviewerRejects(reviewer, app)\n  \
+             requires: app.status = screening\n  ensures: app.status = rejected\n}\n",
+        );
+        assert!(has_finding(&r, "dead_transition"));
+        assert!(has_finding(&r, "missing_producer"));
+    }
+
+    #[test]
+    fn satisfied_requires_no_dead_transition() {
+        let r = analyse_src(
+            "entity App {\n  status: submitted | screening | approved | rejected\n  \
+             verified: Boolean\n  \
+             transitions status {\n    submitted -> screening\n    screening -> approved\n    \
+             screening -> rejected\n    terminal: approved, rejected\n  }\n}\n\n\
+             rule Begin {\n  when: ReviewerStarts(reviewer, app)\n  \
+             requires: app.status = submitted\n  ensures: app.status = screening\n}\n\n\
+             rule Verify {\n  when: SystemVerifies(app, result)\n  \
+             requires: app.status = screening\n  ensures: app.verified = result\n}\n\n\
+             rule Approve {\n  when: ReviewerApproves(reviewer, app)\n  \
+             requires:\n    app.status = screening\n    app.verified = true\n  \
+             ensures: app.status = approved\n}\n\n\
+             rule Reject {\n  when: ReviewerRejects(reviewer, app)\n  \
+             requires: app.status = screening\n  ensures: app.status = rejected\n}\n",
+        );
+        assert!(!has_finding(&r, "dead_transition"));
+        assert!(!has_finding(&r, "missing_producer"));
+    }
+
+    #[test]
+    fn deadlock_detected() {
+        let r = analyse_src(
+            "entity Doc {\n  status: submitted | review | approved | rejected\n  \
+             reviewer_assigned: Boolean\n  \
+             transitions status {\n    submitted -> review\n    review -> approved\n    \
+             review -> rejected\n    terminal: approved, rejected\n  }\n}\n\n\
+             rule Submit {\n  when: AuthorSubmits(author, doc)\n  \
+             requires: doc.status = submitted\n  ensures: doc.status = review\n}\n\n\
+             rule Approve {\n  when: ReviewerApproves(reviewer, doc)\n  \
+             requires:\n    doc.status = review\n    doc.reviewer_assigned = true\n  \
+             ensures: doc.status = approved\n}\n\n\
+             rule Reject {\n  when: ReviewerRejects(reviewer, doc)\n  \
+             requires:\n    doc.status = review\n    doc.reviewer_assigned = true\n  \
+             ensures: doc.status = rejected\n}\n",
+        );
+        assert!(has_finding(&r, "deadlock"));
+    }
+
+    #[test]
+    fn no_deadlock_when_paths_open() {
+        let r = analyse_src(
+            "entity Invoice {\n  status: draft | sent | paid | void\n  \
+             transitions status {\n    draft -> sent\n    draft -> void\n    \
+             sent -> paid\n    sent -> void\n    terminal: paid, void\n  }\n}\n\n\
+             rule Send {\n  when: AccountantSends(accountant, invoice)\n  \
+             requires: invoice.status = draft\n  ensures: invoice.status = sent\n}\n\n\
+             rule Pay {\n  when: PaymentReceived(invoice)\n  \
+             requires: invoice.status = sent\n  ensures: invoice.status = paid\n}\n\n\
+             rule VoidDraft {\n  when: AccountantVoids(accountant, invoice)\n  \
+             requires: invoice.status = draft\n  ensures: invoice.status = void\n}\n\n\
+             rule VoidSent {\n  when: AccountantVoids(accountant, invoice)\n  \
+             requires: invoice.status = sent\n  ensures: invoice.status = void\n}\n",
+        );
+        assert!(!has_finding(&r, "deadlock"));
+    }
+
+    // -- Conflict detection (enhancement 7) --
+
+    #[test]
+    fn conflict_temporal_vs_external() {
+        let r = analyse_src(
+            "entity Membership {\n  status: active | expired | extended\n  \
+             expires_at: Timestamp\n  \
+             transitions status {\n    active -> expired\n    active -> extended\n    \
+             terminal: expired, extended\n  }\n}\n\n\
+             rule AutoExpire {\n  when: m: Membership.expires_at <= now\n  \
+             requires: m.status = active\n  ensures: m.status = expired\n}\n\n\
+             rule ManualExtend {\n  when: AdminExtends(admin, membership)\n  \
+             requires: membership.status = active\n  ensures: membership.status = extended\n}\n",
+        );
+        assert!(has_finding(&r, "conflict"));
+    }
+
+    #[test]
+    fn no_conflict_actor_choice() {
+        let r = analyse_src(
+            "entity LeaveRequest {\n  status: pending | approved | denied\n  \
+             transitions status {\n    pending -> approved\n    pending -> denied\n    \
+             terminal: approved, denied\n  }\n}\n\n\
+             rule Approve {\n  when: ManagerApproves(manager, request)\n  \
+             requires: request.status = pending\n  ensures: request.status = approved\n}\n\n\
+             rule Deny {\n  when: ManagerDenies(manager, request)\n  \
+             requires: request.status = pending\n  ensures: request.status = denied\n}\n",
+        );
+        assert!(!has_finding(&r, "conflict"));
+    }
+
+    // -- Invariant verification (enhancement 8) --
+
+    #[test]
+    fn invariant_violation_detected() {
+        let r = analyse_src(
+            "entity JobRole {\n  status: open | filled\n  \
+             candidacies: Candidacy with role = this\n  \
+             transitions status {\n    open -> filled\n    terminal: filled\n  }\n}\n\n\
+             entity Candidacy {\n  status: active | hired | rejected\n  \
+             role: JobRole\n  \
+             transitions status {\n    active -> hired\n    active -> rejected\n    \
+             terminal: hired, rejected\n  }\n}\n\n\
+             rule Hire {\n  when: ManagerHires(manager, candidacy)\n  \
+             requires: candidacy.status = active\n  \
+             ensures: candidacy.status = hired\n}\n\n\
+             invariant OneHirePerRole {\n  for a in Candidacies:\n    for b in Candidacies:\n      \
+             a != b and a.role = b.role implies not (a.status = hired and b.status = hired)\n}\n",
+        );
+        assert!(has_finding(&r, "invariant_risk"));
+    }
+
+    #[test]
+    fn invariant_guarded_no_violation() {
+        let r = analyse_src(
+            "entity JobRole {\n  status: open | filled\n  \
+             candidacies: Candidacy with role = this\n  \
+             transitions status {\n    open -> filled\n    terminal: filled\n  }\n}\n\n\
+             entity Candidacy {\n  status: active | hired | rejected\n  \
+             role: JobRole\n  \
+             transitions status {\n    active -> hired\n    active -> rejected\n    \
+             terminal: hired, rejected\n  }\n}\n\n\
+             rule Hire {\n  when: ManagerHires(manager, candidacy)\n  \
+             requires:\n    candidacy.status = active\n    candidacy.role.status = open\n  \
+             ensures:\n    candidacy.status = hired\n    candidacy.role.status = filled\n}\n\n\
+             invariant OneHirePerRole {\n  for a in Candidacies:\n    for b in Candidacies:\n      \
+             a != b and a.role = b.role implies not (a.status = hired and b.status = hired)\n}\n",
+        );
+        assert!(!has_finding(&r, "invariant_risk"));
     }
 
     // -- External entity --

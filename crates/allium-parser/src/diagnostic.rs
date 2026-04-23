@@ -36,3 +36,19 @@ impl Diagnostic {
         self
     }
 }
+
+// ---------------------------------------------------------------------------
+// Findings: process-level analysis results for `allium analyse`
+// ---------------------------------------------------------------------------
+
+/// A finding is a flat JSON object built per-type by each `collect_*_findings`
+/// method. Fields like `type`, `summary`, `affected_entities` and
+/// `affected_transitions` sit alongside type-specific evidence fields.
+pub type Finding = serde_json::Value;
+
+/// Combined result from `allium analyse`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AnalyseResult {
+    pub diagnostics: Vec<Diagnostic>,
+    pub findings: Vec<Finding>,
+}

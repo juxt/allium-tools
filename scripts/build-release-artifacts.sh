@@ -14,9 +14,8 @@ VERSION="$(node -p "require('./extensions/allium/package.json').version")"
 echo "Building LSP server..."
 npm run --workspace packages/allium-lsp build
 
-echo "Building extension (with bundled LSP binary) and CLI..."
+echo "Building extension (with bundled LSP binary)..."
 npm run --workspace extensions/allium build:release
-npm run --workspace packages/allium-cli build
 
 VSIX_NAME="allium-vscode-${VERSION}.vsix"
 
@@ -24,12 +23,6 @@ echo "Packaging VSIX artifact..."
 (
   cd "$ROOT_DIR/extensions/allium"
   npx @vscode/vsce package --allow-missing-repository --no-dependencies --out "$ARTIFACT_DIR/$VSIX_NAME"
-)
-
-echo "Packaging standalone CLI npm artifact..."
-(
-  cd "$ROOT_DIR/packages/allium-cli"
-  HOME="$ROOT_DIR" npm_config_cache="$CACHE_DIR" NPM_CONFIG_CACHE="$CACHE_DIR" npm pack --pack-destination "$ARTIFACT_DIR"
 )
 
 echo "Packaging allium-lsp binary..."

@@ -11,7 +11,7 @@ use allium_parser::{Module, Span};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
-pub struct GeneratorSpec {
+pub struct DomainModel {
     pub version: Option<u32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub entities: Vec<EntityGen>,
@@ -118,10 +118,8 @@ pub struct InvariantGen {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
 pub enum InvariantScope {
     Entity,
-    TopLevel,
 }
 
 #[derive(Debug, Serialize)]
@@ -144,8 +142,8 @@ pub struct ConfigParam {
     pub default_expr: Option<String>,
 }
 
-pub fn generate_generators(module: &Module, source: &str) -> GeneratorSpec {
-    let mut spec = GeneratorSpec {
+pub fn extract_domain_model(module: &Module, source: &str) -> DomainModel {
+    let mut spec = DomainModel {
         version: module.version,
         entities: Vec::new(),
         value_types: Vec::new(),
@@ -202,7 +200,7 @@ fn build_entity_gen(block: &BlockDecl, source: &str) -> EntityGen {
                 let enum_values = extract_inline_enum_values(value);
 
                 if matches!(value, Expr::With { .. }) {
-                    let target = extract_with_target(value);
+                    let target = extract_source_ident(value);
                     relationships.push(RelationshipGen {
                         name: field_name.name.clone(),
                         target,
@@ -210,7 +208,7 @@ fn build_entity_gen(block: &BlockDecl, source: &str) -> EntityGen {
                 } else if matches!(value, Expr::Where { .. }) {
                     projections.push(ProjectionGen {
                         name: field_name.name.clone(),
-                        source: extract_where_source(value),
+                        source: extract_source_ident(value),
                     });
                 } else if is_derived(value) {
                     let when_set = infer_derived_when_set(value, &field_when_sets);
@@ -398,7 +396,7 @@ fn build_enum_gen(block: &BlockDecl) -> EnumGen {
     EnumGen { name, values }
 }
 
-fn build_config_gen(spec: &mut GeneratorSpec, block: &BlockDecl, source: &str) {
+fn build_config_gen(spec: &mut DomainModel, block: &BlockDecl, source: &str) {
     for item in &block.items {
         if let BlockItemKind::Assignment { name, value } = &item.kind {
             let type_expr = extract_type_from_assignment(value, source);
@@ -436,28 +434,14 @@ fn extract_inline_enum_values(expr: &Expr) -> Vec<String> {
     }
 }
 
-fn extract_with_target(expr: &Expr) -> String {
-    match expr {
-        Expr::With { source, .. } => {
-            if let Expr::Ident(id) = source.as_ref() {
-                id.name.clone()
-            } else {
-                "unknown".to_string()
-            }
-        }
-        _ => "unknown".to_string(),
-    }
-}
-
-fn extract_where_source(expr: &Expr) -> String {
-    match expr {
-        Expr::Where { source, .. } => {
-            if let Expr::Ident(id) = source.as_ref() {
-                id.name.clone()
-            } else {
-                "unknown".to_string()
-            }
-        }
+/// Extract the source identifier from a `with` or `where` expression.
+fn extract_source_ident(expr: &Expr) -> String {
+    let inner = match expr {
+        Expr::With { source, .. } | Expr::Where { source, .. } => Some(source.as_ref()),
+        _ => None,
+    };
+    match inner {
+        Some(Expr::Ident(id)) => id.name.clone(),
         _ => "unknown".to_string(),
     }
 }
@@ -571,16 +555,16 @@ fn extract_default_from_assignment(value: &Expr, source: &str) -> Option<String>
 mod tests {
     use super::*;
 
-    fn parse_generators(source: &str) -> GeneratorSpec {
+    fn parse_model(source: &str) -> DomainModel {
         let result = allium_parser::parse(source);
-        generate_generators(&result.module, source)
+        extract_domain_model(&result.module, source)
     }
 
-    fn to_json(spec: &GeneratorSpec) -> serde_json::Value {
+    fn to_json(spec: &DomainModel) -> serde_json::Value {
         serde_json::to_value(spec).unwrap()
     }
 
-    fn find_entity<'a>(spec: &'a GeneratorSpec, name: &str) -> &'a EntityGen {
+    fn find_entity<'a>(spec: &'a DomainModel, name: &str) -> &'a EntityGen {
         spec.entities.iter().find(|e| e.name == name)
             .unwrap_or_else(|| panic!("no entity '{}'", name))
     }
@@ -594,13 +578,13 @@ mod tests {
 
     #[test]
     fn version_passed_through() {
-        let spec = parse_generators("-- allium: 3\nentity Foo { x: Integer }");
+        let spec = parse_model("-- allium: 3\nentity Foo { x: Integer }");
         assert_eq!(spec.version, Some(3));
     }
 
     #[test]
     fn version_none_when_absent() {
-        let spec = parse_generators("entity Foo { x: Integer }");
+        let spec = parse_model("entity Foo { x: Integer }");
         assert_eq!(spec.version, None);
     }
 
@@ -608,7 +592,7 @@ mod tests {
 
     #[test]
     fn entity_name_and_kind_internal() {
-        let spec = parse_generators("-- allium: 3\nentity Order { total: Integer }");
+        let spec = parse_model("-- allium: 3\nentity Order { total: Integer }");
         let e = find_entity(&spec, "Order");
         let json = serde_json::to_value(e).unwrap();
         assert_eq!(json["kind"], "internal");
@@ -616,7 +600,7 @@ mod tests {
 
     #[test]
     fn entity_kind_external() {
-        let spec = parse_generators("-- allium: 3\nexternal entity Customer { email: String }");
+        let spec = parse_model("-- allium: 3\nexternal entity Customer { email: String }");
         let e = find_entity(&spec, "Customer");
         let json = serde_json::to_value(e).unwrap();
         assert_eq!(json["kind"], "external");
@@ -624,7 +608,7 @@ mod tests {
 
     #[test]
     fn empty_entity_has_no_fields() {
-        let spec = parse_generators("-- allium: 3\nentity Empty {}");
+        let spec = parse_model("-- allium: 3\nentity Empty {}");
         let e = find_entity(&spec, "Empty");
         assert!(e.fields.is_empty());
         assert!(e.invariants.is_empty());
@@ -634,7 +618,7 @@ mod tests {
     #[test]
     fn multiple_entities_collected() {
         let source = "-- allium: 3\nentity A { x: Integer }\nentity B { y: String }";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         assert_eq!(spec.entities.len(), 2);
         assert_eq!(spec.entities[0].name, "A");
         assert_eq!(spec.entities[1].name, "B");
@@ -644,7 +628,7 @@ mod tests {
 
     #[test]
     fn field_name_and_type() {
-        let spec = parse_generators("-- allium: 3\nentity Foo { name: String }");
+        let spec = parse_model("-- allium: 3\nentity Foo { name: String }");
         let f = find_field(find_entity(&spec, "Foo"), "name");
         assert_eq!(f.type_expr, "String");
         assert!(!f.optional);
@@ -652,14 +636,14 @@ mod tests {
 
     #[test]
     fn optional_field() {
-        let spec = parse_generators("-- allium: 3\nentity Foo { bio: String? }");
+        let spec = parse_model("-- allium: 3\nentity Foo { bio: String? }");
         let f = find_field(find_entity(&spec, "Foo"), "bio");
         assert!(f.optional);
     }
 
     #[test]
     fn multiple_fields_preserved_in_order() {
-        let spec = parse_generators("-- allium: 3\nentity Foo {\n  a: Integer\n  b: String\n  c: Decimal\n}");
+        let spec = parse_model("-- allium: 3\nentity Foo {\n  a: Integer\n  b: String\n  c: Decimal\n}");
         let names: Vec<&str> = spec.entities[0].fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["a", "b", "c"]);
     }
@@ -668,21 +652,21 @@ mod tests {
 
     #[test]
     fn inline_enum_values_extracted() {
-        let spec = parse_generators("-- allium: 3\nentity Order { status: pending | done | cancelled }");
+        let spec = parse_model("-- allium: 3\nentity Order { status: pending | done | cancelled }");
         let f = find_field(find_entity(&spec, "Order"), "status");
         assert_eq!(f.enum_values, vec!["pending", "done", "cancelled"]);
     }
 
     #[test]
     fn non_enum_field_has_no_enum_values() {
-        let spec = parse_generators("-- allium: 3\nentity Foo { name: String }");
+        let spec = parse_model("-- allium: 3\nentity Foo { name: String }");
         let f = find_field(find_entity(&spec, "Foo"), "name");
         assert!(f.enum_values.is_empty());
     }
 
     #[test]
     fn enum_values_omitted_from_json_when_empty() {
-        let spec = parse_generators("-- allium: 3\nentity Foo { name: String }");
+        let spec = parse_model("-- allium: 3\nentity Foo { name: String }");
         let json = to_json(&spec);
         assert!(json["entities"][0]["fields"][0].get("enum_values").is_none());
     }
@@ -692,7 +676,7 @@ mod tests {
     #[test]
     fn relationship_detected() {
         let source = "-- allium: 3\nentity Order { items: OrderItem with order }";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let e = find_entity(&spec, "Order");
         assert_eq!(e.relationships.len(), 1);
         assert_eq!(e.relationships[0].name, "items");
@@ -706,7 +690,7 @@ mod tests {
     #[test]
     fn projection_detected() {
         let source = "-- allium: 3\nentity Order { active_items: items where active = true }";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let e = find_entity(&spec, "Order");
         assert_eq!(e.projections.len(), 1);
         assert_eq!(e.projections[0].name, "active_items");
@@ -718,7 +702,7 @@ mod tests {
     #[test]
     fn derived_value_detected() {
         let source = "-- allium: 3\nentity Order {\n  a: Integer\n  b: Integer\n  total: a + b\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let e = find_entity(&spec, "Order");
         assert_eq!(e.derived_values.len(), 1);
         assert_eq!(e.derived_values[0].name, "total");
@@ -731,7 +715,7 @@ mod tests {
     #[test]
     fn transition_graph_edges_and_terminal() {
         let source = "-- allium: 3\nentity Order {\n  status: pending | done\n  transitions status {\n    pending -> done\n    terminal: done\n  }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let graph = &find_entity(&spec, "Order").transition_graphs[0];
         assert_eq!(graph.field, "status");
         assert_eq!(graph.edges.len(), 1);
@@ -743,7 +727,7 @@ mod tests {
     #[test]
     fn transition_graph_collects_all_states() {
         let source = "-- allium: 3\nentity Order {\n  status: a | b | c\n  transitions status {\n    a -> b\n    b -> c\n    terminal: c\n  }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let graph = &find_entity(&spec, "Order").transition_graphs[0];
         // BTreeSet ordering
         assert_eq!(graph.states, vec!["a", "b", "c"]);
@@ -751,7 +735,7 @@ mod tests {
 
     #[test]
     fn transition_graphs_omitted_when_absent() {
-        let spec = parse_generators("-- allium: 3\nentity Foo { x: Integer }");
+        let spec = parse_model("-- allium: 3\nentity Foo { x: Integer }");
         let json = to_json(&spec);
         assert!(json["entities"][0].get("transition_graphs").is_none());
     }
@@ -761,7 +745,7 @@ mod tests {
     #[test]
     fn when_set_on_field() {
         let source = "-- allium: 3\nentity Order {\n  status: pending | shipped\n  tracking: String when status = shipped\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let f = find_field(find_entity(&spec, "Order"), "tracking");
         let ws = f.when_set.as_ref().unwrap();
         assert_eq!(ws.status_field, "status");
@@ -771,7 +755,7 @@ mod tests {
     #[test]
     fn when_set_multiple_states() {
         let source = "-- allium: 3\nentity Order {\n  status: pending | shipped | delivered\n  tracking: String when status = shipped | delivered\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let f = find_field(find_entity(&spec, "Order"), "tracking");
         let ws = f.when_set.as_ref().unwrap();
         assert_eq!(ws.qualifying_states, vec!["shipped", "delivered"]);
@@ -782,7 +766,7 @@ mod tests {
     #[test]
     fn value_type_with_fields() {
         let source = "-- allium: 3\nvalue Address {\n  street: String\n  city: String\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         assert_eq!(spec.value_types.len(), 1);
         assert_eq!(spec.value_types[0].name, "Address");
         let names: Vec<&str> = spec.value_types[0].fields.iter().map(|f| f.name.as_str()).collect();
@@ -794,7 +778,7 @@ mod tests {
     #[test]
     fn enum_values() {
         let source = "-- allium: 3\nenum Colour {\n  red\n  green\n  blue\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         assert_eq!(spec.enums.len(), 1);
         assert_eq!(spec.enums[0].name, "Colour");
         assert_eq!(spec.enums[0].values, vec!["red", "green", "blue"]);
@@ -805,7 +789,7 @@ mod tests {
     #[test]
     fn config_param_extracted() {
         let source = "-- allium: 3\nconfig {\n  max_retries: Integer = 3\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         assert_eq!(spec.config.len(), 1);
         assert_eq!(spec.config[0].name, "max_retries");
     }
@@ -815,7 +799,7 @@ mod tests {
     #[test]
     fn entity_invariant_includes_expression() {
         let source = "-- allium: 3\nentity Order {\n  total: Integer\n  invariant PositiveTotal { this.total >= 1 }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let entity = &spec.entities[0];
         assert_eq!(entity.invariants.len(), 1);
         assert_eq!(entity.invariants[0].name, "PositiveTotal");
@@ -825,7 +809,7 @@ mod tests {
     #[test]
     fn entity_invariant_complex_expression() {
         let source = "-- allium: 3\nentity Account {\n  balance: Decimal\n  credit: Decimal\n  invariant Solvent { this.balance + this.credit >= 0 }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let inv = &spec.entities[0].invariants[0];
         assert_eq!(inv.name, "Solvent");
         assert_eq!(inv.expression, "this.balance + this.credit >= 0");
@@ -834,7 +818,7 @@ mod tests {
     #[test]
     fn entity_invariant_scope_is_entity() {
         let source = "-- allium: 3\nentity Foo {\n  x: Integer\n  invariant XPos { this.x >= 0 }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let json = to_json(&spec);
         let scope = json["entities"][0]["invariants"][0]["scope"].as_str().unwrap();
         assert_eq!(scope, "entity");
@@ -845,7 +829,7 @@ mod tests {
     #[test]
     fn top_level_invariant_not_in_entities() {
         let source = "-- allium: 3\nentity Order {\n  status: pending | done\n}\ninvariant AllDone {\n  for o in Orders: o.status = done\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         assert!(spec.entities[0].invariants.is_empty());
     }
 
@@ -854,7 +838,7 @@ mod tests {
     #[test]
     fn simple_invariant_attaches_field_constraint() {
         let source = "-- allium: 3\nentity Order {\n  gap: Integer\n  invariant PositiveGap { this.gap >= 1 }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let field = &spec.entities[0].fields[0];
         assert_eq!(field.name, "gap");
         assert_eq!(field.constraints.len(), 1);
@@ -865,7 +849,7 @@ mod tests {
     #[test]
     fn constraint_not_attached_to_derived_field() {
         let source = "-- allium: 3\nentity Order {\n  a: Integer\n  b: Integer\n  total: a + b\n  invariant NonNeg { this.total >= 0 }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         for field in &spec.entities[0].fields {
             assert!(field.constraints.is_empty(), "no field should have constraints");
         }
@@ -875,7 +859,7 @@ mod tests {
     #[test]
     fn reversed_comparison_flips_operator() {
         let source = "-- allium: 3\nentity Item {\n  count: Integer\n  invariant MinCount { 0 <= this.count }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let field = &spec.entities[0].fields[0];
         assert_eq!(field.constraints.len(), 1);
         assert_eq!(field.constraints[0].bound, ">= 0");
@@ -884,7 +868,7 @@ mod tests {
     #[test]
     fn reversed_gt_flipped_to_lt() {
         let source = "-- allium: 3\nentity Item {\n  count: Integer\n  invariant MaxCount { 100 > this.count }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let field = &spec.entities[0].fields[0];
         assert_eq!(field.constraints[0].bound, "< 100");
     }
@@ -892,7 +876,7 @@ mod tests {
     #[test]
     fn not_equal_null_constraint() {
         let source = "-- allium: 3\nentity User {\n  email: String\n  invariant EmailPresent { this.email != null }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let field = &spec.entities[0].fields[0];
         assert_eq!(field.constraints.len(), 1);
         assert_eq!(field.constraints[0].bound, "!= null");
@@ -901,7 +885,7 @@ mod tests {
     #[test]
     fn equality_constraint_with_identifier() {
         let source = "-- allium: 3\nentity Foo {\n  kind: String\n  invariant KindFixed { this.kind = bar }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let field = find_field(find_entity(&spec, "Foo"), "kind");
         assert_eq!(field.constraints[0].bound, "= bar");
     }
@@ -909,7 +893,7 @@ mod tests {
     #[test]
     fn complex_multi_field_invariant_no_field_constraint() {
         let source = "-- allium: 3\nentity Transfer {\n  credit: Decimal\n  debit: Decimal\n  invariant Balanced { this.credit >= this.debit }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         for field in &spec.entities[0].fields {
             assert!(field.constraints.is_empty(), "multi-field invariant should not attach to any single field");
         }
@@ -919,7 +903,7 @@ mod tests {
     #[test]
     fn multiple_invariants_attach_to_same_field() {
         let source = "-- allium: 3\nentity Gauge {\n  level: Integer\n  invariant MinLevel { this.level >= 0 }\n  invariant MaxLevel { this.level <= 100 }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let field = &spec.entities[0].fields[0];
         assert_eq!(field.constraints.len(), 2);
         assert_eq!(field.constraints[0].bound, ">= 0");
@@ -929,7 +913,7 @@ mod tests {
     #[test]
     fn logical_invariant_no_field_constraint() {
         let source = "-- allium: 3\nentity Foo {\n  a: Integer\n  invariant Complex { this.a >= 0 and this.a <= 10 }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let field = find_field(find_entity(&spec, "Foo"), "a");
         // LogicalOp wrapping, not a bare Comparison — no constraint extracted
         assert!(field.constraints.is_empty());
@@ -940,7 +924,7 @@ mod tests {
     #[test]
     fn constraints_omitted_from_json_when_empty() {
         let source = "-- allium: 3\nentity Plain {\n  name: String\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let json = to_json(&spec);
         let field = &json["entities"][0]["fields"][0];
         assert!(field.get("constraints").is_none(), "empty constraints should be omitted from JSON");
@@ -949,7 +933,7 @@ mod tests {
     #[test]
     fn constraints_present_in_json_when_populated() {
         let source = "-- allium: 3\nentity Order {\n  gap: Integer\n  invariant PositiveGap { this.gap >= 1 }\n}";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let json = to_json(&spec);
         let constraints = &json["entities"][0]["fields"][0]["constraints"];
         assert!(constraints.is_array());
@@ -959,7 +943,7 @@ mod tests {
 
     #[test]
     fn when_set_omitted_from_json_when_absent() {
-        let spec = parse_generators("-- allium: 3\nentity Foo { x: Integer }");
+        let spec = parse_model("-- allium: 3\nentity Foo { x: Integer }");
         let json = to_json(&spec);
         assert!(json["entities"][0]["fields"][0].get("when_set").is_none());
     }
@@ -982,7 +966,7 @@ entity Order {
     terminal: done
   }
 }";
-        let spec = parse_generators(source);
+        let spec = parse_model(source);
         let e = find_entity(&spec, "Order");
         assert_eq!(e.fields.len(), 3); // customer, total, status
         assert_eq!(e.relationships.len(), 1);

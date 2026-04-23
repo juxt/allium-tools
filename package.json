@@ -5,7 +5,6 @@
   "license": "MIT",
   "workspaces": [
     "extensions/allium",
-    "packages/allium-cli",
     "packages/allium-lsp",
     "packages/allium-parser-wasm"
   ],
