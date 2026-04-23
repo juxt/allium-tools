@@ -4750,7 +4750,7 @@ function findInvariantVerificationIssues(
   for (const inv of invariants) {
     // Resolve the key field to an entity type
     let keyEntityType: string | undefined;
-    for (const [entityName, fields] of fieldTypes) {
+    for (const [, fields] of fieldTypes) {
       const resolved = fields.get(inv.keyField);
       if (resolved) {
         keyEntityType = resolved;

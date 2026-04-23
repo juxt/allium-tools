@@ -95,7 +95,6 @@ update_cargo_version "Cargo.toml"
 
 # npm packages
 update_json_version "package.json"
-update_json_version "packages/allium-cli/package.json"
 update_json_version "packages/allium-lsp/package.json"
 update_json_version "extensions/allium/package.json"
 echo ""

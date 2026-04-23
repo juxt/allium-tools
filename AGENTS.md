@@ -76,7 +76,6 @@ This is an npm workspace monorepo. Each package has its own `package.json`, `tsc
 ```text
 extensions/allium/          VS Code extension (LSP client launcher)
 packages/allium-lsp/        Language Server Protocol server (wraps language-tools/)
-packages/allium-cli/        Standalone CLI package (allium-check, allium-format, etc.)
 ```
 
 > **Note:** Some packages live in their own repos: [juxt/tree-sitter-allium](https://github.com/juxt/tree-sitter-allium), [juxt/nvim-allium](https://github.com/juxt/nvim-allium), [juxt/allium-mode](https://github.com/juxt/allium-mode).
@@ -88,11 +87,9 @@ The core language intelligence lives in `extensions/allium/src/language-tools/` 
 ```text
 language-tools/   Pure analysis engine: parser, analyzer, hover, definitions, rename, refactors, etc.
      |
-     ├── packages/allium-lsp/      LSP server: wraps language-tools/ over JSON-RPC (stdio)
-     |        |
-     |        └── extensions/allium/   VS Code launcher
-     |
-     └── packages/allium-cli/      CLI tools: direct consumers of language-tools/
+     └── packages/allium-lsp/      LSP server: wraps language-tools/ over JSON-RPC (stdio)
+              |
+              └── extensions/allium/   VS Code launcher
 ```
 
 ### Development setup
@@ -118,7 +115,6 @@ npm run --workspace extensions/allium test
 
 1. **`packages/allium-lsp`**: Build the server.
 2. **`extensions/allium`**: The VS Code extension bundles the LSP server binary.
-3. **`packages/allium-cli`**: Shares logic from the extension source.
 
 ### Testing Workflow
 

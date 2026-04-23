@@ -4,9 +4,8 @@ The Rust CLI (`allium check`) now has a semantic analysis pass in `crates/allium
 
 ## Architecture
 
-The TypeScript analyzer (two copies, kept in sync):
-- `extensions/allium/src/language-tools/analyzer.ts` — drives the VS Code extension
-- `packages/allium-cli/src/analyzer.ts` — drives the Node CLI (`allium-check`)
+The TypeScript analyzer:
+- `extensions/allium/src/language-tools/analyzer.ts` — drives the VS Code extension and LSP
 
 The Rust analyzer:
 - `crates/allium-parser/src/analysis.rs` — drives the Rust CLI (`allium check`)
@@ -24,19 +23,8 @@ Two real-world spec repos are used for validation:
 Run both checkers and diff:
 
 ```bash
-# Normalised comparison
-(./target/release/allium check ~/code/achronic/specs/ 2>&1 || true) \
-  | sed 's|/Users/.*/achronic/||' | grep 'allium\.' \
-  | sed -E 's/^([^:]+:[0-9]+):[0-9]+: (error|warning|info) (allium\.[^ ]+).*/\1 \2 \3/' \
-  | sort > /tmp/rust.txt
-
-(node packages/allium-cli/dist/src/check.js --no-config ~/code/achronic/specs/ 2>&1 || true) \
-  | sed 's|.*/achronic/||' | grep 'allium\.' \
-  | sed -E 's/^([^:]+:[0-9]+):[0-9]+ (error|warning|info) (allium\.[^ ]+).*/\1 \2 \3/' \
-  | sort > /tmp/ts.txt
-
-comm -23 /tmp/ts.txt /tmp/rust.txt  # TypeScript only
-comm -13 /tmp/ts.txt /tmp/rust.txt  # Rust only
+# Run Rust checker against real-world specs
+./target/release/allium check ~/code/achronic/specs/
 ```
 
 ## Current state
@@ -117,7 +105,7 @@ Both implementations support `-- allium-ignore code1, code2` comments. The direc
 
 ```bash
 cargo build --release          # Build Rust CLI
-cargo test                     # Run Rust tests (286 in parser, 140 in CLI)
+cargo test                     # Run Rust tests (304 in parser, 140 in CLI)
 npm run build                  # Build TypeScript
-npm run test                   # Run TypeScript tests (284 extension, 19 CLI, 8 LSP)
+npm run test                   # Run TypeScript tests
 ```
