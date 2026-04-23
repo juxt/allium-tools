@@ -7,7 +7,7 @@ CACHE_DIR="$ROOT_DIR/.npm-cache"
 mkdir -p "$CACHE_DIR"
 
 mkdir -p "$ARTIFACT_DIR"
-rm -f "$ARTIFACT_DIR"/*.vsix "$ARTIFACT_DIR"/*.tgz "$ARTIFACT_DIR"/*.tar.gz "$ARTIFACT_DIR"/*.tar.gz "$ARTIFACT_DIR"/SHA256SUMS.txt
+rm -f "$ARTIFACT_DIR"/*.vsix "$ARTIFACT_DIR"/*.tar.gz "$ARTIFACT_DIR"/SHA256SUMS.txt
 
 VERSION="$(node -p "require('./extensions/allium/package.json').version")"
 
@@ -41,9 +41,9 @@ echo "Generating checksums..."
 (
   cd "$ARTIFACT_DIR"
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum ./*.vsix ./*.tgz ./*.tar.gz > SHA256SUMS.txt
+    sha256sum ./*.vsix ./*.tar.gz > SHA256SUMS.txt
   else
-    shasum -a 256 ./*.vsix ./*.tgz ./*.tar.gz > SHA256SUMS.txt
+    shasum -a 256 ./*.vsix ./*.tar.gz > SHA256SUMS.txt
   fi
 )
 
