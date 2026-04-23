@@ -148,6 +148,25 @@ export function analyzeAllium(
   );
 }
 
+/**
+ * Run structural checks plus process-level analysis.
+ * Returns diagnostics (from check) and process findings separately.
+ */
+export function analyseAllium(
+  text: string,
+  options: AnalyzeOptions = {},
+): { diagnostics: Finding[]; findings: Finding[] } {
+  const diagnostics = analyzeAllium(text, options);
+  const lineStarts = buildLineStarts(text);
+  const blocks = parseAlliumBlocks(text);
+  const findings = [
+    ...findProcessCompletenessIssues(text, lineStarts, blocks),
+    ...findConflictDetectionIssues(text, lineStarts, blocks),
+    ...findInvariantVerificationIssues(text, lineStarts, blocks),
+  ];
+  return { diagnostics, findings };
+}
+
 function applyDiagnosticsMode(
   findings: Finding[],
   mode: DiagnosticsMode,
@@ -342,6 +361,11 @@ function findStatusStateMachineIssues(
   const transitionsByEntity = new Map<string, Map<string, Set<string>>>();
   const assignmentLocations = new Map<string, number>();
   const statusDeclarationOffsets = collectEntityStatusDeclarationOffsets(text);
+  const { terminalByEntity, hasTransitions } =
+    collectEntityTerminalStatuses(text);
+
+  const fieldEntityTypes = collectFieldEntityTypes(text, statusByEntity);
+  const declaredEdges = collectDeclaredEdges(text);
 
   const ruleBlocks = blocks.filter((block) => block.kind === "rule");
   for (const rule of ruleBlocks) {
@@ -352,41 +376,72 @@ function findStatusStateMachineIssues(
       if (line.clause !== "requires") {
         continue;
       }
+      // Direct: binding.status = value
       const requiresMatch = line.text.match(
         /([a-z_][a-z0-9_]*)\.status\s*=\s*([a-z_][a-z0-9_]*)\b/,
       );
-      if (!requiresMatch) {
-        continue;
+      if (requiresMatch) {
+        const binding = requiresMatch[1];
+        const status = requiresMatch[2];
+        const resolved = resolveBindingEntity(
+          binding, status, bindingTypes, statusByEntity,
+        );
+        if (resolved) {
+          const set = requiresByBinding.get(binding) ?? new Set<string>();
+          set.add(status);
+          requiresByBinding.set(binding, set);
+        }
       }
-      const binding = requiresMatch[1];
-      const status = requiresMatch[2];
-      const set = requiresByBinding.get(binding) ?? new Set<string>();
-      set.add(status);
-      requiresByBinding.set(binding, set);
+      // Nested: binding.field.status = value
+      const nestedMatch = line.text.match(
+        /([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\.status\s*=\s*([a-z_][a-z0-9_]*)\b/,
+      );
+      if (nestedMatch) {
+        const rootBinding = nestedMatch[1];
+        const status = nestedMatch[3];
+        const set = requiresByBinding.get(rootBinding) ?? new Set<string>();
+        set.add(status);
+        requiresByBinding.set(rootBinding, set);
+      }
     }
 
     for (const line of clauseLines) {
       if (line.clause !== "ensures") {
         continue;
       }
+      // Direct: binding.status = value
       const assignMatch = line.text.match(
         /([a-z_][a-z0-9_]*)\.status\s*=\s*([a-z_][a-z0-9_]*)\b/,
       );
-      if (!assignMatch) {
-        continue;
-      }
-      const binding = assignMatch[1];
-      const target = assignMatch[2];
-      let entityName = bindingTypes.get(binding);
-      if (!entityName) {
-        for (const [name] of statusByEntity) {
-          if (name.toLowerCase() === binding.toLowerCase()) {
-            entityName = name;
-            break;
-          }
+      // Nested: binding.field.status = value
+      const nestedAssign = line.text.match(
+        /([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\.status\s*=\s*([a-z_][a-z0-9_]*)\b/,
+      );
+
+      let entityName: string | undefined;
+      let binding: string | undefined;
+      let target: string | undefined;
+
+      if (nestedAssign) {
+        // Nested takes priority (more specific match)
+        binding = nestedAssign[1];
+        const fieldName = nestedAssign[2];
+        target = nestedAssign[3];
+        const rootEntity = resolveBindingEntity(
+          binding, undefined, bindingTypes, statusByEntity,
+        );
+        if (rootEntity) {
+          entityName = fieldEntityTypes.get(rootEntity)?.get(fieldName);
         }
+      } else if (assignMatch) {
+        binding = assignMatch[1];
+        target = assignMatch[2];
+        entityName = resolveBindingEntity(
+          binding, target, bindingTypes, statusByEntity,
+        );
       }
-      if (!entityName || !statusByEntity.has(entityName)) {
+
+      if (!entityName || !target || !binding || !statusByEntity.has(entityName)) {
         continue;
       }
       const assigned = assignedByEntity.get(entityName) ?? new Set<string>();
@@ -412,6 +467,77 @@ function findStatusStateMachineIssues(
       }
       transitionsByEntity.set(entityName, entityTransitions);
     }
+
+    // Scan ensures clauses for Entity.created(status: value) calls
+    const ensuresLines = clauseLines.filter((l) => l.clause === "ensures");
+    const ensuresText = ensuresLines.map((l) => l.text).join("\n");
+    const createdCallPattern =
+      /([A-Z][A-Za-z0-9_]*)\.created\s*\(/g;
+    for (
+      let cm = createdCallPattern.exec(ensuresText);
+      cm;
+      cm = createdCallPattern.exec(ensuresText)
+    ) {
+      const entityName = cm[1];
+      const entityStatuses = statusByEntity.get(entityName);
+      if (!entityStatuses) continue;
+
+      // Find the matching closing paren
+      const afterOpen = cm.index + cm[0].length;
+      let depth = 1;
+      let closeIdx = -1;
+      for (let i = afterOpen; i < ensuresText.length; i++) {
+        if (ensuresText[i] === "(") depth++;
+        if (ensuresText[i] === ")") depth--;
+        if (depth === 0) {
+          closeIdx = i;
+          break;
+        }
+      }
+      if (closeIdx < 0) continue;
+      const argsText = ensuresText.slice(afterOpen, closeIdx);
+      const statusArgMatch = argsText.match(
+        /\bstatus\s*:\s*([a-z_][a-z0-9_]*)/,
+      );
+
+      if (statusArgMatch) {
+        const statusValue = statusArgMatch[1];
+        if (entityStatuses.has(statusValue)) {
+          const assigned =
+            assignedByEntity.get(entityName) ?? new Set<string>();
+          assigned.add(statusValue);
+          assignedByEntity.set(entityName, assigned);
+        } else {
+          // Status value not in entity's declared enum
+          const createdOffset = findCreatedCallOffset(
+            rule, ensuresLines, cm.index, statusArgMatch,
+          );
+          findings.push(
+            rangeFinding(
+              lineStarts,
+              createdOffset,
+              createdOffset + statusValue.length,
+              "allium.created.invalidStatus",
+              `.created() on entity '${entityName}' sets status to '${statusValue}', which is not a declared status value.`,
+              "error",
+            ),
+          );
+        }
+      } else if (hasTransitions.has(entityName)) {
+        // .created() omits status on entity with transition graph
+        const createdOffset = findCreatedOffset(rule, ensuresLines, cm.index);
+        findings.push(
+          rangeFinding(
+            lineStarts,
+            createdOffset,
+            createdOffset + cm[0].length,
+            "allium.created.missingStatus",
+            `.created() on entity '${entityName}' omits the status field, but the entity has a transition graph. The initial state is unspecified.`,
+            "warning",
+          ),
+        );
+      }
+    }
   }
 
   for (const [entityName, values] of statusByEntity.entries()) {
@@ -422,6 +548,8 @@ function findStatusStateMachineIssues(
     if (hasVariableAssignment) {
       continue;
     }
+
+    const declaredTerminals = terminalByEntity.get(entityName);
 
     for (const value of values) {
       if (!assigned.has(value)) {
@@ -440,7 +568,10 @@ function findStatusStateMachineIssues(
         );
       }
 
-      if (isLikelyTerminalStatus(value)) {
+      const isTerminal = declaredTerminals
+        ? declaredTerminals.has(value)
+        : isLikelyTerminalStatus(value);
+      if (isTerminal) {
         continue;
       }
       const exits = transitions.get(value);
@@ -464,7 +595,175 @@ function findStatusStateMachineIssues(
     }
   }
 
+  // Check rule-produced transitions against declared graph edges
+  for (const [entityName, transitionMap] of transitionsByEntity.entries()) {
+    const edges = declaredEdges.get(entityName);
+    if (!edges) continue;
+    for (const [from, targets] of transitionMap.entries()) {
+      for (const to of targets) {
+        if (from !== to && !edges.has(`${from}->${to}`)) {
+          const offset =
+            statusDeclarationOffsets.get(`${entityName}:${from}`) ?? 0;
+          findings.push(
+            rangeFinding(
+              lineStarts,
+              offset,
+              offset + from.length,
+              "allium.status.undeclaredTransition",
+              `Rule produces transition '${from}' → '${to}' on entity '${entityName}', but this edge is not in the declared transition graph.`,
+              "warning",
+            ),
+          );
+        }
+      }
+    }
+  }
+
   return findings;
+}
+
+/** Map a .created() match position in joined ensures text back to file offset. */
+function findCreatedOffset(
+  rule: { bodyStartOffset: number },
+  ensuresLines: Array<{ startOffset: number; text: string }>,
+  matchIndex: number,
+): number {
+  let consumed = 0;
+  for (const line of ensuresLines) {
+    const lineLen = line.text.length;
+    if (consumed + lineLen >= matchIndex) {
+      return rule.bodyStartOffset + line.startOffset + (matchIndex - consumed);
+    }
+    consumed += lineLen + 1; // +1 for the \n join separator
+  }
+  return rule.bodyStartOffset;
+}
+
+/** Map a status arg match within a .created() call back to file offset. */
+function findCreatedCallOffset(
+  rule: { bodyStartOffset: number },
+  ensuresLines: Array<{ startOffset: number; text: string }>,
+  createdMatchIndex: number,
+  statusArgMatch: RegExpMatchArray,
+): number {
+  const statusValueOffset =
+    createdMatchIndex +
+    (statusArgMatch.index ?? 0) +
+    statusArgMatch[0].indexOf(statusArgMatch[1]);
+  return findCreatedOffset(rule, ensuresLines, statusValueOffset);
+}
+
+/** Resolve a binding name to an entity name using available strategies. */
+function resolveBindingEntity(
+  binding: string,
+  target: string | undefined,
+  bindingTypes: Map<string, string>,
+  statusByEntity: Map<string, Set<string>>,
+): string | undefined {
+  let entityName = bindingTypes.get(binding);
+  if (!entityName) {
+    for (const [name] of statusByEntity) {
+      if (name.toLowerCase() === binding.toLowerCase()) {
+        entityName = name;
+        break;
+      }
+    }
+  }
+  if (!entityName && target) {
+    // Infer from target status: if value belongs to exactly one entity, use it
+    const candidates = [...statusByEntity.entries()].filter(
+      ([, values]) => values.has(target),
+    );
+    if (candidates.length === 1) {
+      entityName = candidates[0][0];
+    }
+  }
+  return entityName;
+}
+
+/** Collect field → entity type mappings for nested member access resolution. */
+function collectFieldEntityTypes(
+  text: string,
+  statusByEntity: Map<string, Set<string>>,
+): Map<string, Map<string, string>> {
+  const result = new Map<string, Map<string, string>>();
+  const entityPattern =
+    /^\s*(?:external\s+)?entity\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm;
+  for (
+    let entity = entityPattern.exec(text);
+    entity;
+    entity = entityPattern.exec(text)
+  ) {
+    const entityName = entity[1];
+    const open = text.indexOf("{", entity.index);
+    if (open < 0) continue;
+    const close = findMatchingBrace(text, open);
+    if (close < 0) continue;
+    const body = text.slice(open + 1, close);
+    const fields = new Map<string, string>();
+    const fieldPattern =
+      /^\s*([a-z_][a-z0-9_]*)\s*:\s*([A-Z][A-Za-z0-9_]*)\b/gm;
+    for (
+      let fm = fieldPattern.exec(body);
+      fm;
+      fm = fieldPattern.exec(body)
+    ) {
+      if (statusByEntity.has(fm[2])) {
+        fields.set(fm[1], fm[2]);
+      }
+    }
+    if (fields.size > 0) {
+      result.set(entityName, fields);
+    }
+  }
+  return result;
+}
+
+/** Collect declared transition graph edges for edge validation. */
+function collectDeclaredEdges(
+  text: string,
+): Map<string, Set<string>> {
+  const result = new Map<string, Set<string>>();
+  const entityPattern =
+    /^\s*(?:external\s+)?entity\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm;
+  for (
+    let entity = entityPattern.exec(text);
+    entity;
+    entity = entityPattern.exec(text)
+  ) {
+    const entityName = entity[1];
+    const open = text.indexOf("{", entity.index);
+    if (open < 0) continue;
+    const close = findMatchingBrace(text, open);
+    if (close < 0) continue;
+    const body = text.slice(open + 1, close);
+    const transPattern = /\btransitions\s+\w+\s*\{/g;
+    for (
+      let tm = transPattern.exec(body);
+      tm;
+      tm = transPattern.exec(body)
+    ) {
+      const tOpen = body.indexOf("{", tm.index + tm[0].length - 1);
+      if (tOpen < 0) continue;
+      const tClose = findMatchingBrace(body, tOpen);
+      if (tClose < 0) continue;
+      const transBody = body.slice(tOpen + 1, tClose);
+      const edges = new Set<string>();
+      const edgePattern =
+        /([a-z_][a-z0-9_]*)\s*->\s*([a-z_][a-z0-9_]*)/g;
+      for (
+        let em = edgePattern.exec(transBody);
+        em;
+        em = edgePattern.exec(transBody)
+      ) {
+        edges.add(`${em[1]}->${em[2]}`);
+      }
+      if (edges.size > 0) {
+        result.set(entityName, edges);
+      }
+    }
+  }
+  return result;
 }
 
 function findDuplicateConfigKeys(
@@ -1422,6 +1721,59 @@ function isLikelyTerminalStatus(status: string): boolean {
   return /^(completed|cancelled|canceled|expired|closed|deleted|archived|failed|rejected|done)$/.test(
     status,
   );
+}
+
+/**
+ * Collect declared terminal statuses from `terminal:` declarations inside
+ * `transitions` blocks. Also tracks which entities have transition graphs.
+ */
+function collectEntityTerminalStatuses(text: string): {
+  terminalByEntity: Map<string, Set<string>>;
+  hasTransitions: Set<string>;
+} {
+  const terminalByEntity = new Map<string, Set<string>>();
+  const hasTransitions = new Set<string>();
+  const entityPattern =
+    /^\s*(?:external\s+)?entity\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm;
+  for (
+    let entity = entityPattern.exec(text);
+    entity;
+    entity = entityPattern.exec(text)
+  ) {
+    const entityName = entity[1];
+    const open = text.indexOf("{", entity.index);
+    if (open < 0) continue;
+    const close = findMatchingBrace(text, open);
+    if (close < 0) continue;
+    const body = text.slice(open + 1, close);
+
+    const transPattern = /\btransitions\s+\w+\s*\{/g;
+    for (
+      let tm = transPattern.exec(body);
+      tm;
+      tm = transPattern.exec(body)
+    ) {
+      hasTransitions.add(entityName);
+      const tOpen = body.indexOf("{", tm.index + tm[0].length - 1);
+      if (tOpen < 0) continue;
+      const tClose = findMatchingBrace(body, tOpen);
+      if (tClose < 0) continue;
+      const transBody = body.slice(tOpen + 1, tClose);
+      const terminalMatch = transBody.match(
+        /\bterminal\s*:\s*([^\n}]+)/,
+      );
+      if (terminalMatch) {
+        const statuses = terminalMatch[1]
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) => /^[a-z_][a-z0-9_]*$/.test(s));
+        if (statuses.length > 0) {
+          terminalByEntity.set(entityName, new Set(statuses));
+        }
+      }
+    }
+  }
+  return { terminalByEntity, hasTransitions };
 }
 
 function collectDefaultInstanceNames(text: string): Set<string> {
@@ -3599,6 +3951,858 @@ function isCommentLineAtIndex(text: string, index: number): boolean {
   const lineEnd = text.indexOf("\n", index);
   const line = text.slice(lineStart, lineEnd >= 0 ? lineEnd : text.length);
   return /^\s*--/.test(line);
+}
+
+function findProcessCompletenessIssues(
+  text: string,
+  lineStarts: number[],
+  blocks: ReturnType<typeof parseAlliumBlocks>,
+): Finding[] {
+  const findings: Finding[] = [];
+  const statusByEntity = collectEntityStatusEnums(text);
+  if (statusByEntity.size === 0) {
+    return findings;
+  }
+
+  const { terminalByEntity } = collectEntityTerminalStatuses(text);
+  const fieldEntityTypes = collectFieldEntityTypes(text, statusByEntity);
+  const declaredEdges = collectDeclaredEdges(text);
+  const contextTypes = collectContextBindingTypes(blocks);
+  const statusDeclarationOffsets = collectEntityStatusDeclarationOffsets(text);
+
+  // Collect triggers provided by surfaces
+  const surfaceTriggers = new Set<string>();
+  const surfaces = blocks.filter((block) => block.kind === "surface");
+  for (const surface of surfaces) {
+    for (const trigger of parseProvidesTriggerCalls(surface.body)) {
+      surfaceTriggers.add(trigger.name);
+    }
+  }
+
+  // Collect emitted triggers from rule ensures
+  const emittedTriggers = new Set<string>();
+  const ensureCallPattern =
+    /^\s*ensures\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm;
+  const ruleBlocks = blocks.filter((block) => block.kind === "rule");
+  for (const rule of ruleBlocks) {
+    for (
+      let match = ensureCallPattern.exec(rule.body);
+      match;
+      match = ensureCallPattern.exec(rule.body)
+    ) {
+      emittedTriggers.add(match[1]);
+    }
+  }
+
+  // Collect field assignments from all rules' ensures clauses
+  const assignedFields = new Set<string>();
+
+  // Per-rule data
+  interface RuleData {
+    name: string;
+    triggerReachable: boolean;
+    requiresFields: Array<{ entity: string; field: string; value: string }>;
+    transitions: Array<{ entity: string; from: string; to: string }>;
+    nameOffset: number;
+    nameLength: number;
+  }
+  const rules: RuleData[] = [];
+
+  const nonStatusFieldPattern =
+    /([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\s*=\s*(true|false|[a-z_][a-z0-9_]*)\b/g;
+
+  for (const rule of ruleBlocks) {
+    const bindingTypes = collectRuleBindingTypes(rule.body, contextTypes);
+    const clauseLines = collectRuleClauseLines(rule.body);
+
+    // Extract trigger name
+    let triggerName: string | undefined;
+    const whenLine = rule.body.match(/^\s*when\s*:\s*(.+)$/m);
+    if (whenLine) {
+      const callMatch = whenLine[1].match(/([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
+      if (callMatch) {
+        triggerName = callMatch[1];
+      }
+    }
+    const triggerReachable =
+      triggerName === undefined ||
+      surfaceTriggers.has(triggerName) ||
+      emittedTriggers.has(triggerName);
+
+    // Collect requires statuses and non-status requires fields
+    const requiresByBinding = new Map<string, Set<string>>();
+    const requiresFields: Array<{
+      entity: string;
+      field: string;
+      value: string;
+    }> = [];
+
+    for (const line of clauseLines) {
+      if (line.clause !== "requires") continue;
+
+      // Status requires: binding.status = value
+      const reqMatch = line.text.match(
+        /([a-z_][a-z0-9_]*)\.status\s*=\s*([a-z_][a-z0-9_]*)\b/,
+      );
+      if (reqMatch) {
+        const binding = reqMatch[1];
+        const status = reqMatch[2];
+        const resolved = resolveBindingEntity(
+          binding,
+          status,
+          bindingTypes,
+          statusByEntity,
+        );
+        if (resolved) {
+          const set = requiresByBinding.get(binding) ?? new Set<string>();
+          set.add(status);
+          requiresByBinding.set(binding, set);
+        }
+      }
+
+      // Nested status requires: binding.field.status = value
+      const nestedReq = line.text.match(
+        /([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\.status\s*=\s*([a-z_][a-z0-9_]*)\b/,
+      );
+      if (nestedReq) {
+        const rootBinding = nestedReq[1];
+        const status = nestedReq[3];
+        const set = requiresByBinding.get(rootBinding) ?? new Set<string>();
+        set.add(status);
+        requiresByBinding.set(rootBinding, set);
+      }
+
+      // Non-status field requires
+      for (
+        let fm = nonStatusFieldPattern.exec(line.text);
+        fm;
+        fm = nonStatusFieldPattern.exec(line.text)
+      ) {
+        const binding = fm[1];
+        const field = fm[2];
+        const value = fm[3];
+        if (field === "status") continue;
+        const entity = resolveBindingEntity(
+          binding,
+          undefined,
+          bindingTypes,
+          statusByEntity,
+        );
+        if (entity) {
+          requiresFields.push({ entity, field, value });
+        }
+      }
+    }
+
+    // Collect ensures status assignments and field assignments
+    const ensuresStatuses: Array<{ binding: string; target: string }> = [];
+
+    for (const line of clauseLines) {
+      if (line.clause !== "ensures") continue;
+
+      // Status assignments: binding.status = value
+      const assignMatch = line.text.match(
+        /([a-z_][a-z0-9_]*)\.status\s*=\s*([a-z_][a-z0-9_]*)\b/,
+      );
+      const nestedAssign = line.text.match(
+        /([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\.status\s*=\s*([a-z_][a-z0-9_]*)\b/,
+      );
+
+      if (nestedAssign) {
+        const rootBinding = nestedAssign[1];
+        const fieldName = nestedAssign[2];
+        const target = nestedAssign[3];
+        const rootEntity = resolveBindingEntity(
+          rootBinding,
+          undefined,
+          bindingTypes,
+          statusByEntity,
+        );
+        if (rootEntity) {
+          const nestedEntity = fieldEntityTypes
+            .get(rootEntity)
+            ?.get(fieldName);
+          if (nestedEntity) {
+            assignedFields.add(`${nestedEntity}.status`);
+            assignedFields.add(`${nestedEntity}.status.${target}`);
+          }
+        }
+        ensuresStatuses.push({ binding: rootBinding, target });
+      } else if (assignMatch) {
+        const binding = assignMatch[1];
+        const target = assignMatch[2];
+        const entity = resolveBindingEntity(
+          binding,
+          target,
+          bindingTypes,
+          statusByEntity,
+        );
+        if (entity) {
+          assignedFields.add(`${entity}.status`);
+          assignedFields.add(`${entity}.status.${target}`);
+        }
+        ensuresStatuses.push({ binding, target });
+      }
+
+      // Non-status field assignments
+      for (
+        let fm = nonStatusFieldPattern.exec(line.text);
+        fm;
+        fm = nonStatusFieldPattern.exec(line.text)
+      ) {
+        const binding = fm[1];
+        const field = fm[2];
+        if (field === "status") continue;
+        const entity = resolveBindingEntity(
+          binding,
+          undefined,
+          bindingTypes,
+          statusByEntity,
+        );
+        if (entity) {
+          assignedFields.add(`${entity}.${field}`);
+        }
+      }
+    }
+
+    // Scan ensures for Entity.created() calls with status
+    const ensuresLines = clauseLines.filter((l) => l.clause === "ensures");
+    const ensuresText = ensuresLines.map((l) => l.text).join("\n");
+    const createdCallPattern = /([A-Z][A-Za-z0-9_]*)\.created\s*\(/g;
+    for (
+      let cm = createdCallPattern.exec(ensuresText);
+      cm;
+      cm = createdCallPattern.exec(ensuresText)
+    ) {
+      const entityName = cm[1];
+      if (!statusByEntity.has(entityName)) continue;
+      const afterOpen = cm.index + cm[0].length;
+      let depth = 1;
+      let closeIdx = -1;
+      for (let i = afterOpen; i < ensuresText.length; i++) {
+        if (ensuresText[i] === "(") depth++;
+        if (ensuresText[i] === ")") depth--;
+        if (depth === 0) {
+          closeIdx = i;
+          break;
+        }
+      }
+      if (closeIdx < 0) continue;
+      const argsText = ensuresText.slice(afterOpen, closeIdx);
+      const statusArgMatch = argsText.match(
+        /\bstatus\s*:\s*([a-z_][a-z0-9_]*)/,
+      );
+      if (statusArgMatch) {
+        assignedFields.add(`${entityName}.status`);
+        assignedFields.add(`${entityName}.status.${statusArgMatch[1]}`);
+      }
+    }
+
+    // Build transitions from requires × ensures
+    const transitions: Array<{ entity: string; from: string; to: string }> = [];
+    for (const { binding, target } of ensuresStatuses) {
+      const entity = resolveBindingEntity(
+        binding,
+        target,
+        bindingTypes,
+        statusByEntity,
+      );
+      if (!entity) continue;
+      const sources = requiresByBinding.get(binding);
+      if (!sources) continue;
+      for (const source of sources) {
+        transitions.push({ entity, from: source, to: target });
+      }
+    }
+
+    rules.push({
+      name: rule.name,
+      triggerReachable,
+      requiresFields,
+      transitions,
+      nameOffset: rule.nameStartOffset,
+      nameLength: rule.name.length,
+    });
+  }
+
+  // Enhancement 4: edge achievability
+  for (const [entityName, edgeSet] of declaredEdges.entries()) {
+    const entityStatuses = statusByEntity.get(entityName);
+    if (!entityStatuses) continue;
+
+    for (const edgeStr of edgeSet) {
+      const [from, to] = edgeStr.split("->");
+      if (!from || !to) continue;
+
+      // Find witnessing rules
+      const witnesses = rules.filter((r) =>
+        r.transitions.some(
+          (t) => t.entity === entityName && t.from === from && t.to === to,
+        ),
+      );
+
+      if (witnesses.length === 0) continue;
+
+      const anyAchievable = witnesses.some((r) =>
+        r.requiresFields.every((rf) =>
+          assignedFields.has(`${rf.entity}.${rf.field}`),
+        ),
+      );
+
+      if (!anyAchievable) {
+        const offset =
+          statusDeclarationOffsets.get(`${entityName}:${from}`) ?? 0;
+        findings.push(
+          rangeFinding(
+            lineStarts,
+            offset,
+            offset + from.length,
+            "allium.process.deadTransition",
+            `Transition '${from}' → '${to}' on entity '${entityName}' is declared but unachievable: no witnessing rule's preconditions can be satisfied.`,
+            "warning",
+          ),
+        );
+      }
+    }
+  }
+
+  // Enhancement 5: data flow analysis
+  for (const r of rules) {
+    for (const { entity, field, value } of r.requiresFields) {
+      const key = `${entity}.${field}`;
+      if (!assignedFields.has(key)) {
+        findings.push(
+          rangeFinding(
+            lineStarts,
+            r.nameOffset,
+            r.nameOffset + r.nameLength,
+            "allium.process.unsatisfiedRequires",
+            `Rule '${r.name}' requires ${entity}.${field} = ${value}, but no rule or surface in the spec ever sets this value.`,
+            "warning",
+          ),
+        );
+      }
+    }
+  }
+
+  // Enhancement 6: deadlock detection
+  for (const [entityName, edgeSet] of declaredEdges.entries()) {
+    const entityTerminals = terminalByEntity.get(entityName);
+    if (!entityTerminals) continue;
+    const entityStatuses = statusByEntity.get(entityName);
+    if (!entityStatuses) continue;
+
+    // Build achievable edge set
+    const achievableEdges = new Set<string>();
+    for (const edgeStr of edgeSet) {
+      const [from, to] = edgeStr.split("->");
+      if (!from || !to) continue;
+
+      // Find rules that produce status 'to' on this entity
+      const producers = rules.filter((r) =>
+        r.transitions.some((t) => t.entity === entityName && t.to === to),
+      );
+
+      let achievable: boolean;
+      if (producers.length === 0) {
+        // No direct producer; check if status is assigned via .created() or other means
+        achievable = assignedFields.has(`${entityName}.status.${to}`);
+      } else {
+        achievable = producers.some((r) =>
+          r.requiresFields.every((rf) =>
+            assignedFields.has(`${rf.entity}.${rf.field}`),
+          ),
+        );
+      }
+
+      if (achievable) {
+        achievableEdges.add(edgeStr);
+      }
+    }
+
+    // For each non-terminal state, BFS to check terminal reachability
+    for (const status of entityStatuses) {
+      if (entityTerminals.has(status)) continue;
+
+      const visited = new Set<string>();
+      const queue = [status];
+      let foundTerminal = false;
+
+      while (queue.length > 0) {
+        const current = queue.pop()!;
+        if (visited.has(current)) continue;
+        visited.add(current);
+
+        if (entityTerminals.has(current)) {
+          foundTerminal = true;
+          break;
+        }
+
+        for (const edgeStr of achievableEdges) {
+          const [from, to] = edgeStr.split("->");
+          if (from === current && to) {
+            queue.push(to);
+          }
+        }
+      }
+
+      if (!foundTerminal) {
+        const hasInbound = [...achievableEdges].some((e) => {
+          const [, to] = e.split("->");
+          return to === status;
+        });
+
+        if (hasInbound || entityStatuses.size <= 6) {
+          const offset =
+            statusDeclarationOffsets.get(`${entityName}:${status}`) ?? 0;
+          findings.push(
+            rangeFinding(
+              lineStarts,
+              offset,
+              offset + status.length,
+              "allium.process.deadlock",
+              `Entity '${entityName}' can reach state '${status}' but has no achievable path from '${status}' to any terminal state.`,
+              "warning",
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  return findings;
+}
+
+function findConflictDetectionIssues(
+  text: string,
+  lineStarts: number[],
+  blocks: ReturnType<typeof parseAlliumBlocks>,
+): Finding[] {
+  const findings: Finding[] = [];
+  const statusByEntity = collectEntityStatusEnums(text);
+  if (statusByEntity.size === 0) {
+    return findings;
+  }
+
+  const contextTypes = collectContextBindingTypes(blocks);
+
+  interface ConflictRule {
+    name: string;
+    nameOffset: number;
+    nameLength: number;
+    triggerKind: "call" | "temporal" | "unknown";
+    requiresStatuses: Map<string, Set<string>>; // entity -> {statuses}
+    ensuresStatuses: Map<string, string>; // entity -> target
+  }
+
+  const conflictRules: ConflictRule[] = [];
+  const ruleBlocks = blocks.filter((block) => block.kind === "rule");
+
+  for (const rule of ruleBlocks) {
+    const bindingTypes = collectRuleBindingTypes(rule.body, contextTypes);
+    const clauseLines = collectRuleClauseLines(rule.body);
+
+    // Classify trigger
+    let triggerKind: "call" | "temporal" | "unknown" = "unknown";
+    const whenLine = rule.body.match(/^\s*when\s*:\s*(.+)$/m);
+    if (whenLine) {
+      const triggerText = whenLine[1].trim();
+      if (/([A-Za-z_][A-Za-z0-9_]*)\s*\(/.test(triggerText) &&
+          !triggerText.includes(":") &&
+          !/\b(becomes|<=|>=|<|>)\b/.test(triggerText)) {
+        triggerKind = "call";
+      } else if (
+        /[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*/.test(triggerText) &&
+        /\b(becomes|<=|>=|<|>)\b/.test(triggerText)
+      ) {
+        triggerKind = "temporal";
+      } else if (isTemporalWhenClause(triggerText)) {
+        triggerKind = "temporal";
+      }
+    }
+
+    // Collect requires statuses
+    const requiresStatuses = new Map<string, Set<string>>();
+    for (const line of clauseLines) {
+      if (line.clause !== "requires") continue;
+      const reqMatch = line.text.match(
+        /([a-z_][a-z0-9_]*)\.status\s*=\s*([a-z_][a-z0-9_]*)\b/,
+      );
+      if (reqMatch) {
+        const binding = reqMatch[1];
+        const status = reqMatch[2];
+        const entity = resolveBindingEntity(
+          binding,
+          status,
+          bindingTypes,
+          statusByEntity,
+        );
+        if (entity) {
+          const set = requiresStatuses.get(entity) ?? new Set<string>();
+          set.add(status);
+          requiresStatuses.set(entity, set);
+        }
+      }
+    }
+
+    // Collect ensures statuses
+    const ensuresStatuses = new Map<string, string>();
+    for (const line of clauseLines) {
+      if (line.clause !== "ensures") continue;
+      const assignMatch = line.text.match(
+        /([a-z_][a-z0-9_]*)\.status\s*=\s*([a-z_][a-z0-9_]*)\b/,
+      );
+      if (assignMatch) {
+        const binding = assignMatch[1];
+        const target = assignMatch[2];
+        const entity = resolveBindingEntity(
+          binding,
+          target,
+          bindingTypes,
+          statusByEntity,
+        );
+        if (entity) {
+          ensuresStatuses.set(entity, target);
+        }
+      }
+    }
+
+    conflictRules.push({
+      name: rule.name,
+      nameOffset: rule.nameStartOffset,
+      nameLength: rule.name.length,
+      triggerKind,
+      requiresStatuses,
+      ensuresStatuses,
+    });
+  }
+
+  // Pairwise comparison
+  const reported = new Set<string>();
+  for (let i = 0; i < conflictRules.length; i++) {
+    for (let j = i + 1; j < conflictRules.length; j++) {
+      const a = conflictRules[i];
+      const b = conflictRules[j];
+
+      // Skip if both are external calls (actor choice, not conflict)
+      if (a.triggerKind === "call" && b.triggerKind === "call") {
+        continue;
+      }
+
+      // Check for overlapping requires (both can fire in same state)
+      let compatible = false;
+      for (const [entity, aStatuses] of a.requiresStatuses) {
+        const bStatuses = b.requiresStatuses.get(entity);
+        if (bStatuses) {
+          for (const s of aStatuses) {
+            if (bStatuses.has(s)) {
+              compatible = true;
+              break;
+            }
+          }
+        }
+        if (compatible) break;
+      }
+      if (!compatible) continue;
+
+      // Check for conflicting ensures (same entity, different target)
+      for (const [entity, aTarget] of a.ensuresStatuses) {
+        const bTarget = b.ensuresStatuses.get(entity);
+        if (bTarget && aTarget !== bTarget) {
+          const key = `${i}:${j}`;
+          if (!reported.has(key)) {
+            reported.add(key);
+            findings.push(
+              rangeFinding(
+                lineStarts,
+                a.nameOffset,
+                a.nameOffset + a.nameLength,
+                "allium.process.conflict",
+                `Rules '${a.name}' and '${b.name}' can both fire when entity '${entity}' is in the same state, but set status to conflicting values ('${aTarget}' vs '${bTarget}').`,
+                "warning",
+              ),
+            );
+          }
+        }
+      }
+    }
+  }
+
+  return findings;
+}
+
+function findInvariantVerificationIssues(
+  text: string,
+  lineStarts: number[],
+  blocks: ReturnType<typeof parseAlliumBlocks>,
+): Finding[] {
+  const findings: Finding[] = [];
+  const statusByEntity = collectEntityStatusEnums(text);
+  if (statusByEntity.size === 0) {
+    return findings;
+  }
+
+  const fieldTypes = collectFieldEntityTypes(text, statusByEntity);
+  const contextTypes = collectContextBindingTypes(blocks);
+
+  // Parse top-level invariant blocks
+  interface InvariantPattern {
+    name: string;
+    prohibitedStatus: string;
+    keyField: string;
+  }
+
+  const invariants: InvariantPattern[] = [];
+  const invariantHeaderRe = /^\s*invariant\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm;
+  for (
+    let m = invariantHeaderRe.exec(text);
+    m;
+    m = invariantHeaderRe.exec(text)
+  ) {
+    const name = m[1];
+    const openBrace = text.indexOf("{", m.index);
+    if (openBrace < 0) continue;
+    const closeBrace = findMatchingBrace(text, openBrace);
+    if (closeBrace < 0) continue;
+    const body = text.slice(openBrace + 1, closeBrace);
+
+    // Extract prohibited status from "not (a.status = VALUE and b.status = VALUE)"
+    const notMatch = body.match(
+      /not\s*\(\s*[a-z_]+\.status\s*=\s*([a-z_][a-z0-9_]*)\s+and\s+[a-z_]+\.status\s*=\s*([a-z_][a-z0-9_]*)\s*\)/,
+    );
+    if (!notMatch || notMatch[1] !== notMatch[2]) continue;
+    const prohibitedStatus = notMatch[1];
+
+    // Extract key field from "a.field = b.field" where field names match
+    const keyFieldMatch = body.match(
+      /([a-z_]+)\.([a-z_][a-z0-9_]*)\s*=\s*([a-z_]+)\.([a-z_][a-z0-9_]*)/,
+    );
+    if (!keyFieldMatch || keyFieldMatch[2] !== keyFieldMatch[4]) continue;
+    const keyField = keyFieldMatch[2];
+
+    invariants.push({ name, prohibitedStatus, keyField });
+  }
+
+  if (invariants.length === 0) {
+    return findings;
+  }
+
+  // Collect rule effects: status assignments and field modifications
+  interface RuleEffect {
+    name: string;
+    nameStartOffset: number;
+    nameLength: number;
+    statusSets: Array<{ entity: string; target: string }>;
+    fieldSets: Set<string>;
+    requires: Array<{ entity: string; field: string; value: string }>;
+  }
+
+  const ruleEffects: RuleEffect[] = [];
+  const ruleBlocks = blocks.filter((block) => block.kind === "rule");
+
+  for (const rule of ruleBlocks) {
+    const bindingTypes = collectRuleBindingTypes(rule.body, contextTypes);
+    const clauseLines = collectRuleClauseLines(rule.body);
+    const statusSets: Array<{ entity: string; target: string }> = [];
+    const fieldSets = new Set<string>();
+    const requires: Array<{ entity: string; field: string; value: string }> =
+      [];
+
+    for (const line of clauseLines) {
+      if (line.clause === "ensures") {
+        // Direct: binding.status = value
+        const directMatch = line.text.match(
+          /([a-z_][a-z0-9_]*)\.status\s*=\s*([a-z_][a-z0-9_]*)\b/,
+        );
+        if (directMatch) {
+          const binding = directMatch[1];
+          const target = directMatch[2];
+          const entity = resolveBindingEntity(
+            binding,
+            target,
+            bindingTypes,
+            statusByEntity,
+          );
+          if (entity) {
+            statusSets.push({ entity, target });
+            fieldSets.add(`${entity}.status`);
+          }
+        }
+
+        // Nested: binding.field.status = value
+        const nestedMatch = line.text.match(
+          /([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\.status\s*=\s*([a-z_][a-z0-9_]*)\b/,
+        );
+        if (nestedMatch) {
+          const rootBinding = nestedMatch[1];
+          const midField = nestedMatch[2];
+          const target = nestedMatch[3];
+          const rootEntity = resolveBindingEntity(
+            rootBinding,
+            undefined,
+            bindingTypes,
+            statusByEntity,
+          );
+          if (rootEntity) {
+            const entityFields = fieldTypes.get(rootEntity);
+            const nestedEntity = entityFields?.get(midField);
+            if (nestedEntity) {
+              statusSets.push({ entity: nestedEntity, target });
+              fieldSets.add(`${nestedEntity}.status`);
+            }
+          }
+        }
+
+        // General field assignments: binding.field = value
+        const fieldMatch = line.text.match(
+          /([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\s*=\s*([a-z_][a-z0-9_]*)\b/,
+        );
+        if (fieldMatch) {
+          const binding = fieldMatch[1];
+          const field = fieldMatch[2];
+          const entity = resolveBindingEntity(
+            binding,
+            undefined,
+            bindingTypes,
+            statusByEntity,
+          );
+          if (entity) {
+            fieldSets.add(`${entity}.${field}`);
+          }
+        }
+
+        // General nested field assignments: binding.field.subfield = value
+        const nestedFieldMatch = line.text.match(
+          /([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\s*=\s*([a-z_][a-z0-9_]*)\b/,
+        );
+        if (nestedFieldMatch) {
+          const rootBinding = nestedFieldMatch[1];
+          const midField = nestedFieldMatch[2];
+          const subField = nestedFieldMatch[3];
+          const rootEntity = resolveBindingEntity(
+            rootBinding,
+            undefined,
+            bindingTypes,
+            statusByEntity,
+          );
+          if (rootEntity) {
+            const entityFields = fieldTypes.get(rootEntity);
+            const nestedEntity = entityFields?.get(midField);
+            if (nestedEntity) {
+              fieldSets.add(`${nestedEntity}.${subField}`);
+            }
+          }
+        }
+      }
+
+      if (line.clause === "requires") {
+        // Direct: binding.field = value
+        const reqMatch = line.text.match(
+          /([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\s*=\s*([a-z_][a-z0-9_]*)\b/,
+        );
+        if (reqMatch) {
+          const binding = reqMatch[1];
+          const field = reqMatch[2];
+          const value = reqMatch[3];
+          const entity = resolveBindingEntity(
+            binding,
+            field === "status" ? value : undefined,
+            bindingTypes,
+            statusByEntity,
+          );
+          if (entity) {
+            requires.push({ entity, field, value });
+          }
+        }
+
+        // Nested: binding.field.status = value
+        const nestedReqMatch = line.text.match(
+          /([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\.status\s*=\s*([a-z_][a-z0-9_]*)\b/,
+        );
+        if (nestedReqMatch) {
+          const rootBinding = nestedReqMatch[1];
+          const midField = nestedReqMatch[2];
+          const value = nestedReqMatch[3];
+          const rootEntity = resolveBindingEntity(
+            rootBinding,
+            undefined,
+            bindingTypes,
+            statusByEntity,
+          );
+          if (rootEntity) {
+            const entityFields = fieldTypes.get(rootEntity);
+            const nestedEntity = entityFields?.get(midField);
+            if (nestedEntity) {
+              requires.push({ entity: nestedEntity, field: "status", value });
+            }
+          }
+        }
+      }
+    }
+
+    ruleEffects.push({
+      name: rule.name,
+      nameStartOffset: rule.nameStartOffset,
+      nameLength: rule.name.length,
+      statusSets,
+      fieldSets,
+      requires,
+    });
+  }
+
+  // Check each invariant against rule effects
+  for (const inv of invariants) {
+    // Resolve the key field to an entity type
+    let keyEntityType: string | undefined;
+    for (const [entityName, fields] of fieldTypes) {
+      const resolved = fields.get(inv.keyField);
+      if (resolved) {
+        keyEntityType = resolved;
+        break;
+      }
+    }
+
+    for (const effect of ruleEffects) {
+      for (const { entity, target } of effect.statusSets) {
+        if (target !== inv.prohibitedStatus) continue;
+
+        // Check if the rule has a guard that modifies the key entity type
+        let hasGuard = false;
+        if (keyEntityType) {
+          const prefix = `${keyEntityType}.`;
+          for (const f of effect.fieldSets) {
+            if (f.startsWith(prefix)) {
+              hasGuard = true;
+              break;
+            }
+          }
+          if (!hasGuard) {
+            for (const req of effect.requires) {
+              if (req.entity === keyEntityType) {
+                hasGuard = true;
+                break;
+              }
+            }
+          }
+        }
+
+        if (!hasGuard) {
+          findings.push(
+            rangeFinding(
+              lineStarts,
+              effect.nameStartOffset,
+              effect.nameStartOffset + effect.nameLength,
+              "allium.process.invariantViolation",
+              `Rule '${effect.name}' sets ${entity}.status to '${target}' which could violate invariant '${inv.name}'. No guard prevents multiple entities from reaching this state simultaneously.`,
+              "warning",
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  return findings;
 }
 
 function escapeRegex(value: string): string {

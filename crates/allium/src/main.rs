@@ -13,7 +13,8 @@ Usage: allium <command> [arguments]
        allium [-h | --help] [-V | --version]
 
 Commands:
-  check    Validate spec files and report diagnostics
+  check    Validate spec files and report structural diagnostics (JSON)
+  analyse  Analyse process completeness: data flow, reachability, conflicts (JSON)
   parse    Parse a spec file and print the AST as JSON
   plan     Derive test obligations from a spec
   model    Extract the domain model as structured data
@@ -27,17 +28,33 @@ Run `allium help <command>` or `allium <command> --help` for per-command help.
 ";
 
 const CHECK_HELP: &str = "\
-allium check - validate spec files and report diagnostics
+allium check - validate spec files and report structural diagnostics
 
 Usage: allium check <path>...
 
 Each <path> is a .allium file or a directory. Directories are searched
-recursively for .allium files. Findings are printed one per line as:
-  <path>:<line>:<column>: <severity> <code> <message>
+recursively for .allium files. Outputs JSON with a diagnostics array
+containing line-level structural warnings and errors.
 
 Exit codes:
   0  No errors or warnings
   1  One or more errors or warnings were reported
+  2  No inputs provided, or no .allium files could be resolved
+";
+
+const ANALYSE_HELP: &str = "\
+allium analyse - analyse process completeness
+
+Usage: allium analyse <path>...
+
+Runs structural checks (same as `check`) plus process-level analysis:
+data flow tracing, edge reachability, deadlock detection, conflict
+detection, and invariant verification. Outputs JSON with both a
+diagnostics array and a findings array.
+
+Exit codes:
+  0  No findings
+  1  One or more findings were produced
   2  No inputs provided, or no .allium files could be resolved
 ";
 
@@ -97,13 +114,14 @@ fn main() -> ExitCode {
     let rest = &args[1..];
 
     match subcommand {
-        "check" | "parse" | "plan" | "model" => {
+        "check" | "analyse" | "parse" | "plan" | "model" => {
             if rest.iter().any(|a| a == "--help" || a == "-h") {
                 print!("{}", subcommand_help(subcommand));
                 return ExitCode::SUCCESS;
             }
             match subcommand {
                 "check" => cmd_check(rest),
+                "analyse" => cmd_analyse(rest),
                 "parse" => cmd_parse(rest),
                 "plan" => cmd_plan(rest),
                 "model" => cmd_model(rest),
@@ -124,7 +142,7 @@ fn cmd_help(args: &[String]) -> ExitCode {
             print!("{HELP}");
             ExitCode::SUCCESS
         }
-        Some("check") | Some("parse") | Some("plan") | Some("model") => {
+        Some("check") | Some("analyse") | Some("parse") | Some("plan") | Some("model") => {
             print!("{}", subcommand_help(args[0].as_str()));
             ExitCode::SUCCESS
         }
@@ -139,6 +157,7 @@ fn cmd_help(args: &[String]) -> ExitCode {
 fn subcommand_help(name: &str) -> &'static str {
     match name {
         "check" => CHECK_HELP,
+        "analyse" => ANALYSE_HELP,
         "parse" => PARSE_HELP,
         "plan" => PLAN_HELP,
         "model" => MODEL_HELP,
@@ -181,15 +200,14 @@ fn cmd_check(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let mut total_errors = 0u32;
-    let mut total_warnings = 0u32;
+    let mut has_issues = false;
 
     for path in &files {
         let source = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("{}: {e}", path.display());
-                total_errors += 1;
+                has_issues = true;
                 continue;
             }
         };
@@ -198,57 +216,108 @@ fn cmd_check(args: &[String]) -> ExitCode {
         let analysis_diagnostics = allium_parser::analyze(&result.module, &source);
         let source_map = SourceMap::new(&source);
 
-        let all_diagnostics: Vec<&allium_parser::Diagnostic> = result
+        let diagnostics: Vec<serde_json::Value> = result
             .diagnostics
             .iter()
             .chain(analysis_diagnostics.iter())
+            .map(|d| diagnostic_to_json(d, path, &source_map))
             .collect();
 
-        for d in all_diagnostics {
-            let (line, col) = source_map.line_col(d.span.start);
-            let severity = match d.severity {
-                Severity::Error => "error",
-                Severity::Warning => "warning",
-                Severity::Info => "info",
-            };
-            if let Some(code) = d.code {
-                println!(
-                    "{}:{}:{}: {severity} {} {}",
-                    path.display(),
-                    line + 1,
-                    col + 1,
-                    code,
-                    d.message,
-                );
-            } else {
-                println!(
-                    "{}:{}:{}: {severity}: {}",
-                    path.display(),
-                    line + 1,
-                    col + 1,
-                    d.message,
-                );
-            }
-            print_source_snippet(&source_map, &source, line, col);
-
-            match d.severity {
-                Severity::Error => total_errors += 1,
-                Severity::Warning => total_warnings += 1,
-                Severity::Info => {}
-            }
+        if diagnostics.iter().any(|d| {
+            d["severity"] == "error" || d["severity"] == "warning"
+        }) {
+            has_issues = true;
         }
+
+        let output = serde_json::json!({
+            "command": "check",
+            "spec_file": path.display().to_string(),
+            "diagnostics": diagnostics,
+            "findings": [],
+        });
+
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
     }
 
-    let file_count = files.len();
-    if total_errors == 0 && total_warnings == 0 {
-        eprintln!("{file_count} file(s) checked, no issues found.");
-        ExitCode::SUCCESS
-    } else {
-        eprintln!(
-            "{file_count} file(s) checked, {total_errors} error(s), {total_warnings} warning(s)."
-        );
+    if has_issues {
         ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
+}
+
+fn cmd_analyse(args: &[String]) -> ExitCode {
+    let files = resolve_files(args);
+    if files.is_empty() {
+        eprintln!("No .allium files found.");
+        return ExitCode::from(2);
+    }
+
+    let mut has_findings = false;
+
+    for path in &files {
+        let source = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{}: {e}", path.display());
+                has_findings = true;
+                continue;
+            }
+        };
+
+        let result = allium_parser::parse(&source);
+        let analyse_result = allium_parser::analyse(&result.module, &source);
+        let source_map = SourceMap::new(&source);
+
+        let diagnostics: Vec<serde_json::Value> = result
+            .diagnostics
+            .iter()
+            .chain(analyse_result.diagnostics.iter())
+            .map(|d| diagnostic_to_json(d, path, &source_map))
+            .collect();
+
+        if !analyse_result.findings.is_empty() {
+            has_findings = true;
+        }
+
+        let output = serde_json::json!({
+            "command": "analyse",
+            "spec_file": path.display().to_string(),
+            "diagnostics": diagnostics,
+            "findings": analyse_result.findings,
+        });
+
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+    }
+
+    if has_findings {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn diagnostic_to_json(
+    d: &allium_parser::Diagnostic,
+    path: &Path,
+    source_map: &SourceMap,
+) -> serde_json::Value {
+    let (line, col) = source_map.line_col(d.span.start);
+    let severity = match d.severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Info => "info",
+    };
+    serde_json::json!({
+        "code": d.code,
+        "severity": severity,
+        "message": d.message,
+        "location": {
+            "file": path.display().to_string(),
+            "line": line + 1,
+            "col": col + 1,
+        }
+    })
 }
 
 fn cmd_plan(args: &[String]) -> ExitCode {
@@ -307,14 +376,6 @@ fn cmd_model(args: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
     }
-}
-
-fn print_source_snippet(source_map: &SourceMap, source: &str, line: u32, col: u32) {
-    let line_text = source_map.line_text(source, line);
-    let line_num = format!("{}", line + 1);
-    let gutter = line_num.len();
-    println!("  {} | {}", line_num, line_text);
-    println!("  {} | {}^", " ".repeat(gutter), " ".repeat(col as usize));
 }
 
 fn resolve_files(args: &[String]) -> Vec<PathBuf> {

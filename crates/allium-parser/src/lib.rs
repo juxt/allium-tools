@@ -5,8 +5,8 @@ pub mod lexer;
 pub mod parser;
 pub mod span;
 
-pub use analysis::analyze;
+pub use analysis::{analyze, analyse};
 pub use ast::Module;
-pub use diagnostic::Diagnostic;
+pub use diagnostic::{AnalyseResult, Diagnostic, Finding};
 pub use parser::{parse, ParseResult};
 pub use span::Span;

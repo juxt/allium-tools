@@ -1,0 +1,212 @@
+-- allium: 1
+-- allium-analyse-tool-behaviour.allium
+-- Scope: Process-level analysis command that extends structural checking
+--   with data flow, reachability, deadlock, conflict and invariant analysis.
+-- Includes:
+--   - Finding types and their flat JSON evidence structures
+--   - Exit code semantics
+--   - Relationship to the check command
+-- Excludes:
+--   - Structural check rules (covered by allium-check-tool-behaviour)
+--   - VS Code integration and diagnostics rendering
+
+value FindingType {
+    value: dead_transition | missing_producer | deadlock | unreachable_trigger | conflict | invariant_risk
+}
+
+entity AnalyseFinding {
+    type: FindingType
+    summary: String
+    affected_entities: Set<String>
+}
+
+-- Output structure
+
+rule AnalyseOutputIncludesDiagnosticsAndFindings {
+    when: AnalyseCommandCompleted(file, diagnostics, findings)
+
+    ensures: JsonOutputPrinted(
+        command: "analyse",
+        spec_file: file,
+        diagnostics: diagnostics,
+        findings: findings
+    )
+}
+
+rule FindingsAreFlatJsonObjects {
+    when: AnalyseFindingProduced(finding)
+
+    ensures: FlatJsonStructure(finding)
+}
+
+-- Exit codes
+
+rule NoFindingsExitsCleanly {
+    when: AnalyseRunCompleted(findings)
+    requires: findings.count = 0
+
+    ensures: ProcessExit(code: 0)
+}
+
+rule FindingsProducedExitsWithOne {
+    when: AnalyseRunCompleted(findings)
+    requires: findings.count > 0
+
+    ensures: ProcessExit(code: 1)
+}
+
+rule NoInputsExitsWithTwo {
+    when: AnalyseCommandInvokedWithoutInputs()
+
+    ensures: UserInformed(message: "No .allium files found.")
+    ensures: ProcessExit(code: 2)
+}
+
+-- Dead transition finding
+
+rule DeadTransitionDetected {
+    when: TransitionEdgeAnalysed(entity, from, to, witnesses)
+    requires: witnesses.count > 0
+    requires: witnesses.all(w => w.has_unsatisfiable_requires) = true
+
+    ensures: AnalyseFinding.created(
+        type: dead_transition,
+        summary: "Transition is declared but unachievable"
+    )
+}
+
+rule DeadTransitionSearchedEvidenceCoversThreeSources {
+    when: UnsatisfiableRequireReported(entity, field, value)
+
+    ensures: SearchedEvidence(kind: "rule_ensures")
+    ensures: SearchedEvidence(kind: "surface_provides")
+    ensures: SearchedEvidence(kind: "created_calls")
+}
+
+-- Missing producer finding
+
+rule MissingProducerDetected {
+    when: RuleRequiresFieldValue(rule, entity, field, value)
+    requires: NoRuleAssignsField(entity, field) = true
+
+    ensures: AnalyseFinding.created(
+        type: missing_producer,
+        summary: "Nothing establishes the required field value"
+    )
+}
+
+rule MissingProducerSearchedEvidenceCoversThreeSources {
+    when: MissingProducerReported(entity, field)
+
+    ensures: SearchedEvidence(kind: "rule_ensures")
+    ensures: SearchedEvidence(kind: "surface_provides")
+    ensures: SearchedEvidence(kind: "created_calls")
+}
+
+rule MissingProducerSearchedReportsUnreachableRule {
+    when: MissingProducerReported(entity, field)
+    requires: RuleAssignsField(rule, entity, field) = true
+    requires: RuleTriggerIsReachable(rule) = false
+
+    ensures: SearchedEvidence(kind: "rule_ensures", found: rule, but: "trigger has no providing surface")
+}
+
+-- Deadlock finding
+
+rule DeadlockDetected {
+    when: EntityStateAnalysed(entity, state, terminal_states)
+    requires: state not in terminal_states
+    requires: NoAchievablePathToTerminal(entity, state) = true
+
+    ensures: AnalyseFinding.created(
+        type: deadlock,
+        summary: "Entity can reach state but has no achievable path to any terminal state"
+    )
+}
+
+rule DeadlockEdgesIncludeBlockedReasons {
+    when: DeadlockOutboundEdgeReported(from, to, reason)
+
+    ensures: reason != null
+}
+
+rule DeadlockCycleDetectedViaDFS {
+    when: DeadlockReported(entity, state, achievable_edges)
+    requires: CycleExistsInAchievableEdges(state, achievable_edges) = true
+
+    ensures: CycleReported(state)
+}
+
+rule DeadlockCycleNullWhenNoCycleExists {
+    when: DeadlockReported(entity, state, achievable_edges)
+    requires: CycleExistsInAchievableEdges(state, achievable_edges) = false
+
+    ensures: NoCycleReported(state)
+}
+
+-- Unreachable trigger finding
+
+rule UnreachableTriggerDetected {
+    when: TriggerAnalysed(trigger_name, listening_rules, surface_names)
+    requires: TriggerProvidedBySurface(trigger_name) = false
+    requires: TriggerEmittedByRule(trigger_name) = false
+
+    ensures: AnalyseFinding.created(
+        type: unreachable_trigger,
+        summary: "Trigger is not provided by any surface"
+    )
+}
+
+rule UnreachableTriggersAggregatedPerTrigger {
+    when: MultipleRulesListenForSameTrigger(trigger_name, rules)
+    requires: TriggerProvidedBySurface(trigger_name) = false
+
+    ensures: SingleFindingEmitted(trigger: trigger_name, listening_rules: rules)
+}
+
+rule UnreachableTriggerIncludesSurfacesChecked {
+    when: UnreachableTriggerReported(trigger_name, surface_names)
+
+    ensures: SurfacesCheckedReported(surface_names)
+}
+
+-- Conflict finding
+
+rule ConflictDetected {
+    when: RulePairAnalysed(rule_a, rule_b, entity, state)
+    requires: RulesShareOverlappingRequiresState(rule_a, rule_b, entity, state) = true
+    requires: RulesSetConflictingEnsuresValues(rule_a, rule_b, entity) = true
+    requires: NotBothCallTriggered(rule_a, rule_b) = true
+
+    ensures: AnalyseFinding.created(
+        type: conflict,
+        summary: "Rules can both fire in the same state, setting conflicting values"
+    )
+}
+
+-- Invariant risk finding
+
+rule InvariantRiskDetected {
+    when: RuleEffectAnalysed(rule, entity, target_status, invariant_name, key_entity_type)
+    requires: InvariantProhibitsConcurrentStatus(invariant_name, target_status) = true
+    requires: RuleGuardsRelatedEntity(rule, key_entity_type) = false
+
+    ensures: AnalyseFinding.created(
+        type: invariant_risk,
+        summary: "Rule could violate invariant"
+    )
+}
+
+rule InvariantRiskIncludesNeededGuard {
+    when: InvariantRiskReported(rule, key_entity_type, target_status)
+
+    ensures: GuardAnalysisReported(has_guard: false, needed: "Rule should set status to prevent concurrent states")
+}
+
+rule InvariantGuardedRuleDoesNotTriggerFinding {
+    when: RuleEffectAnalysed(rule, entity, target_status, invariant_name, key_entity_type)
+    requires: InvariantProhibitsConcurrentStatus(invariant_name, target_status) = true
+    requires: RuleGuardsRelatedEntity(rule, key_entity_type) = true
+
+    ensures: NoFindingProduced(type: invariant_risk, rule: rule)
+}
