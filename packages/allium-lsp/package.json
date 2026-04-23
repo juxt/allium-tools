@@ -1,6 +1,6 @@
 {
   "name": "allium-lsp",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "Language Server Protocol server for the Allium language.",
   "license": "MIT",
   "bin": {

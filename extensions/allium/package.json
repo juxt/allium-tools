@@ -2,7 +2,7 @@
   "name": "allium-vscode",
   "displayName": "Allium Tools for VS Code",
   "description": "Allium language support for VS Code: diagnostics, refactors, hover, definitions, formatting, and more.",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "license": "MIT",
   "publisher": "juxt",
   "repository": {
