@@ -75,6 +75,7 @@ Pre-built binaries for Linux and macOS are available on the [releases page](http
 ### Commands
 
 - `allium check` — validate specifications and report diagnostics.
+- `allium analyse` — run structural checks plus process-level analysis: data flow, reachability, deadlock and conflict detection, invariant verification.
 - `allium parse` — parse a file and output the syntax tree.
 - `allium plan` — derive test obligations from a specification.
 - `allium model` — extract the domain model as structured data.
@@ -122,12 +123,14 @@ Install [allium-mode](https://github.com/juxt/allium-mode) via `straight.el`, Do
 
 ## Development
 
-See [AGENTS.md](AGENTS.md) for development guidance and the [project roadmap](docs/project/plan.md) for build instructions and priorities.
+See [AGENTS.md](AGENTS.md) for development guidance and the [project roadmap](docs/project/plan.md) for priorities.
 
 ```bash
-npm install       # install dependencies and git hooks
-npm run build     # build all workspaces
-npm run test      # run all tests
+cargo build              # build the CLI and parser
+cargo test               # run Rust tests
+npm install              # install Node dependencies (LSP, VS Code extension)
+npm run build            # build Node workspaces
+npm run test             # run Node tests
 ```
 
 ## Licence
