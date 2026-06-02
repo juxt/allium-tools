@@ -70,7 +70,7 @@ brew tap juxt/allium && brew install allium
 cargo install allium-cli
 ```
 
-Pre-built binaries for Linux and macOS are available on the [releases page](https://github.com/juxt/allium-tools/releases).
+Pre-built binaries for Linux, macOS and Windows (not yet signed) are available on the [releases page](https://github.com/juxt/allium-tools/releases).
 
 ### Commands
 

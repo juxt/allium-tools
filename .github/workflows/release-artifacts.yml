@@ -23,6 +23,8 @@ jobs:
             os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
 
     runs-on: ${{ matrix.os }}
 
@@ -38,6 +40,7 @@ jobs:
         run: cargo install cross --locked
 
       - name: Build
+        shell: bash
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }} -p allium-cli
@@ -45,16 +48,25 @@ jobs:
             cargo build --release --target ${{ matrix.target }} -p allium-cli
           fi
 
-      - name: Package
+      - name: Package (unix)
+        if: matrix.os != 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
           tar czf ../../../allium-${{ matrix.target }}.tar.gz allium
+
+      - name: Package (windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/${{ matrix.target }}/release/allium.exe -DestinationPath allium-${{ matrix.target }}.zip
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: allium-${{ matrix.target }}
-          path: allium-${{ matrix.target }}.tar.gz
+          path: |
+            allium-${{ matrix.target }}.tar.gz
+            allium-${{ matrix.target }}.zip
 
   build-and-release:
     runs-on: ubuntu-latest
@@ -113,6 +125,7 @@ jobs:
         with:
           files: |
             artifacts/allium-*/*.tar.gz
+            artifacts/allium-*/*.zip
             artifacts/allium-release-artifacts/*
 
   publish-crates:
