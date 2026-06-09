@@ -789,6 +789,48 @@ test("reports deferred specification with a non-hint trailing comment", () => {
   );
 });
 
+test("does not report expression-shaped deferred path with a quote", () => {
+  // Parity with the Rust analyzer: the quote falls in the suffix after the flat
+  // name capture, so both sides treat it as a (malformed) location hint.
+  for (const line of [`deferred Foo("x")\n`, `deferred Foo = "x"\n`]) {
+    const findings = analyzeAllium(line);
+    assert.equal(
+      findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+      false,
+    );
+  }
+});
+
+test("treats a lone carriage return as a line boundary", () => {
+  // `m`-flag anchors split at a bare `\r` — locked here for Rust parity, whose
+  // replayed match uses the same terminator set.
+  const findings = analyzeAllium(`deferred Foo\rdeferred Bar\n`);
+  const hints = findings.filter(
+    (f) => f.code === "allium.deferred.missingLocationHint",
+  );
+  assert.equal(hints.length, 2);
+});
+
+test("does not report parenthesised deferred path", () => {
+  // The name pattern requires `deferred` + whitespace + `[A-Za-z_]`, so a
+  // parenthesised path never matches — locked here for Rust parity.
+  const findings = analyzeAllium(`deferred (Foo)\n`);
+  assert.equal(
+    findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+    false,
+  );
+});
+
+test("reports qualified deferred path under its flat name", () => {
+  // The name capture stops at `/`; both analyzers warn and name `billing`.
+  const findings = analyzeAllium(`deferred billing/InvoiceWorkflow\n`);
+  const hint = findings.find(
+    (f) => f.code === "allium.deferred.missingLocationHint",
+  );
+  assert.ok(hint);
+  assert.ok(hint.message.includes("'billing'"));
+});
+
 test("reports undefined status assignment value", () => {
   const findings = analyzeAllium(
     `entity Invitation {\n  status: pending | active | completed\n}\n\nrule CloseInvitation {\n  when: invitation: Invitation.created_at <= now\n  ensures: invitation.status = archived\n}\n`,

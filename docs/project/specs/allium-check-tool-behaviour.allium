@@ -262,8 +262,8 @@ rule DeferredWithoutLocationHintWarns {
 
 rule DeferredWithLocationHintSuppressesWarning {
     when: CheckCommandInvokedWithInputs(inputs)
-    requires: file contains deferred declaration
-    requires: deferred line includes quoted path, URL, or "-- see:" comment
+    requires: file contains deferred_declaration
+    requires: deferred_declaration line includes quoted path, URL, or "-- see:" comment
 
     ensures: FindingNotObserved(code: "allium.deferred.missingLocationHint", declaration: deferred_declaration)
 }
