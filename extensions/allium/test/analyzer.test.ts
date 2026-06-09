@@ -764,6 +764,31 @@ test("does not report deferred specification with location hint", () => {
   );
 });
 
+test("does not report deferred specification with see-comment location hint", () => {
+  const findings = analyzeAllium(
+    `deferred EscalationPolicy.at_level    -- see: detailed/escalation.allium\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+    false,
+  );
+});
+
+test("reports deferred specification with a URL glued to the path", () => {
+  // No space before the URL: the marker is part of the (unspaced) path, not a hint.
+  const findings = analyzeAllium(`deferred Foohttps://x\n`);
+  assert.ok(
+    findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+  );
+});
+
+test("reports deferred specification with a non-hint trailing comment", () => {
+  const findings = analyzeAllium(`deferred EscalationPolicy.at_level    -- TODO write this\n`);
+  assert.ok(
+    findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+  );
+});
+
 test("reports undefined status assignment value", () => {
   const findings = analyzeAllium(
     `entity Invitation {\n  status: pending | active | completed\n}\n\nrule CloseInvitation {\n  when: invitation: Invitation.created_at <= now\n  ensures: invitation.status = archived\n}\n`,

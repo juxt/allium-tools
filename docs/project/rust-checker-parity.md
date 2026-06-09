@@ -72,6 +72,12 @@ Added a targeted check for rules with bare entity bindings (e.g. `when: state: C
 
 Removed early return when no config block exists (the TS checks for `config.xxx` references regardless). Added `Expr::For`, `Expr::LetExpr`, and `Expr::Lambda` handling to `check_config_refs_in_expr`. Changed severity from error to warning to match TS.
 
+### 6. `deferred.missingLocationHint` predicate unified
+
+The Rust `check_deferred_location_hints` previously emitted the warning for every `deferred` declaration unconditionally — it inspected only the parsed path expression, which drops the trailing comment, so it could never see a hint. It now scans the raw source suffix from the end of the parsed path to the end of its line and applies the same predicate as the TypeScript `findDeferredLocationHints`.
+
+A deferred declaration is treated as carrying a location hint when that suffix includes a quoted path, a URL (`http://`/`https://`), or the `-- see:` comment convention shown in the language reference. The TypeScript predicate was broadened from quoted-path/URL-only to also recognise `-- see:`, so the documented `deferred X -- see: path.allium` form is now accepted by both implementations. Scanning the suffix (rather than the whole line) is what keeps the two in step: TypeScript's greedy name capture `[A-Za-z0-9_.]*` stops at the same byte the Rust parser ends the path, so a URL glued to the identifier (`deferred Foohttps://x`) is treated as an unspaced path with no hint by both — and warns in both. See issue #20.
+
 ## Diagnostic codes implemented
 
 | Code | Severity | Rust | TypeScript |
@@ -105,7 +111,7 @@ Both implementations support `-- allium-ignore code1, code2` comments. The direc
 
 ```bash
 cargo build --release          # Build Rust CLI
-cargo test                     # Run Rust tests (304 in parser, 140 in CLI)
+cargo test                     # Run Rust tests (338 in parser, 140 in CLI)
 npm run build                  # Build TypeScript
 npm run test                   # Run TypeScript tests
 ```

@@ -251,3 +251,19 @@ rule UnresolvedUsePathWarnsInMultiFileMode {
     ensures: FindingObserved(code: "allium.use.unresolvedPath", severity: warning)
     ensures: FindingMessage includes path
 }
+
+rule DeferredWithoutLocationHintWarns {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: file contains deferred declaration
+    requires: deferred line excludes quoted path, URL, and "-- see:" comment
+
+    ensures: FindingObserved(code: "allium.deferred.missingLocationHint", severity: warning)
+}
+
+rule DeferredWithLocationHintSuppressesWarning {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: file contains deferred declaration
+    requires: deferred line includes quoted path, URL, or "-- see:" comment
+
+    ensures: FindingNotObserved(code: "allium.deferred.missingLocationHint", declaration: deferred_declaration)
+}
