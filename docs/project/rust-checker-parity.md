@@ -138,6 +138,15 @@ directive). Delimiters (`"`, `` ` ``) and the `--` of a comment are preserved by
 the mask, so lanes that only need to detect that a string or comment is present
 (e.g. the type-mismatch operand lanes) still see one.
 
+One refinement landed as a follow-up regression fix: lanes that compare
+string-literal **values** textually (`findNeverFireRuleIssues`,
+`findSurfaceImpossibleWhenIssues`) cannot compare masked literals, because
+masking collapses distinct same-length literals to identical spaces (`"a"` and
+`"b"` both become `" "`) — producing a spurious `rule.neverFires` on satisfiable
+requires pairs and missing genuine contradictions. These lanes still *match* on
+masked text but re-read string operands from the raw source via
+`rawStringOperand`, exploiting the mask's length/offset preservation.
+
 ## Diagnostic codes implemented
 
 | Code | Severity | Rust | TypeScript |
