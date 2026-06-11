@@ -68,6 +68,43 @@ test("still warns on a real deferred declaration without a hint", () => {
   );
 });
 
+// String-literal value comparisons must use the raw literal text, not the
+// masked view where same-length literals collapse to the same spaces.
+
+test("neverFires: distinct same-length string literals are not contradictory", () => {
+  const findings = analyzeAllium(
+    `-- allium: 1\nrule R {\n  when: Ping()\n  requires: order.state = "a"\n  requires: order.state != "b"\n  ensures: order.flag = done\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.rule.neverFires"),
+    false,
+  );
+});
+
+test("neverFires: contradictory same-length string literals are detected", () => {
+  const findings = analyzeAllium(
+    `-- allium: 1\nrule R {\n  when: Ping()\n  requires: order.state = "aa"\n  requires: order.state = "bb"\n  ensures: order.flag = done\n}\n`,
+  );
+  assert.ok(findings.some((f) => f.code === "allium.rule.neverFires"));
+});
+
+test("impossibleWhen: contradictory same-length string literals are detected", () => {
+  const findings = analyzeAllium(
+    `-- allium: 1\nsurface Dash {\n  show grid when mode = "aa" and mode = "bb"\n}\n`,
+  );
+  assert.ok(findings.some((f) => f.code === "allium.surface.impossibleWhen"));
+});
+
+test("impossibleWhen: distinct expressions with string values are not contradictory", () => {
+  const findings = analyzeAllium(
+    `-- allium: 1\nsurface Dash {\n  show grid when mode = "aa" and theme = "bb"\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.surface.impossibleWhen"),
+    false,
+  );
+});
+
 test("still accepts a real deferred with a -- see: hint", () => {
   const findings = analyzeAllium("-- allium: 1\ndeferred Foo -- see: bar.allium\n");
   assert.equal(

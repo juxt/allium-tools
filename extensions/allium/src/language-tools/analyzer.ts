@@ -161,7 +161,7 @@ export function analyzeAllium(
   findings.push(
     ...findSurfaceRuleCoverageIssues(maskedText, lineStarts, blocks),
   );
-  findings.push(...findSurfaceImpossibleWhenIssues(lineStarts, blocks));
+  findings.push(...findSurfaceImpossibleWhenIssues(lineStarts, blocks, text));
   findings.push(...findSurfaceNamedBlockUniquenessIssues(lineStarts, blocks));
   findings.push(
     ...findSurfaceRequiresDeferredHintIssues(lineStarts, blocks, maskedText),
@@ -176,7 +176,7 @@ export function analyzeAllium(
   findings.push(...findExternalEntitySourceHints(maskedText, lineStarts, blocks));
   findings.push(...findDeferredLocationHints(text, maskedText, lineStarts));
   findings.push(...findImplicitLambdaIssues(maskedText, lineStarts));
-  findings.push(...findNeverFireRuleIssues(lineStarts, blocks));
+  findings.push(...findNeverFireRuleIssues(lineStarts, blocks, text));
   findings.push(...findDuplicateRuleBehaviourIssues(lineStarts, blocks));
   findings.push(...findExpressionTypeMismatchIssues(lineStarts, blocks));
   findings.push(...findDerivedCircularDependencyIssues(maskedText, lineStarts));
@@ -2517,6 +2517,26 @@ function buildLineStarts(text: string): number[] {
  * so lanes that only need to detect that a string/comment is present (e.g. the
  * type-mismatch operand lanes) still see one.
  */
+/**
+ * Re-read a regex-captured operand from the raw source when it is a string
+ * literal. The comparison lanes match on masked text, where string content is
+ * blanked to spaces — distinct same-length literals look identical there
+ * (`"a"` and `"b"` both become `" "`), which broke value-equality reasoning
+ * (spurious `rule.neverFires`, missed `surface.impossibleWhen`). The mask
+ * preserves length and offsets, so the literal's true text lives at the same
+ * offsets in the raw source.
+ */
+function rawStringOperand(
+  rawText: string,
+  absoluteStart: number,
+  operand: string,
+): string {
+  if (!operand.startsWith('"')) {
+    return operand;
+  }
+  return rawText.slice(absoluteStart, absoluteStart + operand.length);
+}
+
 export function maskCommentsAndStrings(text: string): string {
   const out = text.split("");
   const n = text.length;
@@ -2924,6 +2944,7 @@ function findSurfaceRuleCoverageIssues(
 function findSurfaceImpossibleWhenIssues(
   lineStarts: number[],
   blocks: ReturnType<typeof parseAlliumBlocks>,
+  rawText: string,
 ): Finding[] {
   const findings: Finding[] = [];
   const surfaces = blocks.filter((block) => block.kind === "surface");
@@ -2944,6 +2965,15 @@ function findSurfaceImpossibleWhenIssues(
       }
 
       const condition = whenMatch[1];
+      // The condition group is anchored at the end of the when-match; track
+      // its offset in the (masked) body so string operands can be re-read from
+      // the raw source at the same offsets (the mask is length-preserving).
+      const conditionStart =
+        surface.bodyStartOffset +
+        cursor +
+        (whenMatch.index ?? 0) +
+        whenMatch[0].length -
+        condition.length;
       const equalsByExpr = new Map<string, Set<string>>();
       comparisonPattern.lastIndex = 0;
       for (
@@ -2952,7 +2982,9 @@ function findSurfaceImpossibleWhenIssues(
         cmp = comparisonPattern.exec(condition)
       ) {
         const expr = cmp[1];
-        const value = cmp[2];
+        const valueStart =
+          conditionStart + cmp.index + cmp[0].length - cmp[2].length;
+        const value = rawStringOperand(rawText, valueStart, cmp[2]);
         const set = equalsByExpr.get(expr) ?? new Set<string>();
         set.add(value);
         equalsByExpr.set(expr, set);
@@ -3503,6 +3535,7 @@ function findImplicitLambdaIssues(
 function findNeverFireRuleIssues(
   lineStarts: number[],
   blocks: ReturnType<typeof parseAlliumBlocks>,
+  rawText: string,
 ): Finding[] {
   const findings: Finding[] = [];
   const rules = blocks.filter((block) => block.kind === "rule");
@@ -3522,7 +3555,16 @@ function findNeverFireRuleIssues(
       }
       const expr = match[1];
       const operator = match[2];
-      const value = match[3];
+      // The value group is anchored at the end of the match, so its offset in
+      // the (masked) body is the match end minus its length; the mask is
+      // length-preserving, so the same offsets index the raw source.
+      const valueStart =
+        rule.bodyStartOffset +
+        line.startOffset +
+        (match.index ?? 0) +
+        match[0].length -
+        match[3].length;
+      const value = rawStringOperand(rawText, valueStart, match[3]);
       if (operator === "=") {
         const set = equalsByExpr.get(expr) ?? new Set<string>();
         set.add(value);
