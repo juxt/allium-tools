@@ -2437,9 +2437,14 @@ function collectRuleBoundNames(
     /^\s*when\s*:\s*[A-Za-z_][A-Za-z0-9_]*(?:\/[A-Za-z_][A-Za-z0-9_]*)?\s*\(([^)]*)\)/m;
   const whenCallMatch = ruleBody.match(whenCallPattern);
   if (whenCallMatch) {
-    for (const raw of whenCallMatch[1].split(",")) {
+    for (const raw of splitTopLevelArgs(whenCallMatch[1])) {
       const name = raw.trim();
       if (name.length === 0 || name === "_") {
+        continue;
+      }
+      const typed = name.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)$/);
+      if (typed && isTypeAnnotationText(typed[2])) {
+        bound.add(typed[1]);
         continue;
       }
       if (/^[A-Za-z_][A-Za-z0-9_]*\??$/.test(name)) {
@@ -2485,6 +2490,128 @@ function collectRuleBoundNames(
   }
 
   return bound;
+}
+
+function splitTopLevelArgs(argsText: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let angleDepth = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  let stringQuote: string | undefined;
+  let escaped = false;
+
+  for (let i = 0; i < argsText.length; i += 1) {
+    const ch = argsText[i];
+
+    if (stringQuote) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === stringQuote) {
+        stringQuote = undefined;
+      }
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      stringQuote = ch;
+      continue;
+    }
+
+    if (ch === "<") {
+      angleDepth += 1;
+    } else if (ch === ">" && angleDepth > 0) {
+      angleDepth -= 1;
+    } else if (ch === "(") {
+      parenDepth += 1;
+    } else if (ch === ")" && parenDepth > 0) {
+      parenDepth -= 1;
+    } else if (ch === "[") {
+      bracketDepth += 1;
+    } else if (ch === "]" && bracketDepth > 0) {
+      bracketDepth -= 1;
+    } else if (ch === "{") {
+      braceDepth += 1;
+    } else if (ch === "}" && braceDepth > 0) {
+      braceDepth -= 1;
+    } else if (
+      ch === "," &&
+      angleDepth === 0 &&
+      parenDepth === 0 &&
+      bracketDepth === 0 &&
+      braceDepth === 0
+    ) {
+      parts.push(argsText.slice(start, i));
+      start = i + 1;
+    }
+  }
+
+  parts.push(argsText.slice(start));
+  return parts;
+}
+
+function isTypeAnnotationText(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) {
+    return false;
+  }
+  if (trimmed.endsWith("?")) {
+    return isTypeAnnotationText(trimmed.slice(0, -1));
+  }
+
+  const generic = parseGenericTypeText(trimmed);
+  if (generic) {
+    const args = splitTopLevelArgs(generic.args).map((arg) => arg.trim());
+    return (
+      isTypeAnnotationText(generic.name) &&
+      args.length > 0 &&
+      args.every((arg) => arg.length > 0 && isTypeAnnotationText(arg))
+    );
+  }
+
+  return /^(?:[A-Za-z_][A-Za-z0-9_]*\/)?[A-Z][A-Za-z0-9_]*$/.test(trimmed);
+}
+
+function parseGenericTypeText(
+  text: string,
+): { name: string; args: string } | undefined {
+  let depth = 0;
+  let genericStart = -1;
+  let genericEnd = -1;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "<") {
+      if (depth === 0 && genericStart === -1) {
+        genericStart = i;
+      }
+      depth += 1;
+    } else if (ch === ">") {
+      depth -= 1;
+      if (depth < 0) {
+        return undefined;
+      }
+      if (depth === 0) {
+        genericEnd = i;
+      }
+    }
+  }
+
+  if (
+    depth !== 0 ||
+    genericStart === -1 ||
+    genericEnd !== text.length - 1
+  ) {
+    return undefined;
+  }
+
+  return {
+    name: text.slice(0, genericStart).trim(),
+    args: text.slice(genericStart + 1, genericEnd).trim(),
+  };
 }
 
 function isInsideDoubleQuotedStringAtIndex(
