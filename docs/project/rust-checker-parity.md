@@ -1,16 +1,18 @@
 # Rust checker parity: analysis and remaining work
 
-The Rust CLI (`allium check`) now has a semantic analysis pass in `crates/allium-parser/src/analysis.rs`. It implements 16 diagnostic checks with `-- allium-ignore` suppression. This document describes the remaining gaps against the TypeScript reference implementation and the issues discovered during validation.
+The Rust CLI (`allium check`) now has a semantic analysis pass in `crates/allium-parser/src/analysis.rs`. It implements 16 diagnostic checks with `-- allium-ignore` suppression. This document describes the remaining gaps against editor/LSP diagnostics and the issues discovered during validation.
 
 ## Architecture
 
 The TypeScript analyzer:
-- `extensions/allium/src/language-tools/analyzer.ts` — drives the VS Code extension and LSP
+- `extensions/allium/src/language-tools/analyzer.ts` — drives the VS Code extension and LSP. Most editor diagnostics still live here, but migrated checks can delegate to Rust via the WASM package.
 
 The Rust analyzer:
-- `crates/allium-parser/src/analysis.rs` — drives the Rust CLI (`allium check`)
+- `crates/allium-parser/src/analysis.rs` — drives the Rust CLI (`allium check`) and exposes migrated diagnostics to TypeScript through `crates/allium-wasm`.
 
 The TypeScript version uses regex over raw source text. The Rust version walks the typed AST produced by the parser. The Rust approach is structurally more reliable but needs to handle all AST node shapes the parser produces.
+
+`allium.rule.undefinedBinding` is now a migrated check: the editor/LSP path calls Rust analysis through WASM and maps the Rust diagnostic spans back into TypeScript findings, instead of maintaining a parallel TypeScript rule-binding parser.
 
 The language reference at `docs/allium-v3-language-reference.md` is the definitive source for language semantics. When the two implementations disagree, consult it.
 
@@ -55,6 +57,8 @@ Per language reference rule 1: "All referenced entities and values exist." This 
 ### 1. `rule.undefinedBinding` false positives fixed
 
 `check_unbound_roots` now accumulates `LetExpr` bindings when walking `Block` expressions, so variables defined by `let` in ensures blocks are in scope for subsequent expressions. Also added `Expr::For` handling (with binding scope) and `Expr::BinaryOp` recursion.
+
+The editor/LSP diagnostic for this code is sourced from the Rust analyzer via WASM, so the binding rules have one implementation across CLI and TypeScript surfaces.
 
 ### 2. `rule.unreachableTrigger` — 20 now matching
 
@@ -207,7 +211,7 @@ issue #19:
 | `allium.definition.unused` | warning | Yes | Yes |
 | `allium.deferred.missingLocationHint` | warning | Yes | Yes |
 | `allium.rule.invalidTrigger` | error | Yes | Yes |
-| `allium.rule.undefinedBinding` | error | Yes | Yes |
+| `allium.rule.undefinedBinding` | error | Yes | Yes (via Rust/WASM) |
 | `allium.let.duplicateBinding` | error | Yes | Yes |
 | `allium.config.undefinedReference` | warning | Yes | Yes |
 | `allium.surface.unusedPath` | info | Disabled | Yes |
