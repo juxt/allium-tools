@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 
 let _parse: ((source: string) => string) | undefined;
+let _analyze: ((source: string) => string) | undefined;
 
 function getWasmParse(): (source: string) => string {
 	if (!_parse) {
@@ -21,9 +22,24 @@ function getWasmParse(): (source: string) => string {
 	return _parse!;
 }
 
+function getWasmAnalyze(): (source: string) => string {
+	if (!_analyze) {
+		// eslint-disable-next-line @typescript-eslint/no-require-imports
+		try { _analyze = require(__dirname + "/allium_wasm.js").analyze; }
+		// eslint-disable-next-line @typescript-eslint/no-require-imports
+		catch { _analyze = require("allium-parser-wasm").analyze; }
+	}
+	return _analyze!;
+}
+
 export function parseAllium(source: string): WasmParseResult {
 	const json = getWasmParse()(source);
 	return JSON.parse(json) as WasmParseResult;
+}
+
+export function analyzeAlliumWithRust(source: string): WasmDiagnostic[] {
+	const json = getWasmAnalyze()(source);
+	return JSON.parse(json) as WasmDiagnostic[];
 }
 
 // ---------------------------------------------------------------------------
@@ -49,7 +65,8 @@ export interface WasmSpan {
 export interface WasmDiagnostic {
 	span: WasmSpan;
 	message: string;
-	severity: "Error" | "Warning";
+	severity: "Error" | "Warning" | "Info";
+	code?: string | null;
 }
 
 // ---------------------------------------------------------------------------

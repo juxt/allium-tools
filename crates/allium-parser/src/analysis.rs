@@ -4418,12 +4418,21 @@ impl Ctx<'_> {
                 match &item.kind {
                     BlockItemKind::ForBlock {
                         binding,
+                        collection,
                         items,
                         ..
                     } => {
+                        check_unbound_source_expr(
+                            collection,
+                            &bound,
+                            rule_name,
+                            &mut self.diagnostics,
+                        );
                         let mut inner_bound = bound.clone();
                         match binding {
-                            ForBinding::Single(id) => { inner_bound.insert(&id.name); }
+                            ForBinding::Single(id) => {
+                                inner_bound.insert(&id.name);
+                            }
                             ForBinding::Destructured(ids, _) => {
                                 for id in ids {
                                     inner_bound.insert(&id.name);
@@ -4433,7 +4442,12 @@ impl Ctx<'_> {
                         for sub_item in items {
                             if let BlockItemKind::Clause { keyword, value } = &sub_item.kind {
                                 if keyword == "ensures" || keyword == "requires" {
-                                    check_unbound_roots(value, &inner_bound, rule_name, &mut self.diagnostics);
+                                    check_unbound_roots(
+                                        value,
+                                        &inner_bound,
+                                        rule_name,
+                                        &mut self.diagnostics,
+                                    );
                                 }
                             }
                         }
@@ -4528,21 +4542,7 @@ fn check_unbound_roots(
     match expr {
         Expr::MemberAccess { object, .. } => {
             if let Expr::Ident(id) = object.as_ref() {
-                if !starts_uppercase(&id.name)
-                    && !bound.contains(id.name.as_str())
-                    && !is_builtin_name(&id.name)
-                {
-                    diagnostics.push(
-                        Diagnostic::error(
-                            id.span,
-                            format!(
-                                "Rule '{rule_name}' references '{}' but no matching binding exists in context, trigger params, default instances, or local lets.",
-                                id.name
-                            ),
-                        )
-                        .with_code("allium.rule.undefinedBinding"),
-                    );
-                }
+                push_unbound_root_ident(id, bound, rule_name, diagnostics);
             }
         }
         Expr::Comparison { left, right, .. } => {
@@ -4565,11 +4565,13 @@ fn check_unbound_roots(
             }
         }
         Expr::For { binding, collection, body, .. } => {
-            check_unbound_roots(collection, bound, rule_name, diagnostics);
+            check_unbound_source_expr(collection, bound, rule_name, diagnostics);
             // Skip filter (where clause) — fields are implicitly scoped to the binding
             let mut inner = bound.clone();
             match binding {
-                ForBinding::Single(id) => { inner.insert(id.name.as_str()); }
+                ForBinding::Single(id) => {
+                    inner.insert(id.name.as_str());
+                }
                 ForBinding::Destructured(ids, _) => {
                     for id in ids {
                         inner.insert(id.name.as_str());
@@ -4604,14 +4606,17 @@ fn check_unbound_roots(
                     CallArg::Positional(e) => {
                         check_unbound_roots(e, &call_bound, rule_name, diagnostics);
                     }
-                    CallArg::Named(n) => check_unbound_roots(&n.value, &call_bound, rule_name, diagnostics),
+                    CallArg::Named(n) => {
+                        check_unbound_roots(&n.value, &call_bound, rule_name, diagnostics)
+                    }
                 }
             }
         }
-        Expr::Not { operand, .. }
-        | Expr::Exists { operand, .. }
-        | Expr::NotExists { operand, .. } => {
+        Expr::Not { operand, .. } => {
             check_unbound_roots(operand, bound, rule_name, diagnostics);
+        }
+        Expr::Exists { operand, .. } | Expr::NotExists { operand, .. } => {
+            check_unbound_source_expr(operand, bound, rule_name, diagnostics);
         }
         Expr::In { element, collection, .. } | Expr::NotIn { element, collection, .. } => {
             check_unbound_roots(element, bound, rule_name, diagnostics);
@@ -4630,8 +4635,49 @@ fn check_unbound_roots(
     }
 }
 
+fn check_unbound_source_expr(
+    expr: &Expr,
+    bound: &HashSet<&str>,
+    rule_name: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let Expr::Ident(id) = expr {
+        push_unbound_root_ident(id, bound, rule_name, diagnostics);
+    } else {
+        check_unbound_roots(expr, bound, rule_name, diagnostics);
+    }
+}
+
+fn push_unbound_root_ident(
+    id: &Ident,
+    bound: &HashSet<&str>,
+    rule_name: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if starts_uppercase(&id.name)
+        || bound.contains(id.name.as_str())
+        || is_builtin_name(&id.name)
+    {
+        return;
+    }
+
+    diagnostics.push(
+        Diagnostic::error(
+            id.span,
+            format!(
+                "Rule '{rule_name}' references '{}' but no matching binding exists in context, trigger params, default instances, or local lets.",
+                id.name
+            ),
+        )
+        .with_code("allium.rule.undefinedBinding"),
+    );
+}
+
 fn is_builtin_name(name: &str) -> bool {
-    matches!(name, "config" | "now" | "this" | "within" | "true" | "false" | "null")
+    matches!(
+        name,
+        "config" | "now" | "this" | "within" | "true" | "false" | "null"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -5142,6 +5188,22 @@ mod tests {
         let ds = analyze_src(
             "rule LiteralFilter {\n  when: CommandInvoked(name: \"npm run test\")\n  \
              requires: name.status = active\n  ensures: Done()\n}\n",
+        );
+        assert!(has_code(&ds, "allium.rule.undefinedBinding"));
+    }
+
+    #[test]
+    fn exists_unbound_operand_is_reported() {
+        let ds = analyze_src(
+            "rule Check {\n  when: Ping()\n  requires: exists candidate\n  ensures: Done()\n}\n",
+        );
+        assert!(has_code(&ds, "allium.rule.undefinedBinding"));
+    }
+
+    #[test]
+    fn for_block_unbound_collection_is_reported() {
+        let ds = analyze_src(
+            "rule Iterate {\n  when: Ping()\n  for item in items:\n    ensures: Done()\n}\n",
         );
         assert!(has_code(&ds, "allium.rule.undefinedBinding"));
     }

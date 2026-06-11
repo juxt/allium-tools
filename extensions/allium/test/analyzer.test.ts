@@ -769,6 +769,20 @@ test("reports undefined rule binding used in dotted reference", () => {
   assert.ok(findings.some((f) => f.code === "allium.rule.undefinedBinding"));
 });
 
+test("maps Rust undefined binding byte spans after non-ASCII text", () => {
+  const findings = analyzeAllium(
+    `-- café\nrule Notify {\n  when: Ping()\n  requires: user.status = active\n  ensures: Done()\n}\n`,
+  );
+  const finding = findings.find(
+    (f) => f.code === "allium.rule.undefinedBinding",
+  );
+  assert.ok(finding);
+  assert.equal(finding.start.line, 3);
+  assert.equal(finding.start.character, 12);
+  assert.equal(finding.end.line, 3);
+  assert.equal(finding.end.character, 16);
+});
+
 test("does not report binding defined by trigger parameter", () => {
   const findings = analyzeAllium(
     `rule Notify {\n  when: UserUpdated(user)\n  requires: user.status = active\n  ensures: Done()\n}\n`,
