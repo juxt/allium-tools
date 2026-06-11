@@ -690,6 +690,9 @@ rule VariantDeclarationRequiresVariantKeyword {
         code: "allium.surface.requiresWithoutDeferred",
         severity: warning
         )
+        -- a deferred hint matches by its full name, its trailing dotted
+        -- segment, or — for module-qualified names like billing/InvoiceWorkflow —
+        -- the unqualified part after the alias; the alias alone never matches
     }
 
     rule DuplicateNamedProvidesBlockIsError {

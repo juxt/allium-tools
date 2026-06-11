@@ -3016,13 +3016,20 @@ function findSurfaceRequiresDeferredHintIssues(
 ): Finding[] {
   const findings: Finding[] = [];
   const deferredNames = new Set<string>();
-  const deferredPattern = /^\s*deferred\s+([A-Za-z_][A-Za-z0-9_.]*)\b/gm;
+  const deferredPattern = /^\s*deferred\s+([A-Za-z_][A-Za-z0-9_./]*)\b/gm;
   for (
     let deferred = deferredPattern.exec(text);
     deferred;
     deferred = deferredPattern.exec(text)
   ) {
-    deferredNames.add(deferred[1]);
+    const name = deferred[1];
+    deferredNames.add(name);
+    // A module-qualified name (`billing/InvoiceWorkflow`) hints the unqualified
+    // workflow too: surface requires clauses always use the bare name (#26).
+    const qualifierEnd = name.lastIndexOf("/");
+    if (qualifierEnd >= 0) {
+      deferredNames.add(name.slice(qualifierEnd + 1));
+    }
   }
 
   const surfaces = blocks.filter((block) => block.kind === "surface");
