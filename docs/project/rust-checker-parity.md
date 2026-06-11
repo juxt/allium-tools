@@ -162,6 +162,29 @@ requires pairs and missing genuine contradictions. These lanes still *match* on
 masked text but re-read string operands from the raw source via
 `rawStringOperand`, exploiting the mask's length/offset preservation.
 
+The unreachable-trigger checker (`allium.rule.unreachableTrigger` /
+`allium.rule.invalidTrigger`) was refined in both implementations for
+issue #19:
+
+- A qualified trigger call (`when: alias/Trigger(...)`) is a valid trigger
+  form — the language reference's "Responding to external triggers" section
+  documents it. Rust previously rejected it with `rule.invalidTrigger`;
+  TypeScript already accepted it.
+- Qualified subscriptions are resolved cross-module where possible. The Rust
+  CLI builds a per-file alias → provided/emitted-trigger map
+  (`collect_trigger_outputs` + `CrossModuleContext.imported_triggers`) and
+  flags `alias/Trigger` only when the aliased module is in the check set and
+  determinately lacks the trigger; aliases pointing outside the check set are
+  never flagged. Unqualified triggers emitted by an imported module also count
+  as reachable. The single-file TypeScript analyzer cannot see other modules,
+  so it skips qualified subscriptions entirely (a call name preceded by `/`).
+- A trigger emitted as the leading call of an `if`/`else if`/`else` branch or
+  a `for` iteration inside an `ensures:` value counts as an emission. Rust:
+  `collect_leading_ensures_call` recurses into `Conditional` and `For`;
+  TypeScript: a branch-call lane scoped to ensures clause extents
+  (`ensuresClauseRegions`). Both still collect only the leading call of each
+  branch body, consistent with the leading-call-only convention above.
+
 ## Diagnostic codes implemented
 
 | Code | Severity | Rust | TypeScript |

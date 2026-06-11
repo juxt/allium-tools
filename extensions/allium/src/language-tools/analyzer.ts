@@ -3477,6 +3477,13 @@ function findUnreachableRuleTriggerIssues(
   const produced = new Set<string>();
   const rules = blocks.filter((block) => block.kind === "rule");
   const ensureCallPattern = /^\s*ensures\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm;
+  // A trigger emitted on an `if`/`else if`/`else` branch or inside a `for`
+  // iteration of an ensures value is an emission too (issue #19): capture the
+  // leading call after each branch header's colon. Scoped to ensures clause
+  // extents so branch calls in other clauses don't register, mirroring the
+  // Rust analyzer which walks ensures values only.
+  const branchCallPattern =
+    /^[^\S\n]*(?:if|else(?:[^\S\n]+if)?|for)\b[^\n]*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm;
   for (const rule of rules) {
     for (
       let match = ensureCallPattern.exec(rule.body);
@@ -3484,6 +3491,15 @@ function findUnreachableRuleTriggerIssues(
       match = ensureCallPattern.exec(rule.body)
     ) {
       produced.add(match[1]);
+    }
+    for (const region of ensuresClauseRegions(rule.body)) {
+      for (
+        let match = branchCallPattern.exec(region);
+        match;
+        match = branchCallPattern.exec(region)
+      ) {
+        produced.add(match[1]);
+      }
     }
   }
 
@@ -3507,6 +3523,12 @@ function findUnreachableRuleTriggerIssues(
       call = callPattern.exec(triggerLine)
     ) {
       const callName = call[1];
+      // `alias/Trigger(...)` subscribes to a trigger emitted by an imported
+      // spec. Single-file analysis cannot see the emitting module, so
+      // qualified references are never flagged (issue #19).
+      if (call.index > 0 && triggerLine[call.index - 1] === "/") {
+        continue;
+      }
       if (provided.has(callName) || produced.has(callName)) {
         continue;
       }
@@ -3528,6 +3550,37 @@ function findUnreachableRuleTriggerIssues(
   }
 
   return findings;
+}
+
+/**
+ * Extract the text of each `ensures:` clause value in a rule body: the tail
+ * of the `ensures:` line plus every following line indented deeper than the
+ * `ensures` keyword. Used to scope branch-emission scanning to ensures
+ * clauses only, mirroring the Rust analyzer which walks ensures values.
+ */
+function ensuresClauseRegions(body: string): string[] {
+  const regions: string[] = [];
+  const lines = body.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(/^([^\S\n]*)ensures[^\S\n]*:(.*)$/);
+    if (!match) {
+      continue;
+    }
+    const indent = match[1].length;
+    const parts = [match[2]];
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (line.trim().length > 0) {
+        const lineIndent = line.length - line.trimStart().length;
+        if (lineIndent <= indent) {
+          break;
+        }
+      }
+      parts.push(line);
+    }
+    regions.push(parts.join("\n"));
+  }
+  return regions;
 }
 
 function findExternalEntitySourceHints(
