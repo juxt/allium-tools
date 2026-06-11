@@ -196,12 +196,26 @@ test("fails with exit code 1 on strict warning", () => {
   assert.match(result.stdout, /allium\.temporal\.missingGuard/);
 });
 
+test("surfaces WASM parse errors in check output (issue #25)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "allium-check-"));
+  writeAllium(dir, "spec.allium", `-- allium: 1\ndeferred Foo.\n`);
+
+  const result = runCheck(["--format", "json", "spec.allium"], dir);
+  assert.equal(result.status, 1);
+  const parsed = JSON.parse(result.stdout) as {
+    summary: { errors: number };
+    findings: Array<{ code: string }>;
+  };
+  assert.equal(parsed.summary.errors > 0, true);
+  assert.ok(parsed.findings.some((f) => f.code === "allium.parse.error"));
+});
+
 test("relaxed mode suppresses temporal warning and returns success", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "allium-check-"));
   writeAllium(
     dir,
     "spec.allium",
-    `entity Invitation {\n  expires_at: Timestamp\n  status: String\n}\n\nrule Expires {\n  when: invitation: Invitation.expires_at <= now\n  ensures: invitation.status = expired\n}\n`,
+    `-- allium: 1\nentity Invitation {\n  expires_at: Timestamp\n  status: String\n}\n\nrule Expires {\n  when: invitation: Invitation.expires_at <= now\n  ensures: invitation.status = expired\n}\n`,
   );
 
   const result = runCheck(["--mode", "relaxed", "spec.allium"], dir);
@@ -285,7 +299,7 @@ test("autofix adds missing ensures and returns success", () => {
   const filePath = writeAllium(
     dir,
     "spec.allium",
-    `rule A {\n  when: Ping()\n}\n`,
+    `-- allium: 1\nrule A {\n  when: Ping()\n}\n`,
   );
 
   const result = runCheck(["--autofix", "spec.allium"], dir);
@@ -301,14 +315,14 @@ test("autofix adds temporal guard scaffold", () => {
   const filePath = writeAllium(
     dir,
     "spec.allium",
-    `entity Invitation {\n  expires_at: Timestamp\n  status: String\n}\n\nrule Expires {\n  when: invitation: Invitation.expires_at <= now\n  ensures: invitation.status = expired\n}\n`,
+    `-- allium: 1\nentity Invitation {\n  expires_at: Timestamp\n  status: String\n}\n\nrule Expires {\n  when: invitation: Invitation.expires_at <= now\n  ensures: invitation.status = expired\n}\n`,
   );
 
   const result = runCheck(["--autofix", "spec.allium"], dir);
   assert.equal(result.status, 0);
 
   const updated = fs.readFileSync(filePath, "utf8");
-  assert.match(updated, /requires: \/\* add temporal guard \*\//);
+  assert.match(updated, /requires: TODO\(\) -- add temporal guard/);
 });
 
 test("autofix adds missing when scaffold", () => {
@@ -316,7 +330,7 @@ test("autofix adds missing when scaffold", () => {
   const filePath = writeAllium(
     dir,
     "spec.allium",
-    `rule A {\n  ensures: Done()\n}\n`,
+    `-- allium: 1\nrule A {\n  ensures: Done()\n}\n`,
   );
   const result = runCheck(["--autofix", "spec.allium"], dir);
   assert.equal(result.status, 0);
@@ -380,7 +394,7 @@ test("min-severity hides informational findings", () => {
   writeAllium(
     dir,
     "spec.allium",
-    `rule A {\n  when: Ping()\n  ensures: Done()\n}\n`,
+    `-- allium: 1\nrule A {\n  when: Ping()\n  ensures: Done()\n}\n`,
   );
 
   const result = runCheck(
@@ -400,7 +414,7 @@ test("ignore-code suppresses matching findings", () => {
   writeAllium(
     dir,
     "spec.allium",
-    `rule A {\n  when: Ping()\n  ensures: Done()\n}\n`,
+    `-- allium: 1\nrule A {\n  when: Ping()\n  ensures: Done()\n}\n`,
   );
 
   const result = runCheck(
@@ -438,7 +452,7 @@ test("autofix dryrun does not persist file edits", () => {
   const filePath = writeAllium(
     dir,
     "spec.allium",
-    `rule A {\n  when: Ping()\n}\n`,
+    `-- allium: 1\nrule A {\n  when: Ping()\n}\n`,
   );
   const before = fs.readFileSync(filePath, "utf8");
 
@@ -528,7 +542,7 @@ test("fix-code limits autofix to selected finding codes", () => {
   assert.equal(result.status, 1);
   const updated = fs.readFileSync(filePath, "utf8");
   assert.match(updated, /ensures: TODO\(\)/);
-  assert.doesNotMatch(updated, /requires: \/\* add temporal guard \*\//);
+  assert.doesNotMatch(updated, /requires: TODO\(\) -- add temporal guard/);
 });
 
 test("watch mode runs an initial cycle", async () => {
@@ -570,7 +584,7 @@ test("fix-interactive applies selected fixes only", async () => {
   assert.match(result.stdout, /Apply fix allium\.rule\.missingEnsures/);
   const updated = fs.readFileSync(filePath, "utf8");
   assert.match(updated, /ensures: TODO\(\)/);
-  assert.doesNotMatch(updated, /requires: \/\* add temporal guard \*\//);
+  assert.doesNotMatch(updated, /requires: TODO\(\) -- add temporal guard/);
 });
 
 test("sarif includes rule metadata and help uri", () => {
@@ -593,7 +607,7 @@ test("check loads defaults from allium.config.json", () => {
   writeAllium(
     dir,
     "spec.allium",
-    `entity Invitation {\n  expires_at: Timestamp\n  status: String\n}\n\nrule Expires {\n  when: invitation: Invitation.expires_at <= now\n  ensures: invitation.status = expired\n}\n`,
+    `-- allium: 1\nentity Invitation {\n  expires_at: Timestamp\n  status: String\n}\n\nrule Expires {\n  when: invitation: Invitation.expires_at <= now\n  ensures: invitation.status = expired\n}\n`,
   );
   fs.writeFileSync(
     path.join(dir, "allium.config.json"),

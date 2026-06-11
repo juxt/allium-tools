@@ -45,7 +45,7 @@ export function planInsertTemporalGuard(
     edit: {
       startOffset: insertOffset,
       endOffset: insertOffset,
-      text: `${indent}requires: /* add temporal guard */\n`,
+      text: `${indent}requires: TODO() -- add temporal guard\n`,
     },
   };
 }

@@ -7,6 +7,35 @@ test("reports missing ensures", () => {
   assert.ok(findings.some((f) => f.code === "allium.rule.missingEnsures"));
 });
 
+test("surfaces WASM parse errors as findings (issue #25)", () => {
+  // `deferred Foo.` is a parse error in `allium check`; previously the TS
+  // analyzer discarded the WASM parse diagnostics and stayed silent.
+  const findings = analyzeAllium(`-- allium: 1\ndeferred Foo.`);
+  const parseError = findings.find((f) => f.code === "allium.parse.error");
+  assert.ok(parseError, "expected an allium.parse.error finding");
+  assert.equal(parseError?.severity, "error");
+});
+
+test("surfaces the missing-version-marker parse warning", () => {
+  const findings = analyzeAllium(`entity Order {\n  total: Integer\n}`);
+  const versionWarning = findings.find(
+    (f) =>
+      f.code === "allium.parse.warning" && /version marker/.test(f.message),
+  );
+  assert.ok(versionWarning, "expected a version-marker parse warning");
+  assert.equal(versionWarning?.severity, "warning");
+});
+
+test("emits no parse findings for a well-formed spec", () => {
+  const findings = analyzeAllium(
+    `-- allium: 1\nentity Order {\n  total: Integer\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code.startsWith("allium.parse.")),
+    false,
+  );
+});
+
 test("reports missing when trigger", () => {
   const findings = analyzeAllium(`rule A {\n  ensures: Done()\n}`);
   const finding = findings.find((f) => f.code === "allium.rule.missingWhen");
@@ -783,7 +812,9 @@ test("reports deferred specification with a URL glued to the path", () => {
 });
 
 test("reports deferred specification with a non-hint trailing comment", () => {
-  const findings = analyzeAllium(`deferred EscalationPolicy.at_level    -- TODO write this\n`);
+  const findings = analyzeAllium(
+    `deferred EscalationPolicy.at_level    -- TODO write this\n`,
+  );
   assert.ok(
     findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
   );
@@ -885,7 +916,10 @@ test("accepts transitions_to trigger shape", () => {
   const findings = analyzeAllium(
     `entity Order {\n  status: String\n}\n\nrule NotifyOnChange {\n  when: order: Order.status transitions_to shipped\n  ensures: Done()\n}\n`,
   );
-  assert.equal(findings.filter((f) => f.code === "allium.rule.unknownTrigger").length, 0);
+  assert.equal(
+    findings.filter((f) => f.code === "allium.rule.unknownTrigger").length,
+    0,
+  );
 });
 
 // Fix 1: related: clause parsing extracts only the surface name

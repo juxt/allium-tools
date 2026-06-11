@@ -1,4 +1,9 @@
-import { findMatchingBrace, parseAlliumBlocks } from "./parser";
+import {
+  findMatchingBrace,
+  parseAlliumBlocks,
+  parseAlliumDocument,
+} from "./parser";
+import type { WasmDiagnostic } from "./wasm-ast";
 
 export type FindingSeverity = "error" | "warning" | "info";
 export type DiagnosticsMode = "strict" | "relaxed";
@@ -21,7 +26,9 @@ export function analyzeAllium(
 ): Finding[] {
   const findings: Finding[] = [];
   const lineStarts = buildLineStarts(text);
-  const blocks = parseAlliumBlocks(text);
+  const { blocks, diagnostics: parseDiagnostics } = parseAlliumDocument(text);
+
+  findings.push(...parseDiagnosticsToFindings(parseDiagnostics, lineStarts));
 
   const ruleBlocks = blocks.filter((block) => block.kind === "rule");
   for (const block of ruleBlocks) {
@@ -2495,6 +2502,32 @@ function rangeFinding(
     start: offsetToPosition(lineStarts, startOffset),
     end: offsetToPosition(lineStarts, endOffset),
   };
+}
+
+/**
+ * Map Rust front-end parse diagnostics into analyzer findings. Previously the
+ * WASM parse result's `diagnostics` were discarded, so malformed input
+ * produced zero parse errors in the extension, LSP, and `check.js` while
+ * `allium check` reported them. Surfacing them here closes that gap (issue #25).
+ *
+ * Parse diagnostics carry no code in the Rust output, so we synthesise one per
+ * severity to keep suppression, baselines, and SARIF rule descriptors working.
+ */
+function parseDiagnosticsToFindings(
+  diagnostics: WasmDiagnostic[],
+  lineStarts: number[],
+): Finding[] {
+  return diagnostics.map((diagnostic) => {
+    const isError = diagnostic.severity === "Error";
+    return rangeFinding(
+      lineStarts,
+      diagnostic.span.start,
+      diagnostic.span.end,
+      isError ? "allium.parse.error" : "allium.parse.warning",
+      diagnostic.message,
+      isError ? "error" : "warning",
+    );
+  });
 }
 
 function findSurfaceActorLinkIssues(

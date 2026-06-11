@@ -657,7 +657,11 @@ function buildSafeFixPlans(
       finding.code === "allium.temporal.missingGuard" &&
       (fixCodes.size === 0 || fixCodes.has(finding.code))
     ) {
-      const whenLine = finding.start.line;
+      // The finding spans from the rule's body start to the end of the
+      // `when:` clause, so `end.line` is the `when:` line. Insert the guard on
+      // the following line — clauses must appear after `when:`, and a guard
+      // placed before it is a parse error.
+      const whenLine = finding.end.line;
       const currentLineStart = lineStarts[whenLine] ?? 0;
       const nextLineStart = lineStarts[whenLine + 1] ?? text.length;
       const lineText = text.slice(
@@ -670,7 +674,7 @@ function buildSafeFixPlans(
       const key = `${nextLineStart}:guard`;
       edits.set(key, {
         offset: nextLineStart,
-        text: `${indent}requires: /* add temporal guard */\n`,
+        text: `${indent}requires: TODO() -- add temporal guard\n`,
         code: finding.code,
         label: "insert temporal requires guard",
       });
