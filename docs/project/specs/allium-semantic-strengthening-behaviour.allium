@@ -19,8 +19,23 @@ rule UnusedNamedDefinitionsEmitWarnings {
 rule ExternalTriggerWithoutProviderIsUnreachable {
     when: RuleBlockParsed(rule)
     requires: rule.when_is_external_trigger_call = true
+    requires: rule.trigger_name_is_qualified = false
     requires: TriggerProvidedBySurface(rule.trigger_name) = false
     requires: TriggerEmittedByRule(rule.trigger_name) = false
+    requires: TriggerEmittedByImportedModule(rule.trigger_name) = false
+
+    ensures: Finding.created(
+    code: "allium.rule.unreachableTrigger",
+    severity: info
+    )
+}
+
+rule QualifiedTriggerResolvedAgainstAliasedModule {
+    when: RuleBlockParsed(rule)
+    requires: rule.when_is_external_trigger_call = true
+    requires: rule.trigger_name_is_qualified = true
+    requires: alias target resolves to a module in the check set
+    requires: target module neither provides nor emits rule.trigger_name
 
     ensures: Finding.created(
     code: "allium.rule.unreachableTrigger",

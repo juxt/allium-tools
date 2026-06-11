@@ -738,3 +738,168 @@ fn qualified_contract_in_fulfils_parses_across_modules() {
         "check should exit 0; stdout:\n{stdout}"
     );
 }
+
+// -----------------------------------------------------------------------
+// Cross-spec trigger subscriptions (issue #19)
+// -----------------------------------------------------------------------
+
+#[test]
+fn qualified_trigger_subscription_resolves_across_modules() {
+    let dir = TempDir::new("qualified-trigger");
+    dir.write(
+        "emitter.allium",
+        "-- allium: 3\n\nexternal entity Subject { id: Integer }\n\nrule EmitPing {\n    when: Tick()\n    ensures: Pinged(subject: Subject{id: 1})\n}\n",
+    );
+    dir.write(
+        "listener.allium",
+        "-- allium: 3\n\nuse \"./emitter.allium\" as emitter\n\nrule HandlePing {\n    when: emitter/Pinged(subject)\n    ensures: PingHandled(subject: subject)\n}\n",
+    );
+
+    let output = allium()
+        .args(["check", dir.path().to_str().unwrap()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diags = parse_diagnostics(&stdout);
+
+    // The qualified call is a supported trigger form, not an error.
+    assert!(
+        !diags.iter().any(|d| d.code == "allium.rule.invalidTrigger"),
+        "qualified trigger call should be a valid trigger form.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+    // emitter.allium emits Pinged, so the subscription is reachable.
+    assert!(
+        !diags.iter().any(|d| {
+            d.code == "allium.rule.unreachableTrigger" && d.message.contains("Pinged")
+        }),
+        "emitter/Pinged is emitted by emitter.allium and should not be flagged.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+    assert!(
+        output.status.success(),
+        "check should exit 0; stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn qualified_trigger_flagged_when_target_module_lacks_it() {
+    let dir = TempDir::new("qualified-trigger-missing");
+    dir.write(
+        "emitter.allium",
+        "-- allium: 3\n\nrule EmitPing {\n    when: Tick()\n    ensures: Pinged(subject: 1)\n}\n",
+    );
+    dir.write(
+        "listener.allium",
+        "-- allium: 3\n\nuse \"./emitter.allium\" as emitter\n\nrule HandlePong {\n    when: emitter/Ponged(subject)\n    ensures: PongHandled(subject: subject)\n}\n",
+    );
+
+    let output = allium()
+        .args(["analyse", dir.path().to_str().unwrap()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diags = parse_diagnostics(&stdout);
+
+    let flagged: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.code == "allium.rule.unreachableTrigger" && d.message.contains("emitter/Ponged")
+        })
+        .collect();
+    assert_eq!(
+        flagged.len(),
+        1,
+        "emitter/Ponged is not emitted by emitter.allium and should be flagged.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+    assert!(
+        flagged[0].message.contains("imported module 'emitter'"),
+        "message should name the imported module: {}",
+        flagged[0].message
+    );
+}
+
+#[test]
+fn unqualified_trigger_subscription_resolves_across_modules() {
+    let dir = TempDir::new("unqualified-trigger");
+    dir.write(
+        "emitter.allium",
+        "-- allium: 3\n\nrule EmitPing {\n    when: Tick()\n    ensures: Pinged(subject: 1)\n}\n",
+    );
+    dir.write(
+        "listener.allium",
+        "-- allium: 3\n\nuse \"./emitter.allium\" as emitter\n\nrule HandlePing {\n    when: Pinged(subject)\n    ensures: PingHandled(subject: subject)\n}\n",
+    );
+
+    let output = allium()
+        .args(["analyse", dir.path().to_str().unwrap()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diags = parse_diagnostics(&stdout);
+
+    assert!(
+        !diags.iter().any(|d| {
+            d.code == "allium.rule.unreachableTrigger" && d.message.contains("Pinged")
+        }),
+        "Pinged is emitted by the imported emitter.allium and should not be flagged.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn conditional_branch_emission_reaches_cross_module_listener() {
+    let dir = TempDir::new("branch-emission");
+    dir.write(
+        "router.allium",
+        "-- allium: 3\n\nrule AdvertRouted {\n    when: AdvertReceived(envelope)\n    ensures:\n        if exists envelope:\n            Logged(envelope: envelope)\n        else:\n            SensorAdvertDecoded(advert: envelope)\n}\n",
+    );
+    dir.write(
+        "handler.allium",
+        "-- allium: 3\n\nuse \"./router.allium\" as router\n\nrule HandleDecoded {\n    when: router/SensorAdvertDecoded(advert)\n    ensures: Done(advert: advert)\n}\n",
+    );
+
+    let output = allium()
+        .args(["analyse", dir.path().to_str().unwrap()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diags = parse_diagnostics(&stdout);
+
+    assert!(
+        !diags.iter().any(|d| {
+            d.code == "allium.rule.unreachableTrigger"
+                && d.message.contains("SensorAdvertDecoded")
+        }),
+        "the else-branch emission should reach the cross-module listener.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn qualified_trigger_with_alias_outside_check_set_not_flagged() {
+    let dir = TempDir::new("trigger-outside-set");
+    dir.write(
+        "listener.allium",
+        "-- allium: 3\n\nuse \"github.com/allium-specs/oauth/abc123\" as oauth\n\nrule Audit {\n    when: oauth/SessionCreated(session)\n    ensures: Logged(session: session)\n}\n",
+    );
+
+    let output = allium()
+        .args(["analyse", dir.path().to_str().unwrap()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diags = parse_diagnostics(&stdout);
+
+    // The alias's target is not in the check set — reachability is unknowable
+    // and the subscription must not be flagged.
+    assert!(
+        !diags.iter().any(|d| {
+            d.code == "allium.rule.unreachableTrigger"
+                && d.message.contains("SessionCreated")
+        }),
+        "subscription to a module outside the check set should not be flagged.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+}

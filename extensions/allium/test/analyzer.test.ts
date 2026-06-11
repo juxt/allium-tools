@@ -854,6 +854,62 @@ test("does not warn when rule trigger is provided by a surface", () => {
   );
 });
 
+test("does not warn for qualified cross-spec trigger subscriptions", () => {
+  // `emitter/Pinged(...)` subscribes to a trigger emitted by an imported
+  // spec; single-file analysis cannot see the emitting module (issue #19).
+  const findings = analyzeAllium(
+    `use "./emitter.allium" as emitter\n\nrule HandlePing {\n  when: emitter/Pinged(subject)\n  ensures: PingHandled(subject: subject)\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.rule.unreachableTrigger"),
+    false,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.rule.invalidTrigger"),
+    false,
+  );
+});
+
+test("registers trigger emissions on conditional branches of ensures", () => {
+  // The else-branch emission must register so same-file listeners are not
+  // flagged as unreachable (issue #19).
+  const findings = analyzeAllium(
+    `rule AdvertRouted {\n  when: AdvertReceived(envelope)\n  ensures:\n    if exists envelope:\n      Logged(envelope: envelope)\n    else:\n      SensorAdvertDecoded(advert: envelope)\n}\n\nrule HandleDecoded {\n  when: SensorAdvertDecoded(advert)\n  ensures: Done(advert: advert)\n}\n\nrule HandleLogged {\n  when: Logged(envelope)\n  ensures: Done2(envelope: envelope)\n}\n`,
+  );
+  const unreachable = findings.filter(
+    (f) => f.code === "allium.rule.unreachableTrigger",
+  );
+  // Only AdvertReceived itself has no emitter.
+  assert.equal(unreachable.length, 1);
+  assert.ok(unreachable[0].message.includes("'AdvertReceived'"));
+});
+
+test("registers trigger emissions inside for iterations of ensures", () => {
+  const findings = analyzeAllium(
+    `rule Fan {\n  when: Broadcast(msg)\n  ensures:\n    for user in Users:\n      Notified(user: user, msg: msg)\n}\n\nrule HandleNotified {\n  when: Notified(user, msg)\n  ensures: Done()\n}\n`,
+  );
+  const unreachable = findings.filter(
+    (f) => f.code === "allium.rule.unreachableTrigger",
+  );
+  assert.equal(unreachable.length, 1);
+  assert.ok(unreachable[0].message.includes("'Broadcast'"));
+});
+
+test("conditional branch calls outside ensures clauses do not register as emissions", () => {
+  // The branch-emission lane is scoped to ensures clause extents: a call on
+  // a conditional branch of a `let` must not satisfy a listener.
+  const findings = analyzeAllium(
+    `rule Route {\n  when: Ping(envelope)\n  let advert = if exists envelope: Decoded(envelope) else: Fallback(envelope)\n  ensures: Done()\n}\n\nrule HandleDecoded {\n  when: Decoded(advert)\n  ensures: Finished()\n}\n`,
+  );
+  assert.ok(
+    findings.some(
+      (f) =>
+        f.code === "allium.rule.unreachableTrigger" &&
+        f.message.includes("'Decoded'"),
+    ),
+  );
+});
+
 test("warns when two rules have duplicate behavior", () => {
   const findings = analyzeAllium(
     `rule A {\n  when: Ping(user)\n  requires: user.status = active\n  ensures: Done()\n}\n\nrule B {\n  when: Ping(user)\n  requires: user.status = active\n  ensures: Done()\n}\n`,

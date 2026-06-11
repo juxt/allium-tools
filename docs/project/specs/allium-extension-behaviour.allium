@@ -264,6 +264,7 @@ rule UnusedNamedDefinitionIsWarning {
 rule RuleTriggerWithoutProducerOrProviderIsWarning {
     when: RuleBlockParsed(rule)
     requires: rule.when_is_external_trigger_call = true
+    requires: rule.trigger_name_is_qualified = false
     requires: TriggerProvidedBySurface(rule.trigger_name) = false
     requires: TriggerEmittedByRule(rule.trigger_name) = false
 
@@ -272,6 +273,21 @@ rule RuleTriggerWithoutProducerOrProviderIsWarning {
     severity: info
     )
     ensures: FindingRangeAnchoredTo(rule.when_trigger_call)
+}
+
+rule QualifiedTriggerSubscriptionNotFlaggedInSingleFileAnalysis {
+    when: RuleBlockParsed(rule)
+    requires: rule.when_is_external_trigger_call = true
+    requires: rule.trigger_name_is_qualified = true
+
+    ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", rule: rule)
+}
+
+rule EnsuresBranchEmissionCountsAsTriggerEmission {
+    when: RuleBlockParsed(rule)
+    requires: rule ensures clause contains if/else branch or for iteration whose leading statement is a trigger call
+
+    ensures: TriggerEmittedByRule(trigger_call.name) = true
 }
 
 rule EqualityLiteralTypeMismatchIsError {
