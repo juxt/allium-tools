@@ -1,10 +1,79 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { analyzeAllium } from "../src/language-tools/analyzer";
+import {
+  analyzeAllium,
+  maskCommentsAndStrings,
+} from "../src/language-tools/analyzer";
 
 test("reports missing ensures", () => {
   const findings = analyzeAllium(`rule A {\n  when: Ping()\n}`);
   assert.ok(findings.some((f) => f.code === "allium.rule.missingEnsures"));
+});
+
+// --- Comment/string awareness of the regex lanes (issue #28) ---
+
+test("mask: blanks comment content but keeps the -- and structure", () => {
+  const input = "entity A -- deferred Foo\nrule B";
+  const masked = maskCommentsAndStrings(input);
+  assert.equal(masked, "entity A --             \nrule B");
+  assert.equal(masked.length, input.length);
+});
+
+test("mask: blanks string content but keeps the quotes", () => {
+  assert.equal(maskCommentsAndStrings('x: "deferred Y"'), 'x: "          "');
+});
+
+test("mask: honours backslash escapes inside strings", () => {
+  // The escaped quote does not terminate the string, so the trailing content
+  // stays masked rather than being treated as code.
+  assert.equal(maskCommentsAndStrings('"a\\"b"'), '"    "');
+});
+
+test("mask: a lone CR does not end a -- comment", () => {
+  // The Rust lexer ends line comments only at \n, so text after a lone \r is
+  // still comment content and must be masked.
+  assert.equal(maskCommentsAndStrings("-- a\rdeferred Z"), "--             ");
+});
+
+test("does not warn on deferred-shaped text inside a comment (#28)", () => {
+  const findings = analyzeAllium("-- allium: 1\n-- deferred Foo\n");
+  assert.equal(
+    findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+    false,
+  );
+});
+
+test("does not warn on deferred-shaped text inside a string (#28)", () => {
+  const findings = analyzeAllium(
+    `-- allium: 1\nentity Order {\n  note: "deferred Foo"\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+    false,
+  );
+});
+
+test("does not warn on deferred after a lone CR inside a comment (#28)", () => {
+  const findings = analyzeAllium("-- allium: 1\n-- note\rdeferred Foo\n");
+  assert.equal(
+    findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+    false,
+  );
+});
+
+test("still warns on a real deferred declaration without a hint", () => {
+  const findings = analyzeAllium("-- allium: 1\ndeferred Foo\n");
+  assert.ok(
+    findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+  );
+});
+
+test("still accepts a real deferred with a -- see: hint", () => {
+  const findings = analyzeAllium("-- allium: 1\ndeferred Foo -- see: bar.allium\n");
+  assert.equal(
+    findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+    false,
+  );
 });
 
 test("surfaces WASM parse errors as findings (issue #25)", () => {
