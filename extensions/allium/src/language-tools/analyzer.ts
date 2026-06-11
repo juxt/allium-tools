@@ -26,9 +26,26 @@ export function analyzeAllium(
 ): Finding[] {
   const findings: Finding[] = [];
   const lineStarts = buildLineStarts(text);
-  const { blocks, diagnostics: parseDiagnostics } = parseAlliumDocument(text);
+  const { blocks: astBlocks, diagnostics: parseDiagnostics } =
+    parseAlliumDocument(text);
 
   findings.push(...parseDiagnosticsToFindings(parseDiagnostics, lineStarts));
+
+  // Comment- and string-aware view of the source. The regex lanes below run
+  // over raw text with no lexer context, so without this they match
+  // keyword-shaped text inside comments or string literals that the Rust front
+  // end never reads as code (issue #28). Masking blanks comment/string content
+  // to spaces while preserving length, byte offsets, and line breaks, so every
+  // finding offset still maps back to the original source. Block bodies are
+  // re-sliced from the masked text for the same reason. Raw `text` is kept only
+  // for the two consumers that deliberately read comment/string content:
+  // `findDeferredLocationHints` (the `-- see:` / quoted-path hint) and
+  // `applySuppressions` (the `-- allium-ignore` directive).
+  const maskedText = maskCommentsAndStrings(text);
+  const blocks = astBlocks.map((block) => ({
+    ...block,
+    body: maskedText.slice(block.bodyStartOffset, block.endOffset),
+  }));
 
   const ruleBlocks = blocks.filter((block) => block.kind === "rule");
   for (const block of ruleBlocks) {
@@ -104,49 +121,65 @@ export function analyzeAllium(
   }
   findings.push(...findInvalidTriggerIssues(lineStarts, blocks));
 
-  findings.push(...findDuplicateConfigKeys(text, lineStarts, blocks));
-  findings.push(...findDuplicateDefaultNames(text, lineStarts));
-  findings.push(...findDefaultTypeReferenceIssues(text, lineStarts, blocks));
+  findings.push(...findDuplicateConfigKeys(maskedText, lineStarts, blocks));
+  findings.push(...findDuplicateDefaultNames(maskedText, lineStarts));
+  findings.push(
+    ...findDefaultTypeReferenceIssues(maskedText, lineStarts, blocks),
+  );
   findings.push(...findConfigParameterShapeIssues(lineStarts, blocks));
-  findings.push(...findUndefinedConfigReferences(text, lineStarts, blocks));
   findings.push(
-    ...findUndefinedExternalConfigReferences(text, lineStarts, blocks),
+    ...findUndefinedConfigReferences(maskedText, lineStarts, blocks),
   );
-  findings.push(...findUndefinedStatusAssignments(text, lineStarts, blocks));
-  findings.push(...findStatusStateMachineIssues(text, lineStarts, blocks));
+  findings.push(
+    ...findUndefinedExternalConfigReferences(maskedText, lineStarts, blocks),
+  );
+  findings.push(
+    ...findUndefinedStatusAssignments(maskedText, lineStarts, blocks),
+  );
+  findings.push(...findStatusStateMachineIssues(maskedText, lineStarts, blocks));
   findings.push(...findEnumDeclarationIssues(lineStarts, blocks));
-  findings.push(...findSumTypeIssues(text, lineStarts));
+  findings.push(...findSumTypeIssues(maskedText, lineStarts));
   findings.push(
-    ...findUnguardedVariantFieldAccessIssues(text, lineStarts, blocks),
+    ...findUnguardedVariantFieldAccessIssues(maskedText, lineStarts, blocks),
   );
-  findings.push(...findTypeReferenceIssues(text, lineStarts, blocks));
-  findings.push(...findRelationshipReferenceIssues(text, lineStarts, blocks));
-  findings.push(...findRuleTypeReferenceIssues(lineStarts, blocks, text));
-  findings.push(...findRuleUndefinedBindingIssues(lineStarts, blocks, text));
-  findings.push(...findContextBindingIssues(text, lineStarts, blocks));
-  findings.push(...findOpenQuestions(text, lineStarts));
-  findings.push(...findSurfaceActorLinkIssues(text, lineStarts, blocks));
+  findings.push(...findTypeReferenceIssues(maskedText, lineStarts, blocks));
+  findings.push(
+    ...findRelationshipReferenceIssues(maskedText, lineStarts, blocks),
+  );
+  findings.push(...findRuleTypeReferenceIssues(lineStarts, blocks, maskedText));
+  findings.push(
+    ...findRuleUndefinedBindingIssues(lineStarts, blocks, maskedText),
+  );
+  findings.push(...findContextBindingIssues(maskedText, lineStarts, blocks));
+  findings.push(...findOpenQuestions(maskedText, lineStarts));
+  findings.push(...findSurfaceActorLinkIssues(maskedText, lineStarts, blocks));
   findings.push(...findSurfaceRelatedIssues(lineStarts, blocks));
   findings.push(...findSurfaceBindingUsageIssues(lineStarts, blocks));
-  findings.push(...findSurfacePathAndIterationIssues(text, lineStarts, blocks));
-  findings.push(...findSurfaceRuleCoverageIssues(text, lineStarts, blocks));
+  findings.push(
+    ...findSurfacePathAndIterationIssues(maskedText, lineStarts, blocks),
+  );
+  findings.push(
+    ...findSurfaceRuleCoverageIssues(maskedText, lineStarts, blocks),
+  );
   findings.push(...findSurfaceImpossibleWhenIssues(lineStarts, blocks));
   findings.push(...findSurfaceNamedBlockUniquenessIssues(lineStarts, blocks));
   findings.push(
-    ...findSurfaceRequiresDeferredHintIssues(lineStarts, blocks, text),
+    ...findSurfaceRequiresDeferredHintIssues(lineStarts, blocks, maskedText),
   );
-  findings.push(...findSurfaceProvidesTriggerIssues(lineStarts, blocks, text));
-  findings.push(...findUnusedEntityIssues(text, lineStarts));
-  findings.push(...findUnusedNamedDefinitionIssues(text, lineStarts));
-  findings.push(...findUnusedFieldIssues(text, lineStarts));
+  findings.push(
+    ...findSurfaceProvidesTriggerIssues(lineStarts, blocks, maskedText),
+  );
+  findings.push(...findUnusedEntityIssues(maskedText, lineStarts));
+  findings.push(...findUnusedNamedDefinitionIssues(maskedText, lineStarts));
+  findings.push(...findUnusedFieldIssues(maskedText, lineStarts));
   findings.push(...findUnreachableRuleTriggerIssues(lineStarts, blocks));
-  findings.push(...findExternalEntitySourceHints(text, lineStarts, blocks));
-  findings.push(...findDeferredLocationHints(text, lineStarts));
-  findings.push(...findImplicitLambdaIssues(text, lineStarts));
+  findings.push(...findExternalEntitySourceHints(maskedText, lineStarts, blocks));
+  findings.push(...findDeferredLocationHints(text, maskedText, lineStarts));
+  findings.push(...findImplicitLambdaIssues(maskedText, lineStarts));
   findings.push(...findNeverFireRuleIssues(lineStarts, blocks));
   findings.push(...findDuplicateRuleBehaviourIssues(lineStarts, blocks));
   findings.push(...findExpressionTypeMismatchIssues(lineStarts, blocks));
-  findings.push(...findDerivedCircularDependencyIssues(text, lineStarts));
+  findings.push(...findDerivedCircularDependencyIssues(maskedText, lineStarts));
 
   return applySuppressions(
     applyDiagnosticsMode(findings, options.mode ?? "strict"),
@@ -2466,6 +2499,74 @@ function buildLineStarts(text: string): number[] {
   return starts;
 }
 
+/**
+ * Return a copy of `text` with the *content* of `--` comments, `"…"` strings,
+ * and `` `…` `` backtick literals replaced by spaces. Length, byte offsets, and
+ * line breaks (`\n`) are preserved, so a finding located in the masked text
+ * maps back to the same position in the original source.
+ *
+ * This mirrors the Rust lexer (`crates/allium-parser/src/lexer.rs`) so the
+ * regex lanes stop matching keyword-shaped text the front end reads as
+ * comment/string content (issue #28):
+ *   - line comments run from `--` to the next `\n` (a lone `\r` does NOT end
+ *     them — matching the lexer, which only breaks on `\n`);
+ *   - strings honour `\` escapes and are terminated by `"` or `\n`;
+ *   - backtick literals are terminated by `` ` ``, `\n`, or `\r`.
+ *
+ * Opening/closing delimiters (`"`, `` ` ``) and the `--` of a comment are kept,
+ * so lanes that only need to detect that a string/comment is present (e.g. the
+ * type-mismatch operand lanes) still see one.
+ */
+export function maskCommentsAndStrings(text: string): string {
+  const out = text.split("");
+  const n = text.length;
+  const blank = (i: number): void => {
+    if (text[i] !== "\n") {
+      out[i] = " ";
+    }
+  };
+  let i = 0;
+  while (i < n) {
+    const ch = text[i];
+    if (ch === "-" && text[i + 1] === "-") {
+      i += 2; // keep the `--`
+      while (i < n && text[i] !== "\n") {
+        blank(i);
+        i += 1;
+      }
+    } else if (ch === '"') {
+      i += 1; // keep the opening quote
+      while (i < n && text[i] !== '"' && text[i] !== "\n") {
+        if (text[i] === "\\") {
+          blank(i);
+          if (i + 1 < n) {
+            blank(i + 1);
+            i += 2;
+            continue;
+          }
+        }
+        blank(i);
+        i += 1;
+      }
+      if (i < n && text[i] === '"') {
+        i += 1; // keep the closing quote
+      }
+    } else if (ch === "`") {
+      i += 1; // keep the opening backtick
+      while (i < n && text[i] !== "`" && text[i] !== "\n" && text[i] !== "\r") {
+        blank(i);
+        i += 1;
+      }
+      if (i < n && text[i] === "`") {
+        i += 1; // keep the closing backtick
+      }
+    } else {
+      i += 1;
+    }
+  }
+  return out.join("");
+}
+
 function offsetToPosition(
   lineStarts: number[],
   offset: number,
@@ -3317,12 +3418,28 @@ function findExternalEntitySourceHints(
 
 function findDeferredLocationHints(
   text: string,
+  maskedText: string,
   lineStarts: number[],
 ): Finding[] {
   const findings: Finding[] = [];
-  const pattern = /^\s*deferred\s+([A-Za-z_][A-Za-z0-9_.]*)(.*)$/gm;
-  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
-    const suffix = (match[2] ?? "").trim();
+  // Detect the `deferred` keyword on the masked text so a `deferred`-shaped
+  // token inside a comment or string (which the Rust front end reads as
+  // content, not a declaration) does not produce a spurious warning (#28). The
+  // hint itself is then read from the *raw* text, since the `-- see:` / quoted
+  // path convention lives in comment/string content the mask blanks out.
+  const pattern = /^[^\S\n]*deferred\s+([A-Za-z_][A-Za-z0-9_.]*)/gm;
+  for (
+    let match = pattern.exec(maskedText);
+    match;
+    match = pattern.exec(maskedText)
+  ) {
+    const name = match[1];
+    const offset = match.index + match[0].indexOf(name);
+    const suffixStart = offset + name.length;
+    const lineEnd = text.indexOf("\n", suffixStart);
+    const suffix = text
+      .slice(suffixStart, lineEnd < 0 ? text.length : lineEnd)
+      .trim();
     // A location hint points at where the detail lives: a quoted path, a URL, or
     // the `-- see:` comment convention shown in the language reference.
     if (
@@ -3333,8 +3450,6 @@ function findDeferredLocationHints(
     ) {
       continue;
     }
-    const name = match[1];
-    const offset = match.index + match[0].indexOf(name);
     findings.push(
       rangeFinding(
         lineStarts,

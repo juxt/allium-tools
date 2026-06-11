@@ -103,9 +103,7 @@ emits diagnostics for genuine syntax errors and for files missing the
 This closes the "Rust errors, TypeScript silent" direction of the malformed-input
 divergence described above. The complementary direction — the regex lanes warning
 on `deferred`-shaped text that the Rust front end reads as comment/string content
-— is **not** addressed here: the parse succeeds in that case, so there is no
-diagnostic to surface. It remains a follow-up that requires giving the regex
-lanes comment/string awareness.
+— is addressed by #28 (see below).
 
 While surfacing parse errors, a latent bug in the temporal-guard autofix was
 exposed and fixed: the scaffold emitted `requires: /* add temporal guard */`
@@ -113,6 +111,32 @@ exposed and fixed: the scaffold emitted `requires: /* add temporal guard */`
 inserted it *before* the `when:` clause (invalid clause ordering). It now emits
 `requires: TODO() -- add temporal guard` after the `when:` line. Previously these
 produced parse errors that nothing surfaced.
+
+### 8. Regex lanes made comment/string aware (issue #28)
+
+The TypeScript lanes in `analyzer.ts` run regexes over raw source text with no
+lexer context, so they matched keyword-shaped text inside comments and string
+literals that the Rust front end reads as content, not code — e.g. a
+`deferred`-shaped token inside a `--` comment produced a spurious
+`allium.deferred.missingLocationHint` that `allium check` never emits. This is
+the "Rust silent, TypeScript false-positive" direction left open by #25.
+
+`analyzeAllium` now computes a **masked view** of the source via
+`maskCommentsAndStrings`, which blanks comment and string/backtick *content* to
+spaces while preserving length, offsets, and line breaks. The masker mirrors the
+Rust lexer: line comments run from `--` to the next `\n` (a lone `\r` does not
+end them), strings honour `\` escapes and terminate at `"`/`\n`, and backtick
+literals terminate at `` ` ``/`\n`/`\r`. Block bodies are re-sliced from the
+masked text, so every body-based lane inherits the awareness, and the detection
+lanes receive the masked text in place of raw text.
+
+Two consumers deliberately keep the **raw** text because they read comment/string
+content on purpose: `findDeferredLocationHints` (the `-- see:` / quoted-path /
+URL hint — it now detects the `deferred` keyword on the masked text but reads the
+hint suffix from raw text) and `applySuppressions` (the `-- allium-ignore`
+directive). Delimiters (`"`, `` ` ``) and the `--` of a comment are preserved by
+the mask, so lanes that only need to detect that a string or comment is present
+(e.g. the type-mismatch operand lanes) still see one.
 
 ## Diagnostic codes implemented
 
