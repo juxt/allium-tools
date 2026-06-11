@@ -126,7 +126,7 @@ These are the foundation. Everything else depends on having accurate entity/fiel
 
 ### Tier 7: contract clause validity (rules 36–39)
 
-36. **`contracts:` entries must use `demands` or `fulfils` followed by a PascalCase contract name.**
+36. **`contracts:` entries must use `demands` or `fulfils` followed by a PascalCase contract name, optionally qualified with a `use` alias (`fulfils base/MyContract`).**
 37. **Each contract name appears at most once per surface.**
 38. **Referenced contract names must resolve to a `contract` declaration in scope (local or imported via `use`).**
 39. **Same-named contracts from different modules on the same surface are a structural error.**

@@ -702,3 +702,39 @@ fn analyse_also_reports_unresolved_use_paths() {
         "analyse should also report unresolved use paths.\nDiagnostics: {codes:?}"
     );
 }
+
+// -----------------------------------------------------------------------
+// Qualified contract names in contracts: clauses (issue #21)
+// -----------------------------------------------------------------------
+
+#[test]
+fn qualified_contract_in_fulfils_parses_across_modules() {
+    let dir = TempDir::new("qualified-contract");
+    dir.write(
+        "base.allium",
+        "-- allium: 3\n\nentity Caller { id: String }\n\ncontract MyContract {\n    do_thing: (caller: Caller) -> String\n}\n",
+    );
+    dir.write(
+        "impl.allium",
+        "-- allium: 3\n\nuse \"./base.allium\" as base\n\nsurface MySurface {\n    facing user: base/Caller\n    contracts:\n        fulfils base/MyContract\n        demands base/MyContract\n}\n",
+    );
+
+    let output = allium()
+        .args(["check", dir.path().to_str().unwrap()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diags = parse_diagnostics(&stdout);
+
+    // The qualified contract reference must parse — previously this produced
+    // "expected block item ..., found '/'".
+    assert!(
+        !diags.iter().any(|d| d.message.contains("expected block item")),
+        "qualified contract names should parse in contracts: clauses.\nDiagnostics: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    assert!(
+        output.status.success(),
+        "check should exit 0; stdout:\n{stdout}"
+    );
+}

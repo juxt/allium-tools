@@ -20,6 +20,17 @@ test("parseAlliumDocument: exposes parse diagnostics alongside blocks", () => {
 	);
 });
 
+test("parseAlliumDocument: qualified contract names parse cleanly (issue #21)", () => {
+	const doc = parseAlliumDocument(
+		'-- allium: 3\nuse "./base.allium" as base\n\nsurface MySurface {\n\tfacing user: base/Caller\n\tcontracts:\n\t\tfulfils base/MyContract\n\t\tdemands base/OtherContract\n}\n',
+	);
+	assert.equal(
+		doc.diagnostics.filter((d) => d.severity === "Error").length,
+		0,
+		`expected no parse errors, got ${JSON.stringify(doc.diagnostics)}`,
+	);
+});
+
 test("parseAlliumDocument: clean spec has no diagnostics", () => {
 	const doc = parseAlliumDocument(
 		"-- allium: 1\nentity Order {\n  total: Integer\n}\n",

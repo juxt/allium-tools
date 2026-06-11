@@ -221,6 +221,9 @@ pub enum ContractDirection {
 #[derive(Debug, Clone, Serialize)]
 pub struct ContractBinding {
     pub direction: ContractDirection,
+    /// Module alias when the contract is imported from another spec
+    /// (`fulfils base/MyContract`), mirroring `QualifiedName`.
+    pub qualifier: Option<String>,
     pub name: Ident,
     pub span: Span,
 }

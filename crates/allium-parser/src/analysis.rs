@@ -3482,7 +3482,12 @@ fn collect_uppercase_idents_from_item<'a>(kind: &'a BlockItemKind, out: &mut Has
         }
         BlockItemKind::ContractsClause { entries } => {
             for e in entries {
-                out.insert(e.name.name.as_str());
+                // A qualified entry (`fulfils base/MyContract`) references the
+                // imported module's contract, not a local declaration with the
+                // same name — those are collected as qualified references.
+                if e.qualifier.is_none() {
+                    out.insert(e.name.name.as_str());
+                }
             }
         }
         _ => {}
@@ -3755,9 +3760,15 @@ fn collect_qrefs_from_item(kind: &BlockItemKind, out: &mut Vec<(String, String)>
                 }
             }
         }
-        // ContractsClause, EnumVariant, Annotation, OpenQuestion,
-        // TransitionsBlock — none of these contain expressions that could hold
-        // qualified names.
+        BlockItemKind::ContractsClause { entries } => {
+            for e in entries {
+                if let Some(ref qualifier) = e.qualifier {
+                    out.push((qualifier.clone(), e.name.name.clone()));
+                }
+            }
+        }
+        // EnumVariant, Annotation, OpenQuestion, TransitionsBlock — none of
+        // these contain expressions that could hold qualified names.
         _ => {}
     }
 }

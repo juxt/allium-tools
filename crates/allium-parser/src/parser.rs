@@ -1178,7 +1178,20 @@ impl<'s> Parser<'s> {
                 }
             };
 
-            let name = self.parse_ident_in("contract name")?;
+            let first = self.parse_ident_in("contract name")?;
+
+            // Qualified contract reference: `fulfils base/MyContract`. The
+            // language reference makes contracts importable across modules via
+            // `use`, following the same coordinate system as entity imports.
+            // Unlike expression position there is no division to disambiguate
+            // from, so a `/` here can only introduce a qualified name.
+            let (qualifier, name) = if self.at(TokenKind::Slash) {
+                self.advance(); // consume `/`
+                let name = self.parse_ident_in("contract name after '/'")?;
+                (Some(first.name), name)
+            } else {
+                (None, first)
+            };
 
             // Reject inline braced blocks
             if self.at(TokenKind::LBrace) {
@@ -1192,6 +1205,7 @@ impl<'s> Parser<'s> {
             let end = name.span;
             entries.push(ContractBinding {
                 direction,
+                qualifier,
                 name,
                 span: entry_start.merge(end),
             });
@@ -4634,6 +4648,51 @@ oauth/config {
         assert_eq!(entries.len(), 1);
         assert!(matches!(entries[0].direction, ContractDirection::Fulfils));
         assert_eq!(entries[0].name.name, "EventSubmitter");
+    }
+
+    #[test]
+    fn contracts_clause_qualified_fulfils() {
+        let src = "surface S {\n    contracts:\n        fulfils base/MyContract\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::ContractsClause { entries } = &b.items[0].kind else {
+            panic!("expected ContractsClause, got {:?}", b.items[0].kind)
+        };
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0].direction, ContractDirection::Fulfils));
+        assert_eq!(entries[0].qualifier.as_deref(), Some("base"));
+        assert_eq!(entries[0].name.name, "MyContract");
+    }
+
+    #[test]
+    fn contracts_clause_qualified_demands() {
+        let src = "surface S {\n    contracts:\n        demands base/MyContract\n        fulfils Local\n}";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::ContractsClause { entries } = &b.items[0].kind else {
+            panic!("expected ContractsClause")
+        };
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(entries[0].direction, ContractDirection::Demands));
+        assert_eq!(entries[0].qualifier.as_deref(), Some("base"));
+        assert_eq!(entries[0].name.name, "MyContract");
+        assert_eq!(entries[1].qualifier, None);
+        assert_eq!(entries[1].name.name, "Local");
+    }
+
+    #[test]
+    fn contracts_clause_qualified_missing_name_errors() {
+        let src = "surface S {\n    contracts:\n        fulfils base/\n}";
+        let r = parse(src);
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.message.contains("contract name after '/'")),
+            "expected an error about the missing name, got {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]
