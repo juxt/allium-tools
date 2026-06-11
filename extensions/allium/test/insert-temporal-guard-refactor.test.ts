@@ -29,5 +29,5 @@ test("proposes guard insertion after temporal when clause", () => {
   const plan = planInsertTemporalGuard(text, start);
   assert.ok(plan);
   assert.equal(plan.title, "Add temporal requires guard");
-  assert.equal(plan.edit.text, "  requires: /* add temporal guard */\n");
+  assert.equal(plan.edit.text, "  requires: TODO() -- add temporal guard\n");
 });

@@ -1,8 +1,20 @@
 import { parseAllium } from "./wasm-ast";
+import type { WasmDiagnostic } from "./wasm-ast";
 import { wasmBlocksToParsedBlocks } from "./wasm-adapter";
 
 export interface ParsedBlock {
-  kind: "rule" | "given" | "config" | "surface" | "actor" | "enum" | "use" | "contract" | "invariant" | "entity" | "value";
+  kind:
+    | "rule"
+    | "given"
+    | "config"
+    | "surface"
+    | "actor"
+    | "enum"
+    | "use"
+    | "contract"
+    | "invariant"
+    | "entity"
+    | "value";
   name: string;
   nameStartOffset: number;
   startOffset: number;
@@ -13,9 +25,24 @@ export interface ParsedBlock {
   alias?: string;
 }
 
-export function parseAlliumBlocks(text: string): ParsedBlock[] {
+export interface ParsedDocument {
+  blocks: ParsedBlock[];
+  /** Parse diagnostics from the Rust front end (syntax errors, missing
+   * version marker, etc.). Previously discarded; surfaced so the TS analyzer
+   * reports the same parse failures as `allium check`. */
+  diagnostics: WasmDiagnostic[];
+}
+
+export function parseAlliumDocument(text: string): ParsedDocument {
   const result = parseAllium(text);
-  return wasmBlocksToParsedBlocks(text, result);
+  return {
+    blocks: wasmBlocksToParsedBlocks(text, result),
+    diagnostics: result.diagnostics,
+  };
+}
+
+export function parseAlliumBlocks(text: string): ParsedBlock[] {
+  return parseAlliumDocument(text).blocks;
 }
 
 export function findMatchingBrace(text: string, openOffset: number): number {

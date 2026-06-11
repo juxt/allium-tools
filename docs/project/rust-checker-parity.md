@@ -82,10 +82,44 @@ Replaying the match — rather than trusting the parsed path's span — is what 
 
 Scope of the guarantee: parity covers every line that parses into a `DeferredDecl`. The replayed match treats `\n`, `\r`, U+2028 and U+2029 as line terminators — the JavaScript `m`-flag set — so CRLF and lone-CR files behave identically on both sides. The remaining divergences are inputs the two front ends read differently before this check runs: a malformed deferred line that fails the Rust expression parser (`deferred Foo.`, `deferred Foo == "x"`) surfaces a parse error instead of this warning, and the TypeScript pattern — which runs over raw text with no comment or string awareness, and never consumes parse diagnostics — can fire on `deferred`-shaped text the Rust lexer reads as comment or string content (e.g. after a lone `\r` inside a `--` comment). Diagnostic-set parity on such inputs is out of scope for this check.
 
+### 7. Parse diagnostics surfaced (issue #25)
+
+The TypeScript front end discarded the WASM parser's `result.diagnostics`:
+`wasmBlocksToParsedBlocks` read only `result.module.declarations`, so malformed
+input produced zero parse errors in the extension, the LSP server, and
+`check.js`, while `allium check` reported them (e.g. `deferred Foo.` is a parse
+error in Rust but was silent in TypeScript).
+
+The parse result now flows through a new `parseAlliumDocument` (in
+`extensions/allium/src/language-tools/parser.ts`), and `analyzeAllium` maps each
+parse diagnostic into a finding (`allium.parse.error` / `allium.parse.warning`),
+matching how `allium check` chains `result.diagnostics` ahead of the analysis
+diagnostics. Because all three consumers (`check.js`, the LSP server, and — via
+the language client — the VS Code extension) run through `analyzeAllium`, the
+fix reaches every surface. Well-formed specs are unaffected: the parser only
+emits diagnostics for genuine syntax errors and for files missing the
+`-- allium: N` version marker (both of which the Rust CLI also reports).
+
+This closes the "Rust errors, TypeScript silent" direction of the malformed-input
+divergence described above. The complementary direction — the regex lanes warning
+on `deferred`-shaped text that the Rust front end reads as comment/string content
+— is **not** addressed here: the parse succeeds in that case, so there is no
+diagnostic to surface. It remains a follow-up that requires giving the regex
+lanes comment/string awareness.
+
+While surfacing parse errors, a latent bug in the temporal-guard autofix was
+exposed and fixed: the scaffold emitted `requires: /* add temporal guard */`
+(a C-style comment, invalid in Allium) and the `check.js`/`fix-all.ts` paths
+inserted it *before* the `when:` clause (invalid clause ordering). It now emits
+`requires: TODO() -- add temporal guard` after the `when:` line. Previously these
+produced parse errors that nothing surfaced.
+
 ## Diagnostic codes implemented
 
 | Code | Severity | Rust | TypeScript |
 |---|---|---|---|
+| `allium.parse.error` | error | Yes (no code) | Yes |
+| `allium.parse.warning` | warning | Yes (no code) | Yes |
 | `allium.surface.relatedUndefined` | error | Yes | Yes |
 | `allium.sum.v1InlineEnum` | error | Yes | Yes |
 | `allium.sum.discriminatorUnknownVariant` | error | Yes | Yes |
