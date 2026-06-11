@@ -451,6 +451,14 @@ rule VariantDeclarationRequiresVariantKeyword {
         )
     }
 
+    -- Status-lifecycle entity resolution (issue #18):
+    --   - A rule `when:` binding takes its entity type from the surface
+    --     `provides:` declaration of the command it subscribes to, matched
+    --     positionally (e.g. `Cancel(admin, sub: Subscription)` types `sub`).
+    --     This disambiguates status values shared by several entities.
+    --   - A negated `requires: x.status != v` counts as an observed exit for
+    --     every other value of the entity's status enum.
+
     rule UnreachableStatusValueIsWarning {
         when: EntityStatusEnumParsed(entity_status)
         requires: entity_status.value_not_assigned_by_any_rule_ensures = true

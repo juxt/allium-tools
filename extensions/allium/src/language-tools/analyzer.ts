@@ -397,6 +397,7 @@ function findStatusStateMachineIssues(
   }
 
   const contextTypes = collectContextBindingTypes(blocks);
+  const commandParamTypes = collectCommandParamTypes(blocks, statusByEntity);
   const assignedByEntity = new Map<string, Set<string>>();
   const transitionsByEntity = new Map<string, Map<string, Set<string>>>();
   const assignmentLocations = new Map<string, number>();
@@ -410,6 +411,7 @@ function findStatusStateMachineIssues(
   const ruleBlocks = blocks.filter((block) => block.kind === "rule");
   for (const rule of ruleBlocks) {
     const bindingTypes = collectRuleBindingTypes(rule.body, contextTypes);
+    augmentBindingTypesFromCommands(rule.body, commandParamTypes, bindingTypes);
     const clauseLines = collectRuleClauseLines(rule.body);
     const requiresByBinding = new Map<string, Set<string>>();
     for (const line of clauseLines) {
@@ -442,6 +444,28 @@ function findStatusStateMachineIssues(
         const set = requiresByBinding.get(rootBinding) ?? new Set<string>();
         set.add(status);
         requiresByBinding.set(rootBinding, set);
+      }
+      // Negated: binding.status != value — every other status value of the
+      // entity gains an exit edge through this rule.
+      const negatedMatch = line.text.match(
+        /([a-z_][a-z0-9_]*)\.status\s*!=\s*([a-z_][a-z0-9_]*)\b/,
+      );
+      if (negatedMatch) {
+        const binding = negatedMatch[1];
+        const status = negatedMatch[2];
+        const resolved = resolveBindingEntity(
+          binding, status, bindingTypes, statusByEntity,
+        );
+        const values = resolved ? statusByEntity.get(resolved) : undefined;
+        if (values?.has(status)) {
+          const set = requiresByBinding.get(binding) ?? new Set<string>();
+          for (const value of values) {
+            if (value !== status) {
+              set.add(value);
+            }
+          }
+          requiresByBinding.set(binding, set);
+        }
       }
     }
 
@@ -3188,6 +3212,90 @@ function parseProvidesTriggerCalls(
     }
   }
   return calls;
+}
+
+/**
+ * Command name → positional parameter entity types, from surface `provides:`
+ * declarations like `Cancel(admin, sub: Subscription)`. Rule `when:` parameters
+ * are positional-only, so this is the only place their entity type is declared.
+ */
+function collectCommandParamTypes(
+  blocks: ReturnType<typeof parseAlliumBlocks>,
+  statusByEntity: Map<string, Set<string>>,
+): Map<string, Array<string | undefined>> {
+  const result = new Map<string, Array<string | undefined>>();
+  const callPattern = /([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)/;
+  for (const surface of blocks.filter((block) => block.kind === "surface")) {
+    const sectionPattern = /^(\s*)provides\s*:\s*$/gm;
+    for (
+      let section = sectionPattern.exec(surface.body);
+      section;
+      section = sectionPattern.exec(surface.body)
+    ) {
+      const baseIndent = (section[1] ?? "").length;
+      let cursor = section.index + section[0].length + 1;
+      while (cursor < surface.body.length) {
+        const lineEnd = surface.body.indexOf("\n", cursor);
+        const end = lineEnd >= 0 ? lineEnd : surface.body.length;
+        const line = surface.body.slice(cursor, end);
+        const trimmed = line.trim();
+        const indent = (line.match(/^\s*/) ?? [""])[0].length;
+        if (trimmed.length === 0) {
+          cursor = end + 1;
+          continue;
+        }
+        if (indent <= baseIndent) {
+          break;
+        }
+        const call = line.match(callPattern);
+        if (call) {
+          const params = call[2].split(",").map((arg) => {
+            const typed = arg
+              .trim()
+              .match(/^[a-z_][a-z0-9_]*\s*:\s*([A-Z][A-Za-z0-9_]*)$/);
+            return typed && statusByEntity.has(typed[1]) ? typed[1] : undefined;
+          });
+          if (params.some((param) => param !== undefined)) {
+            result.set(call[1], params);
+          }
+        }
+        cursor = end + 1;
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Augment a rule's binding types with the surface-declared parameter types of
+ * the command it subscribes to, matched positionally against the rule's
+ * `when:` arguments. Explicit binding types already collected win.
+ */
+function augmentBindingTypesFromCommands(
+  ruleBody: string,
+  commandParamTypes: Map<string, Array<string | undefined>>,
+  bindingTypes: Map<string, string>,
+): void {
+  const whenCall = ruleBody.match(
+    /^\s*when\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)/m,
+  );
+  if (!whenCall) {
+    return;
+  }
+  const params = commandParamTypes.get(whenCall[1]);
+  if (!params) {
+    return;
+  }
+  const args = whenCall[2].split(",").map((arg) => arg.trim());
+  for (let i = 0; i < args.length && i < params.length; i++) {
+    const entity = params[i];
+    if (!entity || !/^[a-z_][a-z0-9_]*$/.test(args[i])) {
+      continue;
+    }
+    if (!bindingTypes.has(args[i])) {
+      bindingTypes.set(args[i], entity);
+    }
+  }
 }
 
 function findUnusedEntityIssues(text: string, lineStarts: number[]): Finding[] {

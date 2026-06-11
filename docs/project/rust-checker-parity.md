@@ -138,6 +138,21 @@ directive). Delimiters (`"`, `` ` ``) and the `--` of a comment are preserved by
 the mask, so lanes that only need to detect that a string or comment is present
 (e.g. the type-mismatch operand lanes) still see one.
 
+The status-lifecycle checker (`allium.status.unreachableValue` /
+`allium.status.noExit`) was refined in both implementations for issue #18:
+
+- Rule `when:` bindings take their entity type from the surface `provides:`
+  declaration of the command they subscribe to, matched positionally
+  (`Cancel(admin, sub: Subscription)` types `sub` as `Subscription`). Without
+  this, a status value shared by several entities (e.g. two entities both
+  declaring `active`) made the binding unresolvable and silently dropped the
+  rule's assignments and transitions. Rust:
+  `collect_command_param_types`/`augment_binding_types_from_commands`;
+  TypeScript: `collectCommandParamTypes`/`augmentBindingTypesFromCommands`.
+- A negated `requires: x.status != v` is expanded to the complement of the
+  entity's status enum, so every other value gains an exit edge through that
+  rule. Previously only `=` comparisons produced exit edges.
+
 One refinement landed as a follow-up regression fix: lanes that compare
 string-literal **values** textually (`findNeverFireRuleIssues`,
 `findSurfaceImpossibleWhenIssues`) cannot compare masked literals, because
