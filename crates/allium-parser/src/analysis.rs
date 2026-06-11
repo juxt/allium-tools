@@ -700,13 +700,30 @@ impl Ctx<'_> {
             return;
         }
 
+        // Command name → positional parameter entity types, from surface
+        // `provides:` declarations like `Cancel(admin, sub: Subscription)`.
+        // Rule `when:` parameters are positional-only, so this is the only
+        // place a binding's entity type is declared explicitly.
+        let mut command_param_types: HashMap<&str, Vec<Option<&str>>> = HashMap::new();
+        for surface in self.blocks(BlockKind::Surface) {
+            for item in &surface.items {
+                let BlockItemKind::Clause { keyword, value } = &item.kind else {
+                    continue;
+                };
+                if keyword == "provides" {
+                    collect_command_param_types(value, &status_by_entity, &mut command_param_types);
+                }
+            }
+        }
+
         let mut assigned_by_entity: HashMap<&str, HashSet<&str>> = HashMap::new();
         let mut transitions_by_entity: HashMap<&str, HashMap<&str, HashSet<&str>>> =
             HashMap::new();
         let mut created_issues: Vec<Diagnostic> = Vec::new();
 
         for rule in self.blocks(BlockKind::Rule) {
-            let binding_types = collect_rule_binding_types(rule, &status_by_entity);
+            let mut binding_types = collect_rule_binding_types(rule, &status_by_entity);
+            augment_binding_types_from_commands(rule, &command_param_types, &mut binding_types);
             let mut requires_by_binding: HashMap<&str, HashSet<&str>> = HashMap::new();
 
             for item in &rule.items {
@@ -2353,6 +2370,106 @@ fn collect_binding_types_from_expr<'a>(
     }
 }
 
+/// Collect command name → positional parameter entity types from a surface
+/// `provides:` expression. A parameter contributes a type when it is declared
+/// with a `name: Entity` annotation and the entity has a status enum.
+fn collect_command_param_types<'a, V>(
+    expr: &'a Expr,
+    status_by_entity: &HashMap<&str, V>,
+    out: &mut HashMap<&'a str, Vec<Option<&'a str>>>,
+) {
+    match expr {
+        Expr::Call { function, args, .. } => {
+            if let Expr::Ident(fn_name) = function.as_ref() {
+                let params: Vec<Option<&str>> = args
+                    .iter()
+                    .map(|arg| match arg {
+                        CallArg::Named(named) => match &named.value {
+                            Expr::Ident(val)
+                                if status_by_entity.contains_key(val.name.as_str()) =>
+                            {
+                                Some(val.name.as_str())
+                            }
+                            _ => None,
+                        },
+                        CallArg::Positional(_) => None,
+                    })
+                    .collect();
+                if params.iter().any(Option::is_some) {
+                    out.insert(&fn_name.name, params);
+                }
+            }
+        }
+        Expr::WhenGuard { action, .. } => {
+            collect_command_param_types(action, status_by_entity, out);
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_command_param_types(item, status_by_entity, out);
+            }
+        }
+        Expr::Conditional {
+            branches,
+            else_body,
+            ..
+        } => {
+            for branch in branches {
+                collect_command_param_types(&branch.body, status_by_entity, out);
+            }
+            if let Some(body) = else_body {
+                collect_command_param_types(body, status_by_entity, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Augment a rule's binding types with the surface-declared parameter types of
+/// the command it subscribes to, matched positionally against the rule's
+/// `when:` arguments. Explicit binding types already collected win.
+fn augment_binding_types_from_commands<'a>(
+    rule: &'a BlockDecl,
+    command_param_types: &HashMap<&str, Vec<Option<&'a str>>>,
+    out: &mut HashMap<&'a str, &'a str>,
+) {
+    for item in &rule.items {
+        let BlockItemKind::Clause { keyword, value } = &item.kind else {
+            continue;
+        };
+        if keyword != "when" {
+            continue;
+        }
+        augment_binding_types_from_call(value, command_param_types, out);
+    }
+}
+
+fn augment_binding_types_from_call<'a>(
+    expr: &'a Expr,
+    command_param_types: &HashMap<&str, Vec<Option<&'a str>>>,
+    out: &mut HashMap<&'a str, &'a str>,
+) {
+    match expr {
+        Expr::Call { function, args, .. } => {
+            if let Expr::Ident(fn_name) = function.as_ref() {
+                if let Some(params) = command_param_types.get(fn_name.name.as_str()) {
+                    for (arg, param_type) in args.iter().zip(params) {
+                        if let (CallArg::Positional(Expr::Ident(binding)), Some(entity)) =
+                            (arg, param_type)
+                        {
+                            out.entry(&binding.name).or_insert(entity);
+                        }
+                    }
+                }
+            }
+        }
+        Expr::LogicalOp { left, right, .. } => {
+            augment_binding_types_from_call(left, command_param_types, out);
+            augment_binding_types_from_call(right, command_param_types, out);
+        }
+        _ => {}
+    }
+}
+
 fn extract_entity_from_trigger(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Becomes { subject, .. } | Expr::TransitionsTo { subject, .. } => {
@@ -2583,6 +2700,33 @@ fn visit_status_comparisons<'a>(
                 // transition building to avoid cross-contamination when the
                 // same root binding accesses different entities. Nested
                 // assignments are still tracked for reachability.
+            }
+        }
+        Expr::Comparison {
+            left,
+            op: ComparisonOp::NotEq,
+            right,
+            ..
+        } => {
+            // `binding.status != value` covers every other status value of the
+            // entity, so each value in the complement set gains an exit edge.
+            if let Some(target) = expr_as_ident(right) {
+                if let Some((binding, "status")) = expr_as_member_access(left) {
+                    if let Some(entity) = resolve_binding_entity(
+                        binding,
+                        Some(target),
+                        binding_types,
+                        status_by_entity,
+                    ) {
+                        if let Some((_, values)) = status_by_entity.get(entity) {
+                            if values.contains(target) {
+                                for value in values.iter().filter(|v| **v != target) {
+                                    cb(binding, value);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         Expr::LogicalOp { left, right, .. } => {
@@ -4807,6 +4951,54 @@ mod tests {
             "entity Quote {\n  status: pending | quoted | filled\n}\n\n\
              rule ApplyStatusUpdate {\n  when: update: Quote.status becomes pending\n  \
              ensures: update.status = new_status\n}\n",
+        );
+        assert!(!has_code(&ds, "allium.status.unreachableValue"));
+        assert!(!has_code(&ds, "allium.status.noExit"));
+    }
+
+    #[test]
+    fn surface_param_types_disambiguate_shared_status_values() {
+        // Two entities share the status value `active`. The rule bindings can
+        // only be typed via the surface `provides:` parameter annotations.
+        let ds = analyze_src(
+            "entity Account {\n  status: active | suspended\n}\n\n\
+             entity Subscription {\n  status: active | expired | cancelled\n}\n\n\
+             surface AccountAdmin {\n  facing admin: Admin\n  provides:\n    \
+             SuspendAccount(admin, account: Account)\n      when account.status = active\n    \
+             ReinstateAccount(admin, account: Account)\n      when account.status = suspended\n}\n\n\
+             surface SubscriptionAdmin {\n  facing admin: Admin\n  provides:\n    \
+             CancelSubscription(admin, sub: Subscription)\n      when sub.status = active\n    \
+             RenewSubscription(admin, sub: Subscription)\n      when sub.status != active\n    \
+             ExpireSubscription(admin, sub: Subscription)\n      when sub.status = active\n}\n\n\
+             rule AccountSuspended {\n  when: SuspendAccount(admin, account)\n  \
+             requires: account.status = active\n  ensures: account.status = suspended\n}\n\n\
+             rule AccountReinstated {\n  when: ReinstateAccount(admin, account)\n  \
+             requires: account.status = suspended\n  ensures: account.status = active\n}\n\n\
+             rule SubscriptionCancelled {\n  when: CancelSubscription(admin, sub)\n  \
+             requires: sub.status = active\n  ensures: sub.status = cancelled\n}\n\n\
+             rule SubscriptionExpired {\n  when: ExpireSubscription(admin, sub)\n  \
+             requires: sub.status = active\n  ensures: sub.status = expired\n}\n\n\
+             rule SubscriptionRenewed {\n  when: RenewSubscription(admin, sub)\n  \
+             requires: sub.status != active\n  ensures: sub.status = active\n}\n",
+        );
+        assert!(!has_code(&ds, "allium.status.unreachableValue"));
+        assert!(!has_code(&ds, "allium.status.noExit"));
+    }
+
+    #[test]
+    fn negated_requires_counts_as_exit_for_complement_values() {
+        // `requires: order.status != draft` must give every other status value
+        // an exit edge, so none of them is reported as having no exit.
+        let ds = analyze_src(
+            "entity Order {\n  status: draft | submitted | approved | rejected\n}\n\n\
+             rule OrderSubmitted {\n  when: SubmitOrder(clerk, order)\n  \
+             requires: order.status = draft\n  ensures: order.status = submitted\n}\n\n\
+             rule OrderApproved {\n  when: ApproveOrder(clerk, order)\n  \
+             requires: order.status = submitted\n  ensures: order.status = approved\n}\n\n\
+             rule OrderRejected {\n  when: RejectOrder(clerk, order)\n  \
+             requires: order.status = submitted\n  ensures: order.status = rejected\n}\n\n\
+             rule OrderReactivated {\n  when: ReactivateOrder(clerk, order)\n  \
+             requires: order.status != draft\n  ensures: order.status = draft\n}\n",
         );
         assert!(!has_code(&ds, "allium.status.unreachableValue"));
         assert!(!has_code(&ds, "allium.status.noExit"));

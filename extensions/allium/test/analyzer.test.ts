@@ -1113,6 +1113,53 @@ test("does not report unreachable status when assigned from variable", () => {
   );
 });
 
+// Issue #18: surface parameter types disambiguate shared status values
+test("surface param types disambiguate shared status values across entities", () => {
+  const findings = analyzeAllium(
+    `entity Account {\n  status: active | suspended\n}\n\n` +
+      `entity Subscription {\n  status: active | expired | cancelled\n}\n\n` +
+      `surface AccountAdmin {\n  facing admin: Admin\n  provides:\n` +
+      `    SuspendAccount(admin, account: Account)\n      when account.status = active\n` +
+      `    ReinstateAccount(admin, account: Account)\n      when account.status = suspended\n}\n\n` +
+      `surface SubscriptionAdmin {\n  facing admin: Admin\n  provides:\n` +
+      `    CancelSubscription(admin, sub: Subscription)\n      when sub.status = active\n` +
+      `    RenewSubscription(admin, sub: Subscription)\n      when sub.status != active\n` +
+      `    ExpireSubscription(admin, sub: Subscription)\n      when sub.status = active\n}\n\n` +
+      `rule AccountSuspended {\n  when: SuspendAccount(admin, account)\n  requires: account.status = active\n  ensures: account.status = suspended\n}\n\n` +
+      `rule AccountReinstated {\n  when: ReinstateAccount(admin, account)\n  requires: account.status = suspended\n  ensures: account.status = active\n}\n\n` +
+      `rule SubscriptionCancelled {\n  when: CancelSubscription(admin, sub)\n  requires: sub.status = active\n  ensures: sub.status = cancelled\n}\n\n` +
+      `rule SubscriptionExpired {\n  when: ExpireSubscription(admin, sub)\n  requires: sub.status = active\n  ensures: sub.status = expired\n}\n\n` +
+      `rule SubscriptionRenewed {\n  when: RenewSubscription(admin, sub)\n  requires: sub.status != active\n  ensures: sub.status = active\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.status.unreachableValue"),
+    false,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.status.noExit"),
+    false,
+  );
+});
+
+// Issue #18: negated requires counts as an exit for the complement values
+test("negated requires counts as exit for complement status values", () => {
+  const findings = analyzeAllium(
+    `entity Order {\n  status: draft | submitted | approved | rejected\n}\n\n` +
+      `rule OrderSubmitted {\n  when: SubmitOrder(clerk, order)\n  requires: order.status = draft\n  ensures: order.status = submitted\n}\n\n` +
+      `rule OrderApproved {\n  when: ApproveOrder(clerk, order)\n  requires: order.status = submitted\n  ensures: order.status = approved\n}\n\n` +
+      `rule OrderRejected {\n  when: RejectOrder(clerk, order)\n  requires: order.status = submitted\n  ensures: order.status = rejected\n}\n\n` +
+      `rule OrderReactivated {\n  when: ReactivateOrder(clerk, order)\n  requires: order.status != draft\n  ensures: order.status = draft\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.status.unreachableValue"),
+    false,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.status.noExit"),
+    false,
+  );
+});
+
 // Fix 5: external entity source hint downgraded when referenced in rules
 test("downgrades external entity source hint to info when referenced in rule logic", () => {
   const findings = analyzeAllium(
