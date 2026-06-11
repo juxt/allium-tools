@@ -199,6 +199,8 @@ export interface WasmWhenClause {
 
 export interface WasmContractBinding {
 	direction: "Demands" | "Fulfils";
+	/** Module alias when the contract is imported (`fulfils base/MyContract`). */
+	qualifier: string | null;
 	name: WasmIdent;
 	span: WasmSpan;
 }
