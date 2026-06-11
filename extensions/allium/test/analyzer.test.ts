@@ -659,6 +659,35 @@ test("does not warn when named requires block has deferred hint", () => {
   );
 });
 
+test("does not warn when deferred hint is module-qualified", () => {
+  const findings = analyzeAllium(
+    `deferred billing/InvoiceWorkflow\n\nsurface Billing {\n  facing viewer: User\n  requires InvoiceWorkflow:\n    viewer.id != null\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.surface.requiresWithoutDeferred"),
+    false,
+  );
+});
+
+test("does not warn when module-qualified deferred hint has dotted name", () => {
+  const findings = analyzeAllium(
+    `deferred billing/Dashboard.ApprovalFlow\n\nsurface Dashboard {\n  facing viewer: User\n  requires ApprovalFlow:\n    viewer.id != null\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.surface.requiresWithoutDeferred"),
+    false,
+  );
+});
+
+test("warns when requires block matches only the alias of a qualified deferred hint", () => {
+  const findings = analyzeAllium(
+    `deferred billing/InvoiceWorkflow\n\nsurface Billing {\n  facing viewer: User\n  requires billing:\n    viewer.id != null\n}\n`,
+  );
+  assert.ok(
+    findings.some((f) => f.code === "allium.surface.requiresWithoutDeferred"),
+  );
+});
+
 test("reports duplicate named provides blocks in surface", () => {
   const findings = analyzeAllium(
     `surface Dashboard {\n  facing viewer: User\n  provides Navigate:\n    Opened()\n  provides Navigate:\n    Refreshed()\n}\n`,

@@ -165,6 +165,8 @@ the mask, so lanes that only need to detect that a string or comment is present
 | `allium.config.undefinedReference` | warning | Yes | Yes |
 | `allium.surface.unusedPath` | info | Disabled | Yes |
 
+`allium.surface.requiresWithoutDeferred` is TypeScript-only (no Rust equivalent yet). When porting it, note the deferred-name matching semantics fixed in issue #26: a named requires block matches a deferred declaration by its full name, by a trailing `.`-separated segment, or — for module-qualified declarations like `deferred billing/InvoiceWorkflow` — by the unqualified name after the `alias/` prefix. The alias alone must not satisfy the match.
+
 ## Suppression system
 
 Both implementations support `-- allium-ignore code1, code2` comments. The directive suppresses diagnostics on the same line or the next line. The Rust implementation uses `regex-lite` for parsing; the suppression regex must not span blank lines (use `[^\S\n]*` not `\s*` at the start).
