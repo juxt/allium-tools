@@ -72,6 +72,16 @@ Added a targeted check for rules with bare entity bindings (e.g. `when: state: C
 
 Removed early return when no config block exists (the TS checks for `config.xxx` references regardless). Added `Expr::For`, `Expr::LetExpr`, and `Expr::Lambda` handling to `check_config_refs_in_expr`. Changed severity from error to warning to match TS.
 
+### 6. `deferred.missingLocationHint` predicate unified
+
+The Rust `check_deferred_location_hints` previously emitted the warning for every `deferred` declaration unconditionally — it inspected only the parsed path expression, which drops the trailing comment, so it could never see a hint. It now replays the TypeScript analyzer's line match (`^\s*deferred\s+([A-Za-z_][A-Za-z0-9_.]*)(.*)$`) over the raw source anchored at the declaration's `deferred` keyword, and applies the same predicate as `findDeferredLocationHints` to the suffix between the captured name and the end of its line.
+
+A deferred declaration is treated as carrying a location hint when that suffix includes a quoted path, a URL (`http://`/`https://`), or the `-- see:` comment convention shown in the language reference. The TypeScript predicate was broadened from quoted-path/URL-only to also recognise `-- see:`, so the documented `deferred X -- see: path.allium` form is now accepted by both implementations.
+
+Replaying the match — rather than trusting the parsed path's span — is what keeps the two in step: the Rust parser reads the path as a full expression, which can extend past the flat name (qualified `billing/InvoiceWorkflow` paths, expression-shaped paths like `Foo("x")`) or start after it (`deferred (Foo)`), moving the suffix boundary or fabricating a name the TypeScript pattern would never capture — either flips the verdict. With the replayed match, both sides also name the warning after the same flat name. Scanning the suffix rather than the whole line matters for the URL markers: a URL glued to the identifier (`deferred Foohttps://x`) is an unspaced path with no hint, and warns in both. See issue #20 and the review on PR #23.
+
+Scope of the guarantee: parity covers every line that parses into a `DeferredDecl`. The replayed match treats `\n`, `\r`, U+2028 and U+2029 as line terminators — the JavaScript `m`-flag set — so CRLF and lone-CR files behave identically on both sides. The remaining divergences are inputs the two front ends read differently before this check runs: a malformed deferred line that fails the Rust expression parser (`deferred Foo.`, `deferred Foo == "x"`) surfaces a parse error instead of this warning, and the TypeScript pattern — which runs over raw text with no comment or string awareness, and never consumes parse diagnostics — can fire on `deferred`-shaped text the Rust lexer reads as comment or string content (e.g. after a lone `\r` inside a `--` comment). Diagnostic-set parity on such inputs is out of scope for this check.
+
 ## Diagnostic codes implemented
 
 | Code | Severity | Rust | TypeScript |
@@ -105,7 +115,7 @@ Both implementations support `-- allium-ignore code1, code2` comments. The direc
 
 ```bash
 cargo build --release          # Build Rust CLI
-cargo test                     # Run Rust tests (304 in parser, 140 in CLI)
+cargo test                     # Run Rust tests
 npm run build                  # Build TypeScript
 npm run test                   # Run TypeScript tests
 ```

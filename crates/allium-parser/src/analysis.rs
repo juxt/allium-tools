@@ -58,7 +58,7 @@ fn run_checks(mut ctx: Ctx<'_>, source: &str) -> Vec<Diagnostic> {
     ctx.check_unused_entities();
     ctx.check_unused_definitions();
     ctx.check_unresolved_use_paths();
-    ctx.check_deferred_location_hints();
+    ctx.check_deferred_location_hints(source);
     ctx.check_rule_invalid_triggers();
     ctx.check_rule_undefined_bindings();
     ctx.check_duplicate_let_bindings();
@@ -3900,35 +3900,83 @@ fn collect_qrefs_from_expr(expr: &Expr, out: &mut Vec<(String, String)>) {
 // ---------------------------------------------------------------------------
 
 impl Ctx<'_> {
-    fn check_deferred_location_hints(&mut self) {
+    fn check_deferred_location_hints(&mut self, source: &str) {
         for d in &self.module.declarations {
             let Decl::Deferred(def) = d else {
                 continue;
             };
-            // The TypeScript check looks for a string literal or URL on the deferred line.
-            // Since the Rust parser only stores the path expression, we emit a warning
-            // if there's no additional hint (the parser doesn't capture comments/URLs).
+            // A deferred declaration carries a location hint when the text after the
+            // name points at where the detail lives: a quoted path, a URL, or the
+            // `-- see:` comment convention shown in the language reference. The AST
+            // drops the trailing comment, so scan the raw source. The TypeScript
+            // analyzer is line-based: it matches
+            // `^\s*deferred\s+([A-Za-z_][A-Za-z0-9_.]*)(.*)$` and applies the
+            // predicate to the suffix after the captured name. Replay that match
+            // from the `deferred` keyword rather than trusting the parsed path's
+            // span — the parsed expression can extend past the flat name (qualified
+            // `alias/Name` paths, expression-shaped paths like `Foo("x")`) or start
+            // after it (`deferred (Foo)`), which would move the suffix boundary and
+            // flip the verdict. Scanning the suffix (not the whole line) matters for
+            // the URL markers, whose leading letters would otherwise be misread as
+            // part of an unspaced path (e.g. `Foohttps://x`).
+            // The JavaScript `m` flag anchors `^`/`$` at `\n`, `\r`, U+2028 and
+            // U+2029, and `.` excludes them — and the Rust lexer accepts a bare
+            // `\r` as ordinary whitespace, so lone-CR files parse cleanly. Use
+            // the same terminator set for both line boundaries or the verdicts
+            // drift on such files.
+            const LINE_TERMINATORS: [char; 4] = ['\n', '\r', '\u{2028}', '\u{2029}'];
+            let bytes = source.as_bytes();
+            let kw_start = def.span.start;
+            let line_start = source[..kw_start]
+                .rfind(LINE_TERMINATORS)
+                .map_or(0, |i| {
+                    i + source[i..].chars().next().map_or(1, char::len_utf8)
+                });
+            let mut name_start = kw_start + "deferred".len();
+            while bytes.get(name_start).is_some_and(u8::is_ascii_whitespace) {
+                name_start += 1;
+            }
+            let starts_name =
+                |b: &u8| b.is_ascii_alphabetic() || *b == b'_';
+            let continues_name =
+                |b: &u8| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'.';
+            if !bytes[line_start..kw_start]
+                .iter()
+                .all(|b| b.is_ascii_whitespace())
+                || name_start == kw_start + "deferred".len()
+                || !bytes.get(name_start).is_some_and(starts_name)
+            {
+                // A line the TypeScript regex cannot match — text before the
+                // keyword, no whitespace after it, or a path it cannot capture
+                // (e.g. `deferred (Foo)`) — produces no finding there; mirror that.
+                continue;
+            }
+            let mut name_end = name_start + 1;
+            while bytes.get(name_end).is_some_and(continues_name) {
+                name_end += 1;
+            }
+            let line_end = source[name_end..]
+                .find(LINE_TERMINATORS)
+                .map_or(source.len(), |i| name_end + i);
+            let suffix = &source[name_end..line_end];
+            if suffix.contains('"')
+                || suffix.contains("http://")
+                || suffix.contains("https://")
+                || suffix.contains("-- see:")
+            {
+                continue;
+            }
             self.push(
                 Diagnostic::warning(
                     def.span,
                     format!(
                         "Deferred specification '{}' should include a location hint.",
-                        expr_to_dotpath(&def.path),
+                        &source[name_start..name_end],
                     ),
                 )
                 .with_code("allium.deferred.missingLocationHint"),
             );
         }
-    }
-}
-
-fn expr_to_dotpath(expr: &Expr) -> String {
-    match expr {
-        Expr::Ident(id) => id.name.clone(),
-        Expr::MemberAccess { object, field, .. } => {
-            format!("{}.{}", expr_to_dotpath(object), field.name)
-        }
-        _ => "?".to_string(),
     }
 }
 
@@ -5412,6 +5460,114 @@ mod tests {
     fn deferred_missing_location_hint() {
         let ds = analyze_src("deferred Foo.bar\n");
         assert!(has_code(&ds, "allium.deferred.missingLocationHint"));
+    }
+
+    #[test]
+    fn deferred_with_quoted_path_hint_ok() {
+        let ds = analyze_src("deferred Foo.bar \"detailed/foo.allium\"\n");
+        assert!(!has_code(&ds, "allium.deferred.missingLocationHint"));
+    }
+
+    #[test]
+    fn deferred_with_see_comment_hint_ok() {
+        // The `-- see:` convention shown in the language reference counts as a hint.
+        let ds = analyze_src("deferred Foo.bar    -- see: detailed/foo.allium\n");
+        assert!(!has_code(&ds, "allium.deferred.missingLocationHint"));
+    }
+
+    #[test]
+    fn deferred_with_url_hint_ok() {
+        let ds = analyze_src("deferred Foo.bar    -- https://example.com/foo.allium\n");
+        assert!(!has_code(&ds, "allium.deferred.missingLocationHint"));
+    }
+
+    #[test]
+    fn deferred_with_url_glued_to_path_warns() {
+        // A URL marker with no space before it is part of the (unspaced) path, not a
+        // hint — matching the TypeScript analyzer, whose name capture eats `Foohttps`
+        // and leaves the suffix `://x`. Scanning the whole line would wrongly suppress.
+        assert!(has_code(
+            &analyze_src("deferred Foohttps://x\n"),
+            "allium.deferred.missingLocationHint"
+        ));
+        assert!(has_code(
+            &analyze_src("deferred Foohttp://x\n"),
+            "allium.deferred.missingLocationHint"
+        ));
+    }
+
+    #[test]
+    fn deferred_with_non_hint_comment_warns() {
+        // A trailing comment that is not a location hint must still warn; only the
+        // `-- see:` marker (or a quoted path / URL) suppresses.
+        let ds = analyze_src("deferred Foo.bar    -- TODO write this\n");
+        assert!(has_code(&ds, "allium.deferred.missingLocationHint"));
+    }
+
+    #[test]
+    fn deferred_expression_path_with_quote_suppresses() {
+        // The parsed path of an expression-shaped deferred declaration extends past
+        // the flat name, so a suffix scan anchored at `path.span().end` would miss
+        // the quote. The check replays the TypeScript name capture instead, so the
+        // quote lands in the suffix and suppresses — matching the TS analyzer.
+        let ds = analyze_src("deferred Foo(\"x\")\n");
+        assert!(!has_code(&ds, "allium.deferred.missingLocationHint"));
+        let ds = analyze_src("deferred Foo = \"x\"\n");
+        assert!(!has_code(&ds, "allium.deferred.missingLocationHint"));
+    }
+
+    #[test]
+    fn deferred_lone_cr_is_a_line_boundary() {
+        // JavaScript `m`-flag anchors treat a bare `\r` as a line terminator while
+        // the Rust lexer reads it as ordinary whitespace, so lone-CR files parse
+        // cleanly; the replayed match must split there too or the verdicts drift.
+        let ds = analyze_src("deferred Foo\rdeferred Bar\n");
+        let hints: Vec<&Diagnostic> = ds
+            .iter()
+            .filter(|d| d.code == Some("allium.deferred.missingLocationHint"))
+            .collect();
+        assert_eq!(hints.len(), 2, "both CR-separated declarations warn");
+        // The hint marker on the next CR-line must not leak into Foo's suffix.
+        let ds = analyze_src("deferred Foo\r-- see: x.allium\n");
+        assert!(has_code(&ds, "allium.deferred.missingLocationHint"));
+    }
+
+    #[test]
+    fn deferred_unmatchable_path_stays_silent() {
+        // The TypeScript regex requires `deferred` + whitespace + `[A-Za-z_]`; a
+        // parenthesised path never matches it (the paren is not part of the parsed
+        // path's span, so anchoring on the span would wrongly find a name).
+        let ds = analyze_src("deferred (Foo)\n");
+        assert!(!has_code(&ds, "allium.deferred.missingLocationHint"));
+    }
+
+    #[test]
+    fn deferred_qualified_path_warns_with_flat_name() {
+        // A qualified path parses past the `/`, but the TypeScript capture stops
+        // there; both warn, and the message carries the flat name (`billing`).
+        let ds = analyze_src("deferred billing/InvoiceWorkflow\n");
+        let hints: Vec<&Diagnostic> = ds
+            .iter()
+            .filter(|d| d.code == Some("allium.deferred.missingLocationHint"))
+            .collect();
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].message.contains("'billing'"));
+    }
+
+    #[test]
+    fn deferred_location_hint_is_per_line() {
+        // `analyze_src` prepends a `-- allium: 3` header, so these are source lines
+        // 2-4; only the bare middle declaration should warn. Exercises real per-line
+        // suffix resolution across multiple deferred declarations.
+        let ds = analyze_src(
+            "deferred A.one    -- see: a.allium\ndeferred B.two\ndeferred C.three \"c.allium\"\n",
+        );
+        let hints: Vec<&Diagnostic> = ds
+            .iter()
+            .filter(|d| d.code == Some("allium.deferred.missingLocationHint"))
+            .collect();
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].message.contains("B.two"));
     }
 
     // -- Invalid triggers --

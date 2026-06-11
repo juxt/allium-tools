@@ -764,6 +764,73 @@ test("does not report deferred specification with location hint", () => {
   );
 });
 
+test("does not report deferred specification with see-comment location hint", () => {
+  const findings = analyzeAllium(
+    `deferred EscalationPolicy.at_level    -- see: detailed/escalation.allium\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+    false,
+  );
+});
+
+test("reports deferred specification with a URL glued to the path", () => {
+  // No space before the URL: the marker is part of the (unspaced) path, not a hint.
+  const findings = analyzeAllium(`deferred Foohttps://x\n`);
+  assert.ok(
+    findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+  );
+});
+
+test("reports deferred specification with a non-hint trailing comment", () => {
+  const findings = analyzeAllium(`deferred EscalationPolicy.at_level    -- TODO write this\n`);
+  assert.ok(
+    findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+  );
+});
+
+test("does not report expression-shaped deferred path with a quote", () => {
+  // Parity with the Rust analyzer: the quote falls in the suffix after the flat
+  // name capture, so both sides treat it as a (malformed) location hint.
+  for (const line of [`deferred Foo("x")\n`, `deferred Foo = "x"\n`]) {
+    const findings = analyzeAllium(line);
+    assert.equal(
+      findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+      false,
+    );
+  }
+});
+
+test("treats a lone carriage return as a line boundary", () => {
+  // `m`-flag anchors split at a bare `\r` — locked here for Rust parity, whose
+  // replayed match uses the same terminator set.
+  const findings = analyzeAllium(`deferred Foo\rdeferred Bar\n`);
+  const hints = findings.filter(
+    (f) => f.code === "allium.deferred.missingLocationHint",
+  );
+  assert.equal(hints.length, 2);
+});
+
+test("does not report parenthesised deferred path", () => {
+  // The name pattern requires `deferred` + whitespace + `[A-Za-z_]`, so a
+  // parenthesised path never matches — locked here for Rust parity.
+  const findings = analyzeAllium(`deferred (Foo)\n`);
+  assert.equal(
+    findings.some((f) => f.code === "allium.deferred.missingLocationHint"),
+    false,
+  );
+});
+
+test("reports qualified deferred path under its flat name", () => {
+  // The name capture stops at `/`; both analyzers warn and name `billing`.
+  const findings = analyzeAllium(`deferred billing/InvoiceWorkflow\n`);
+  const hint = findings.find(
+    (f) => f.code === "allium.deferred.missingLocationHint",
+  );
+  assert.ok(hint);
+  assert.ok(hint.message.includes("'billing'"));
+});
+
 test("reports undefined status assignment value", () => {
   const findings = analyzeAllium(
     `entity Invitation {\n  status: pending | active | completed\n}\n\nrule CloseInvitation {\n  when: invitation: Invitation.created_at <= now\n  ensures: invitation.status = archived\n}\n`,

@@ -3290,10 +3290,13 @@ function findDeferredLocationHints(
   const pattern = /^\s*deferred\s+([A-Za-z_][A-Za-z0-9_.]*)(.*)$/gm;
   for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
     const suffix = (match[2] ?? "").trim();
+    // A location hint points at where the detail lives: a quoted path, a URL, or
+    // the `-- see:` comment convention shown in the language reference.
     if (
       suffix.includes("http://") ||
       suffix.includes("https://") ||
-      suffix.includes('"')
+      suffix.includes('"') ||
+      suffix.includes("-- see:")
     ) {
       continue;
     }
