@@ -287,6 +287,38 @@ rule QualifiedTriggerOutsideCheckSetNotFlagged {
     ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
 }
 
+rule AmbiguousUnqualifiedNameReferenceWarns {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: inputs resolve to multiple files
+    requires: two or more distinct imported files declare name
+    requires: importing file references name unqualified
+    requires: importing file does not declare name locally
+
+    ensures: FindingObserved(code: "allium.use.ambiguousReference", severity: warning)
+    ensures: FindingMessage names the candidate import aliases
+    ensures: FindingMessage suggests a qualified name
+    ensures: at most one finding per ambiguous name, at its first reference site
+}
+
+rule AmbiguousUnqualifiedTriggerSubscriptionWarns {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: inputs resolve to multiple files
+    requires: two or more distinct imported files provide or emit trigger
+    requires: importing file listens for trigger unqualified
+    requires: importing file neither provides nor emits trigger locally
+
+    ensures: FindingObserved(code: "allium.use.ambiguousReference", severity: warning)
+    ensures: FindingMessage names the candidate import aliases
+    ensures: FindingMessage suggests a qualified name
+}
+
+rule AmbiguityResolvedByQualificationOrShadowing {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: reference is qualified via use alias, or the importing file declares the name locally, or all matching use aliases target the same file
+
+    ensures: FindingNotObserved(code: "allium.use.ambiguousReference")
+}
+
 rule DeferredWithoutLocationHintWarns {
     when: CheckCommandInvokedWithInputs(inputs)
     requires: file contains deferred declaration
