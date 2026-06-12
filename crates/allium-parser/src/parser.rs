@@ -606,11 +606,90 @@ impl<'s> Parser<'s> {
 
     fn parse_deferred_decl(&mut self) -> Option<DeferredDecl> {
         let start = self.expect(TokenKind::Deferred)?.span;
-        let path = self.parse_expr(0)?;
+        let path = self.parse_deferred_path()?;
+
+        // Optional quoted location hint on the same line:
+        // `deferred Foo.bar "detailed/foo.allium"`. A string on a later line
+        // is stray top-level input, not this declaration's hint.
+        let location_hint = if self.at(TokenKind::String)
+            && self.same_line(path.span().end, self.peek().span.start)
+        {
+            self.parse_string()
+        } else {
+            None
+        };
+
+        let end = location_hint
+            .as_ref()
+            .map_or(path.span(), |hint| hint.span);
         Some(DeferredDecl {
-            span: start.merge(path.span()),
+            span: start.merge(end),
             path,
+            location_hint,
         })
+    }
+
+    /// Parse the path of a `deferred` declaration: a dotted name with an
+    /// optional `alias/Name` qualifier (`Name`, `Name.field.sub`,
+    /// `alias/Name`, `alias/Name.field`). Unlike `parse_expr`, this never
+    /// absorbs operators, calls, or string literals into the path, and it
+    /// stops before a trailing `.` with no following identifier (e.g.
+    /// `deferred Foo.`) so the declaration still forms and the leftover token
+    /// errors at declaration level — keeping the location-hint check running
+    /// on the line, in step with the TypeScript analyzer.
+    ///
+    /// In declaration position there is no division to disambiguate from, so
+    /// a `/` after the leading identifier always introduces a qualifier,
+    /// mirroring `fulfils alias/Name` in the contracts clause.
+    ///
+    /// The path must sit on one line: newlines are not tokens and keywords
+    /// are word tokens, so without the line guards a dangling `.` or `/`
+    /// would absorb the next declaration's leading keyword as a path segment.
+    fn parse_deferred_path(&mut self) -> Option<Expr> {
+        let first = self.parse_ident_in("deferred name")?;
+
+        let mut expr = if self.at(TokenKind::Slash)
+            && self.same_line(first.span.end, self.peek().span.start)
+        {
+            self.advance(); // consume `/`
+            if !self.peek_kind().is_word()
+                || !self.same_line(first.span.end, self.peek().span.start)
+            {
+                let tok = self.peek();
+                self.error(
+                    tok.span,
+                    format!("expected deferred name after '/', found {}", tok.kind),
+                );
+                return None;
+            }
+            let name = self.parse_ident_in("deferred name after '/'")?;
+            Expr::QualifiedName(QualifiedName {
+                span: first.span.merge(name.span),
+                qualifier: Some(first.name),
+                name: name.name,
+            })
+        } else {
+            Expr::Ident(first)
+        };
+
+        while self.at(TokenKind::Dot)
+            && self.peek_at(1).kind.is_word()
+            && self.same_line(expr.span().end, self.peek_at(1).span.start)
+        {
+            self.advance(); // consume `.`
+            let field = self.parse_ident_in("field name")?;
+            expr = Expr::MemberAccess {
+                span: expr.span().merge(field.span),
+                object: Box::new(expr),
+                field,
+            };
+        }
+        Some(expr)
+    }
+
+    /// Whether the source between two byte offsets contains no line break.
+    fn same_line(&self, from: usize, to: usize) -> bool {
+        !self.source[from..to].contains(['\n', '\r'])
     }
 
     // -- open question --------------------------------------------------
@@ -2668,6 +2747,113 @@ mod tests {
         let src = "deferred InterviewerMatching.suggest";
         let r = parse_ok(src);
         assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Deferred(d) = &r.module.declarations[0] else { panic!() };
+        assert!(matches!(&d.path, Expr::MemberAccess { .. }));
+        assert!(d.location_hint.is_none());
+    }
+
+    #[test]
+    fn deferred_qualified_path() {
+        let src = "deferred billing/InvoiceWorkflow";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Deferred(d) = &r.module.declarations[0] else { panic!() };
+        let Expr::QualifiedName(q) = &d.path else {
+            panic!("expected QualifiedName, got {:?}", d.path)
+        };
+        assert_eq!(q.qualifier.as_deref(), Some("billing"));
+        assert_eq!(q.name, "InvoiceWorkflow");
+    }
+
+    #[test]
+    fn deferred_qualified_path_with_member() {
+        let src = "deferred billing/InvoiceWorkflow.initiate";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Deferred(d) = &r.module.declarations[0] else { panic!() };
+        let Expr::MemberAccess { object, field, .. } = &d.path else {
+            panic!("expected MemberAccess, got {:?}", d.path)
+        };
+        assert!(matches!(object.as_ref(), Expr::QualifiedName(_)));
+        assert_eq!(field.name, "initiate");
+    }
+
+    #[test]
+    fn deferred_with_quoted_location_hint() {
+        let src = "deferred Foo.bar \"detailed/foo.allium\"";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Deferred(d) = &r.module.declarations[0] else { panic!() };
+        let hint = d.location_hint.as_ref().expect("location hint parsed");
+        assert_eq!(hint.text(), "detailed/foo.allium");
+        assert_eq!(d.span.end, hint.span.end, "declaration span covers the hint");
+    }
+
+    #[test]
+    fn deferred_hint_string_must_share_the_line() {
+        // A string on the next line is stray top-level input, not this
+        // declaration's hint.
+        let src = "deferred Foo\n\"detailed/foo.allium\"";
+        let r = parse_ok(src);
+        let Decl::Deferred(d) = &r.module.declarations[0] else { panic!() };
+        assert!(d.location_hint.is_none());
+        assert!(r.diagnostics.iter().any(|d| d.message.contains("expected declaration")));
+    }
+
+    #[test]
+    fn deferred_path_rejects_expression_shapes() {
+        // The path is a dotted name, not an expression: calls and comparisons
+        // leave their leftover tokens to error at declaration level, while the
+        // declaration itself still forms with the flat name.
+        for src in ["deferred Foo(\"x\")", "deferred Foo = \"x\""] {
+            let r = parse_ok(src);
+            let Decl::Deferred(d) = &r.module.declarations[0] else { panic!() };
+            assert!(matches!(&d.path, Expr::Ident(id) if id.name == "Foo"));
+            assert!(
+                r.diagnostics.iter().any(|d| d.message.contains("expected declaration")),
+                "leftover tokens must error in {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deferred_parenthesised_path_errors() {
+        let r = parse_ok("deferred (Foo)");
+        assert!(r.diagnostics.iter().any(|d| d.message.contains("expected deferred name")));
+    }
+
+    #[test]
+    fn deferred_trailing_dot_keeps_declaration() {
+        // The path stops before a dangling `.`; the declaration still forms
+        // (so the location-hint check covers the line) and the dot errors.
+        let r = parse_ok("deferred Dangling.");
+        let Decl::Deferred(d) = &r.module.declarations[0] else { panic!() };
+        assert!(matches!(&d.path, Expr::Ident(id) if id.name == "Dangling"));
+        assert!(r.diagnostics.iter().any(|d| d.message.contains("expected declaration")));
+    }
+
+    #[test]
+    fn deferred_dangling_qualifier_errors() {
+        let r = parse_ok("deferred billing/");
+        assert!(r.diagnostics.iter().any(|d| d.message.contains("expected deferred name after '/'")));
+    }
+
+    #[test]
+    fn deferred_path_does_not_cross_lines() {
+        // Newlines are not tokens and keywords are word tokens, so without
+        // line guards `Dangling.` would absorb the next declaration's
+        // `deferred` keyword as a member name.
+        let src = "deferred Dangling.\ndeferred Next.step";
+        let r = parse_ok(src);
+        let deferreds: Vec<_> = r
+            .module
+            .declarations
+            .iter()
+            .filter(|d| matches!(d, Decl::Deferred(_)))
+            .collect();
+        assert_eq!(deferreds.len(), 2, "both declarations survive");
+        let Decl::Deferred(d) = deferreds[0] else { panic!() };
+        assert!(matches!(&d.path, Expr::Ident(id) if id.name == "Dangling"));
     }
 
     #[test]

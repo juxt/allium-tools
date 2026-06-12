@@ -91,11 +91,18 @@ pub struct VariantDecl {
     pub items: Vec<BlockItem>,
 }
 
-/// `deferred path.expression`
+/// `deferred Name.field` / `deferred alias/Name.field`, with an optional
+/// trailing quoted location hint: `deferred Foo.bar "detailed/foo.allium"`.
+///
+/// The path is constrained to a dotted name with an optional `alias/Name`
+/// qualifier, but stays an [`Expr`] (`Ident`, `QualifiedName`, or
+/// `MemberAccess` chains over them) so qualified-reference collection and the
+/// WASM AST mirror consume it unchanged.
 #[derive(Debug, Clone, Serialize)]
 pub struct DeferredDecl {
     pub span: Span,
     pub path: Expr,
+    pub location_hint: Option<StringLiteral>,
 }
 
 /// `open question "text"`
