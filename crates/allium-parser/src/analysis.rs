@@ -29,7 +29,21 @@ pub fn analyze_with_external_refs(
     source: &str,
     external_refs: &HashSet<String>,
 ) -> Vec<Diagnostic> {
-    run_checks(Ctx::new(module, external_refs, None, None), source)
+    run_checks(Ctx::new(module, external_refs, None, None, None), source)
+}
+
+/// Names declared, and triggers provided or emitted, by more than one of a
+/// file's imported modules. Computed by multi-file checking; an unqualified
+/// reference to one of these names cannot be attributed to a single import
+/// (issue #15). Each entry maps the ambiguous name to the sorted `use`
+/// aliases it could resolve to — one alias per distinct target file, so two
+/// aliases for the same file are not ambiguous.
+#[derive(Debug, Default)]
+pub struct AmbiguousImports {
+    /// Declaration name → aliases of the (≥2) modules declaring it.
+    pub names: HashMap<String, Vec<String>>,
+    /// Trigger name → aliases of the (≥2) modules providing or emitting it.
+    pub triggers: HashMap<String, Vec<String>>,
 }
 
 /// Run structural checks with full cross-module context.
@@ -40,12 +54,15 @@ pub fn analyze_with_external_refs(
 /// `imported_triggers` — per `use` alias, the trigger names the aliased module
 /// provides or emits; aliases whose targets are outside the check set are
 /// absent (enables cross-spec trigger reachability).
+/// `ambiguous_imports` — names and triggers more than one imported module
+/// could resolve (enables ambiguous-reference warnings).
 pub fn analyze_with_cross_module(
     module: &Module,
     source: &str,
     external_refs: &HashSet<String>,
     resolved_use_paths: &HashSet<String>,
     imported_triggers: &HashMap<String, HashSet<String>>,
+    ambiguous_imports: &AmbiguousImports,
 ) -> Vec<Diagnostic> {
     run_checks(
         Ctx::new(
@@ -53,6 +70,7 @@ pub fn analyze_with_cross_module(
             external_refs,
             Some(resolved_use_paths),
             Some(imported_triggers),
+            Some(ambiguous_imports),
         ),
         source,
     )
@@ -70,6 +88,7 @@ fn run_checks(mut ctx: Ctx<'_>, source: &str) -> Vec<Diagnostic> {
     ctx.check_unused_entities();
     ctx.check_unused_definitions();
     ctx.check_unresolved_use_paths();
+    ctx.check_ambiguous_imported_names();
     ctx.check_deferred_location_hints(source);
     ctx.check_rule_invalid_triggers();
     ctx.check_rule_undefined_bindings();
@@ -109,6 +128,7 @@ pub fn analyse_with_cross_module(
     external_refs: &HashSet<String>,
     resolved_use_paths: &HashSet<String>,
     imported_triggers: &HashMap<String, HashSet<String>>,
+    ambiguous_imports: &AmbiguousImports,
 ) -> crate::diagnostic::AnalyseResult {
     let diagnostics = analyze_with_cross_module(
         module,
@@ -116,6 +136,7 @@ pub fn analyse_with_cross_module(
         external_refs,
         resolved_use_paths,
         imported_triggers,
+        ambiguous_imports,
     );
     let findings = find_process_issues(module, Some(imported_triggers));
     crate::diagnostic::AnalyseResult {
@@ -206,7 +227,7 @@ fn find_process_issues(
     imported_triggers: Option<&HashMap<String, HashSet<String>>>,
 ) -> Vec<crate::diagnostic::Finding> {
     let empty = HashSet::new();
-    let mut ctx = Ctx::new(module, &empty, None, imported_triggers);
+    let mut ctx = Ctx::new(module, &empty, None, imported_triggers, None);
     let info = EntityInfo::from_module(module);
     ctx.collect_process_findings(&info);
     ctx.collect_conflict_findings(&info);
@@ -281,6 +302,10 @@ struct Ctx<'a> {
     /// aliased module provides or emits. Aliases whose targets fall outside
     /// the check set are absent from the map.
     imported_triggers: Option<&'a HashMap<String, HashSet<String>>>,
+    /// `None` = single-file mode (import ambiguity unknowable).
+    /// `Some(map)` = multi-file mode; names and triggers that more than one
+    /// imported module could resolve.
+    ambiguous_imports: Option<&'a AmbiguousImports>,
     diagnostics: Vec<Diagnostic>,
     findings: Vec<crate::diagnostic::Finding>,
 }
@@ -291,12 +316,14 @@ impl<'a> Ctx<'a> {
         external_refs: &'a HashSet<String>,
         resolved_use_paths: Option<&'a HashSet<String>>,
         imported_triggers: Option<&'a HashMap<String, HashSet<String>>>,
+        ambiguous_imports: Option<&'a AmbiguousImports>,
     ) -> Self {
         Self {
             module,
             external_refs,
             resolved_use_paths,
             imported_triggers,
+            ambiguous_imports,
             diagnostics: Vec::new(),
             findings: Vec::new(),
         }
@@ -2938,6 +2965,75 @@ impl Ctx<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// 5c. Ambiguous unqualified imported references
+// ---------------------------------------------------------------------------
+
+impl Ctx<'_> {
+    /// Warn when an unqualified name reference matches declarations in more
+    /// than one imported module (issue #15). Local declarations shadow
+    /// imports, so names declared in this module are skipped. Skipped when
+    /// `ambiguous_imports` is `None` (single-file mode). Ambiguous trigger
+    /// subscriptions are flagged separately by the unreachable-trigger check,
+    /// which already walks `when:` clauses.
+    fn check_ambiguous_imported_names(&mut self) {
+        let Some(ambiguous) = self.ambiguous_imports else {
+            return;
+        };
+        if ambiguous.names.is_empty() {
+            return;
+        }
+        // Local declarations win over imports. `declared_type_names` covers
+        // entities, values, enums, actors, variants, builtins and aliases;
+        // contracts are referenceable from `contracts:` clauses, so they
+        // shadow too.
+        let mut local = self.declared_type_names();
+        for b in self.blocks(BlockKind::Contract) {
+            if let Some(n) = &b.name {
+                local.insert(n.name.as_str());
+            }
+        }
+
+        let mut flagged: HashSet<&str> = HashSet::new();
+        let mut findings = Vec::new();
+        for id in collect_referenced_ident_nodes(self.module) {
+            if id.qualified || local.contains(id.name) || flagged.contains(id.name) {
+                continue;
+            }
+            let Some(aliases) = ambiguous.names.get(id.name) else {
+                continue;
+            };
+            // One warning per name, at its first reference site.
+            flagged.insert(id.name);
+            findings.push(
+                Diagnostic::warning(
+                    id.span,
+                    format!(
+                        "Unqualified reference '{}' is ambiguous: it is declared in imported modules {}. Use a qualified name (e.g. '{}/{}').",
+                        id.name,
+                        format_alias_list(aliases),
+                        aliases[0],
+                        id.name,
+                    ),
+                )
+                .with_code("allium.use.ambiguousReference"),
+            );
+        }
+        self.diagnostics.extend(findings);
+    }
+}
+
+/// Render a `use` alias list as `'a' and 'b'` / `'a', 'b' and 'c'`.
+fn format_alias_list(aliases: &[String]) -> String {
+    let quoted: Vec<String> = aliases.iter().map(|a| format!("'{a}'")).collect();
+    match quoted.split_last() {
+        Some((last, rest)) if !rest.is_empty() => {
+            format!("{} and {last}", rest.join(", "))
+        }
+        _ => quoted.join(", "),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 6. Type reference checks (undeclared types in entity/value fields)
 // ---------------------------------------------------------------------------
 
@@ -3145,6 +3241,30 @@ impl Ctx<'_> {
                     continue;
                 }
                 for tref in extract_trigger_refs(value) {
+                    // An unqualified subscription satisfied only by imports is
+                    // ambiguous when several imported modules provide or emit
+                    // the trigger (issue #15). Local emissions shadow imports.
+                    if tref.qualifier.is_none()
+                        && !provided.contains(tref.name)
+                        && !emitted.contains(tref.name)
+                    {
+                        if let Some(aliases) = self
+                            .ambiguous_imports
+                            .and_then(|a| a.triggers.get(tref.name))
+                        {
+                            let message = format!(
+                                "Rule '{rule_name}' listens for trigger '{}', which is provided or emitted by imported modules {}. Use a qualified name (e.g. '{}/{}').",
+                                tref.name,
+                                format_alias_list(aliases),
+                                aliases[0],
+                                tref.name,
+                            );
+                            self.push(
+                                Diagnostic::warning(tref.span, message)
+                                    .with_code("allium.use.ambiguousReference"),
+                            );
+                        }
+                    }
                     if self.trigger_reachability(&tref, &provided, &emitted) != Some(false) {
                         continue;
                     }
@@ -3661,40 +3781,17 @@ impl Ctx<'_> {
     /// Collect all capitalised identifiers referenced in expressions across the module,
     /// excluding the declaration name positions themselves.
     fn collect_all_referenced_idents(&self) -> HashSet<&str> {
-        let mut names = HashSet::new();
-        for d in &self.module.declarations {
-            match d {
-                Decl::Block(b) => {
-                    for item in &b.items {
-                        collect_uppercase_idents_from_item(&item.kind, &mut names);
-                    }
-                }
-                Decl::Variant(v) => {
-                    // The base type is a reference
-                    if let Some(name) = expr_as_ident(&v.base) {
-                        names.insert(name);
-                    }
-                    for item in &v.items {
-                        collect_uppercase_idents_from_item(&item.kind, &mut names);
-                    }
-                }
-                Decl::Invariant(inv) => {
-                    collect_uppercase_idents_from_expr(&inv.body, &mut names);
-                }
-                Decl::Default(def) => {
-                    if let Some(tn) = &def.type_name {
-                        names.insert(tn.name.as_str());
-                    }
-                    collect_uppercase_idents_from_expr(&def.value, &mut names);
-                }
-                _ => {}
-            }
-        }
-        names
+        collect_referenced_ident_nodes(self.module)
+            .into_iter()
+            .map(|id| id.name)
+            .collect()
     }
 }
 
-fn collect_uppercase_idents_from_item<'a>(kind: &'a BlockItemKind, out: &mut HashSet<&'a str>) {
+fn collect_uppercase_idents_from_item<'a>(
+    kind: &'a BlockItemKind,
+    out: &mut Vec<ReferencedIdent<'a>>,
+) {
     match kind {
         BlockItemKind::Clause { value, .. }
         | BlockItemKind::Assignment { value, .. }
@@ -3741,7 +3838,7 @@ fn collect_uppercase_idents_from_item<'a>(kind: &'a BlockItemKind, out: &mut Has
                 // imported module's contract, not a local declaration with the
                 // same name — those are collected as qualified references.
                 if e.qualifier.is_none() {
-                    out.insert(e.name.name.as_str());
+                    out.push(ReferencedIdent::unqualified(&e.name));
                 }
             }
         }
@@ -3749,10 +3846,10 @@ fn collect_uppercase_idents_from_item<'a>(kind: &'a BlockItemKind, out: &mut Has
     }
 }
 
-fn collect_uppercase_idents_from_expr<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
+fn collect_uppercase_idents_from_expr<'a>(expr: &'a Expr, out: &mut Vec<ReferencedIdent<'a>>) {
     match expr {
         Expr::Ident(id) if starts_uppercase(&id.name) => {
-            out.insert(&id.name);
+            out.push(ReferencedIdent::unqualified(id));
         }
         Expr::MemberAccess { object, .. } | Expr::OptionalAccess { object, .. } => {
             collect_uppercase_idents_from_expr(object, out);
@@ -3857,7 +3954,11 @@ fn collect_uppercase_idents_from_expr<'a>(expr: &'a Expr, out: &mut HashSet<&'a 
             collect_uppercase_idents_from_expr(source, out);
         }
         Expr::QualifiedName(q) => {
-            out.insert(&q.name);
+            out.push(ReferencedIdent {
+                name: &q.name,
+                span: q.span,
+                qualified: q.qualifier.is_some(),
+            });
         }
         _ => {}
     }
@@ -3909,35 +4010,67 @@ pub fn collect_qualified_references(module: &Module) -> Vec<(String, String)> {
 /// a name like `InputPartition` used without a qualifier may resolve to an
 /// imported module if it isn't declared locally.
 pub fn collect_all_referenced_idents(module: &Module) -> HashSet<String> {
-    let mut names: HashSet<&str> = HashSet::new();
+    collect_referenced_ident_nodes(module)
+        .into_iter()
+        .map(|id| id.name.to_string())
+        .collect()
+}
+
+/// An uppercase identifier referenced in an expression, with its span and
+/// whether the reference carried a `use` qualifier (`alias/Name`).
+struct ReferencedIdent<'a> {
+    name: &'a str,
+    span: Span,
+    /// `true` for the name part of a qualified reference. Qualified
+    /// references still count as references (for unused tracking) but are
+    /// never ambiguous — the qualifier names the source module.
+    qualified: bool,
+}
+
+impl<'a> ReferencedIdent<'a> {
+    fn unqualified(id: &'a Ident) -> Self {
+        Self {
+            name: &id.name,
+            span: id.span,
+            qualified: false,
+        }
+    }
+}
+
+/// Collect every uppercase identifier referenced in expressions across a
+/// module, with spans, in declaration order. Backing walk for
+/// [`collect_all_referenced_idents`] and the ambiguous-import check, which
+/// needs reference-site spans and qualifier information.
+fn collect_referenced_ident_nodes(module: &Module) -> Vec<ReferencedIdent<'_>> {
+    let mut idents: Vec<ReferencedIdent<'_>> = Vec::new();
     for d in &module.declarations {
         match d {
             Decl::Block(b) => {
                 for item in &b.items {
-                    collect_uppercase_idents_from_item(&item.kind, &mut names);
+                    collect_uppercase_idents_from_item(&item.kind, &mut idents);
                 }
             }
             Decl::Variant(v) => {
-                if let Some(name) = expr_as_ident(&v.base) {
-                    names.insert(name);
+                if let Expr::Ident(id) = &v.base {
+                    idents.push(ReferencedIdent::unqualified(id));
                 }
                 for item in &v.items {
-                    collect_uppercase_idents_from_item(&item.kind, &mut names);
+                    collect_uppercase_idents_from_item(&item.kind, &mut idents);
                 }
             }
             Decl::Invariant(inv) => {
-                collect_uppercase_idents_from_expr(&inv.body, &mut names);
+                collect_uppercase_idents_from_expr(&inv.body, &mut idents);
             }
             Decl::Default(def) => {
                 if let Some(tn) = &def.type_name {
-                    names.insert(tn.name.as_str());
+                    idents.push(ReferencedIdent::unqualified(tn));
                 }
-                collect_uppercase_idents_from_expr(&def.value, &mut names);
+                collect_uppercase_idents_from_expr(&def.value, &mut idents);
             }
             _ => {}
         }
     }
-    names.into_iter().map(|s| s.to_string()).collect()
+    idents
 }
 
 /// Collect all type names declared by a module (entities, external entities,
@@ -5522,6 +5655,53 @@ mod tests {
             &HashSet::new(),
             &HashSet::new(),
             &imported,
+            &AmbiguousImports::default(),
+        )
+    }
+
+    /// Helper for the ambiguous-import tests: analyse `src` in multi-file
+    /// mode with the given ambiguous name → aliases and trigger → aliases
+    /// maps. Trigger names in `triggers` are also registered as importable
+    /// (reachable) from each listed alias, mirroring how the CLI builds both
+    /// maps from the same targets.
+    fn analyze_with_ambiguous(
+        src: &str,
+        names: &[(&str, &[&str])],
+        triggers: &[(&str, &[&str])],
+    ) -> Vec<Diagnostic> {
+        let input = format!("-- allium: 3\n{src}");
+        let result = parse(&input);
+        let to_map = |entries: &[(&str, &[&str])]| -> HashMap<String, Vec<String>> {
+            entries
+                .iter()
+                .map(|(name, aliases)| {
+                    (
+                        name.to_string(),
+                        aliases.iter().map(|a| a.to_string()).collect(),
+                    )
+                })
+                .collect()
+        };
+        let ambiguous = AmbiguousImports {
+            names: to_map(names),
+            triggers: to_map(triggers),
+        };
+        let mut imported: HashMap<String, HashSet<String>> = HashMap::new();
+        for (trigger, aliases) in triggers {
+            for alias in *aliases {
+                imported
+                    .entry(alias.to_string())
+                    .or_default()
+                    .insert(trigger.to_string());
+            }
+        }
+        analyze_with_cross_module(
+            &result.module,
+            &input,
+            &HashSet::new(),
+            &HashSet::new(),
+            &imported,
+            &ambiguous,
         )
     }
 
@@ -5586,6 +5766,97 @@ mod tests {
             &[("emitter", &["SomethingElse"])],
         );
         assert!(has_code(&ds, "allium.rule.unreachableTrigger"));
+    }
+
+    // -- Ambiguous unqualified imported references (issue #15) --
+
+    #[test]
+    fn ambiguous_trigger_subscription_warns() {
+        let ds = analyze_with_ambiguous(
+            "use \"./a.allium\" as a\nuse \"./b.allium\" as b\n\nrule HandlePing {\n  when: Pinged(subject)\n  ensures: PingHandled(subject: subject)\n}\n",
+            &[],
+            &[("Pinged", &["a", "b"])],
+        );
+        let diag = ds
+            .iter()
+            .find(|d| d.code == Some("allium.use.ambiguousReference"))
+            .expect("ambiguous trigger subscription should warn");
+        assert!(diag.message.contains("'a' and 'b'"), "message: {}", diag.message);
+        assert!(diag.message.contains("a/Pinged"), "message: {}", diag.message);
+        // The subscription is reachable, so it must not also be unreachable.
+        assert!(!has_code(&ds, "allium.rule.unreachableTrigger"));
+    }
+
+    #[test]
+    fn ambiguous_trigger_not_flagged_when_emitted_locally() {
+        // A local emission resolves the subscription; imports are shadowed.
+        let ds = analyze_with_ambiguous(
+            "use \"./a.allium\" as a\nuse \"./b.allium\" as b\n\nrule Emit {\n  when: Start(x)\n  ensures: Pinged(subject: x)\n}\n\nrule HandlePing {\n  when: Pinged(subject)\n  ensures: PingHandled(subject: subject)\n}\n",
+            &[],
+            &[("Pinged", &["a", "b"])],
+        );
+        assert!(!has_code(&ds, "allium.use.ambiguousReference"));
+    }
+
+    #[test]
+    fn qualified_trigger_subscription_not_flagged_as_ambiguous() {
+        let ds = analyze_with_ambiguous(
+            "use \"./a.allium\" as a\nuse \"./b.allium\" as b\n\nrule HandlePing {\n  when: a/Pinged(subject)\n  ensures: PingHandled(subject: subject)\n}\n",
+            &[],
+            &[("Pinged", &["a", "b"])],
+        );
+        assert!(!has_code(&ds, "allium.use.ambiguousReference"));
+    }
+
+    #[test]
+    fn ambiguous_name_reference_warns() {
+        let ds = analyze_with_ambiguous(
+            "use \"./orders.allium\" as orders\nuse \"./billing.allium\" as billing\n\nrule Process {\n  when: OrderPlaced(order)\n  ensures: Invoice.created(id: order.id)\n}\n",
+            &[("Invoice", &["billing", "orders"])],
+            &[],
+        );
+        let diag = ds
+            .iter()
+            .find(|d| d.code == Some("allium.use.ambiguousReference"))
+            .expect("ambiguous unqualified name should warn");
+        assert!(
+            diag.message.contains("'billing' and 'orders'"),
+            "message: {}",
+            diag.message
+        );
+        assert!(diag.message.contains("billing/Invoice"), "message: {}", diag.message);
+    }
+
+    #[test]
+    fn ambiguous_name_shadowed_by_local_declaration() {
+        let ds = analyze_with_ambiguous(
+            "use \"./orders.allium\" as orders\nuse \"./billing.allium\" as billing\n\nentity Invoice {\n  id: String\n}\n\nrule Process {\n  when: OrderPlaced(order)\n  ensures: Invoice.created(id: order.id)\n}\n",
+            &[("Invoice", &["billing", "orders"])],
+            &[],
+        );
+        assert!(!has_code(&ds, "allium.use.ambiguousReference"));
+    }
+
+    #[test]
+    fn ambiguous_name_flagged_once_per_name() {
+        let ds = analyze_with_ambiguous(
+            "use \"./orders.allium\" as orders\nuse \"./billing.allium\" as billing\n\nrule Process {\n  when: OrderPlaced(order)\n  ensures: Invoice.created(id: order.id)\n}\n\nrule Audit {\n  when: AuditRequested(req)\n  ensures: Invoice.created(id: req.id)\n}\n",
+            &[("Invoice", &["billing", "orders"])],
+            &[],
+        );
+        let count = ds
+            .iter()
+            .filter(|d| d.code == Some("allium.use.ambiguousReference"))
+            .count();
+        assert_eq!(count, 1, "expected a single warning per ambiguous name");
+    }
+
+    #[test]
+    fn no_ambiguity_warnings_in_single_file_mode() {
+        let ds = analyze_src(
+            "use \"./orders.allium\" as orders\nuse \"./billing.allium\" as billing\n\nrule Process {\n  when: OrderPlaced(order)\n  ensures: Invoice.created(id: order.id)\n}\n",
+        );
+        assert!(!has_code(&ds, "allium.use.ambiguousReference"));
     }
 
     #[test]
@@ -5864,7 +6135,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./core.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &AmbiguousImports::default());
         assert!(!has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -5875,7 +6146,7 @@ mod tests {
         let result = parse(&input);
         // Only "./other.allium" is resolved — "./missing.allium" is not.
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &AmbiguousImports::default());
         assert!(has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -5896,7 +6167,7 @@ mod tests {
         let src = "use \"./missing.allium\" as missing\n\nentity Handler {\n  x: String\n}\n";
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new(), &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new(), &HashMap::new(), &AmbiguousImports::default());
         assert!(has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -5906,7 +6177,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &AmbiguousImports::default());
         let diag = ds.iter().find(|d| d.code == Some("allium.use.unresolvedPath")).unwrap();
         assert!(diag.message.contains("nowhere.allium"), "message should name the path: {}", diag.message);
     }
@@ -5917,7 +6188,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &AmbiguousImports::default());
         assert!(!has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -5927,7 +6198,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./found.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &AmbiguousImports::default());
         let unresolved: Vec<_> = ds.iter()
             .filter(|d| d.code == Some("allium.use.unresolvedPath"))
             .collect();
