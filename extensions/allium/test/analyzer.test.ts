@@ -769,6 +769,20 @@ test("reports undefined rule binding used in dotted reference", () => {
   assert.ok(findings.some((f) => f.code === "allium.rule.undefinedBinding"));
 });
 
+test("maps Rust undefined binding byte spans after non-ASCII text", () => {
+  const findings = analyzeAllium(
+    `-- café\nrule Notify {\n  when: Ping()\n  requires: user.status = active\n  ensures: Done()\n}\n`,
+  );
+  const finding = findings.find(
+    (f) => f.code === "allium.rule.undefinedBinding",
+  );
+  assert.ok(finding);
+  assert.equal(finding.start.line, 3);
+  assert.equal(finding.start.character, 12);
+  assert.equal(finding.end.line, 3);
+  assert.equal(finding.end.character, 16);
+});
+
 test("does not report binding defined by trigger parameter", () => {
   const findings = analyzeAllium(
     `rule Notify {\n  when: UserUpdated(user)\n  requires: user.status = active\n  ensures: Done()\n}\n`,
@@ -777,6 +791,40 @@ test("does not report binding defined by trigger parameter", () => {
     findings.some((f) => f.code === "allium.rule.undefinedBinding"),
     false,
   );
+});
+
+test("does not report binding defined by typed trigger parameter", () => {
+  const findings = analyzeAllium(
+    `entity User {\n  status: String\n}\n\nrule Notify {\n  when: UserUpdated(user: User)\n  requires: user.status = active\n  ensures: Done()\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.rule.undefinedBinding"),
+    false,
+  );
+});
+
+test("does not report binding defined by generic typed trigger parameter", () => {
+  const findings = analyzeAllium(
+    `entity User {\n  status: String\n}\n\nrule Notify {\n  when: UsersUpdated(users: List<User?>, metadata: Map<String, String>)\n  requires: users.count > 0\n  requires: metadata.count > 0\n  ensures: Done()\n}\n`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.rule.undefinedBinding"),
+    false,
+  );
+});
+
+test("does not treat named literal trigger argument as binding", () => {
+  const findings = analyzeAllium(
+    `rule Notify {\n  when: CommandInvoked(name: "npm run test")\n  requires: name.status = active\n  ensures: Done()\n}\n`,
+  );
+  assert.ok(findings.some((f) => f.code === "allium.rule.undefinedBinding"));
+});
+
+test("does not treat lowercase named trigger argument as typed binding", () => {
+  const findings = analyzeAllium(
+    `rule Notify {\n  when: FieldSelected(field: course_name)\n  requires: field.status = active\n  ensures: Done()\n}\n`,
+  );
+  assert.ok(findings.some((f) => f.code === "allium.rule.undefinedBinding"));
 });
 
 test("does not report binding defined in context block", () => {
