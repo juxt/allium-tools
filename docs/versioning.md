@@ -47,7 +47,7 @@ When the Allium language version changes (e.g. v2 → v3):
 1. Run `scripts/version-bump.sh <new-version>` to update all manifests.
 2. Update the language version statement at the top of this file.
 3. Update the "Compatibility" line in each external editor plugin README.
-4. After CI publishes the release, run `scripts/update-homebrew-formula.sh <version>` and push the tap repo. See `docs/releasing.md` for the full steps.
+4. CI publishes the release, the crates and the Homebrew formula automatically. See `docs/releasing.md` for the full steps.
 
 ## Rules
 
