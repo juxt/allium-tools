@@ -4619,8 +4619,14 @@ fn collect_bound_names<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
         }
         Expr::Call { args, .. } => {
             for arg in args {
-                if let CallArg::Positional(Expr::Ident(id)) = arg {
-                    out.insert(&id.name);
+                match arg {
+                    CallArg::Positional(Expr::Ident(id)) => {
+                        out.insert(&id.name);
+                    }
+                    CallArg::Named(named) if is_type_annotation_expr(&named.value) => {
+                        out.insert(&named.name.name);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -4629,6 +4635,21 @@ fn collect_bound_names<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
             collect_bound_names(right, out);
         }
         _ => {}
+    }
+}
+
+fn is_type_annotation_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident(id) => starts_uppercase(&id.name),
+        Expr::QualifiedName(q) => starts_uppercase(&q.name),
+        Expr::GenericType { name, args, .. } => {
+            is_type_annotation_expr(name) && args.iter().all(is_type_annotation_expr)
+        }
+        Expr::Pipe { left, right, .. } => {
+            is_type_annotation_expr(left) && is_type_annotation_expr(right)
+        }
+        Expr::TypeOptional { inner, .. } => is_type_annotation_expr(inner),
+        _ => false,
     }
 }
 
@@ -5224,6 +5245,39 @@ mod tests {
             "surface QuoteFeed {\n  facing _: Service\n  exposes:\n    System.status\n}\n",
         );
         assert!(!has_code(&ds, "allium.surface.unusedBinding"));
+    }
+
+    // -- Rule bindings --
+
+    #[test]
+    fn typed_call_trigger_param_is_bound() {
+        let ds = analyze_src(
+            "entity Account {\n  name: String\n}\n\n\
+             entity Greeting {\n  label: String\n}\n\n\
+             rule TypedParam {\n  when: AccountSeen(account: Account)\n  \
+             ensures: Greeting.created(label: account.name)\n}\n",
+        );
+        assert!(!has_code(&ds, "allium.rule.undefinedBinding"));
+    }
+
+    #[test]
+    fn generic_typed_call_trigger_param_is_bound() {
+        let ds = analyze_src(
+            "entity Account {\n  name: String\n}\n\n\
+             entity Greeting {\n  label: String\n}\n\n\
+             rule GenericTypedParam {\n  when: AccountsSeen(accounts: List<Account>)\n  \
+             ensures: Greeting.created(label: accounts.count)\n}\n",
+        );
+        assert!(!has_code(&ds, "allium.rule.undefinedBinding"));
+    }
+
+    #[test]
+    fn named_literal_trigger_arg_is_not_binding() {
+        let ds = analyze_src(
+            "rule LiteralFilter {\n  when: CommandInvoked(name: \"npm run test\")\n  \
+             requires: name.status = active\n  ensures: Done()\n}\n",
+        );
+        assert!(has_code(&ds, "allium.rule.undefinedBinding"));
     }
 
     // -- Status state machine --
