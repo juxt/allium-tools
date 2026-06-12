@@ -108,6 +108,7 @@ export interface WasmVariantDecl {
 export interface WasmDeferredDecl {
 	span: WasmSpan;
 	path: WasmExpr;
+	location_hint: WasmStringLiteral | null;
 }
 
 export interface WasmOpenQuestionDecl {

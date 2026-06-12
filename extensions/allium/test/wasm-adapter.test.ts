@@ -31,6 +31,27 @@ test("parseAlliumDocument: qualified contract names parse cleanly (issue #21)", 
 	);
 });
 
+test("parseAlliumDocument: deferred dotted, qualified, and hinted paths parse cleanly (issue #24)", () => {
+	const doc = parseAlliumDocument(
+		'-- allium: 3\nuse "./billing.allium" as billing\n\ndeferred InterviewerMatching.suggest -- see: detailed/matching.allium\ndeferred billing/InvoiceWorkflow.initiate -- see: billing.allium\ndeferred SlotRecovery.initiate "detailed/slot-recovery.allium"\n',
+	);
+	assert.equal(
+		doc.diagnostics.filter((d) => d.severity === "Error").length,
+		0,
+		`expected no parse errors, got ${JSON.stringify(doc.diagnostics)}`,
+	);
+});
+
+test("parseAlliumDocument: expression-shaped deferred paths are parse errors (issue #24)", () => {
+	for (const line of ['deferred Foo("x")', 'deferred Foo = "x"', "deferred (Foo)"]) {
+		const doc = parseAlliumDocument(`-- allium: 3\n${line}\n`);
+		assert.ok(
+			doc.diagnostics.some((d) => d.severity === "Error"),
+			`expected a parse error for ${JSON.stringify(line)}`,
+		);
+	}
+});
+
 test("parseAlliumDocument: clean spec has no diagnostics", () => {
 	const doc = parseAlliumDocument(
 		"-- allium: 1\nentity Order {\n  total: Integer\n}\n",

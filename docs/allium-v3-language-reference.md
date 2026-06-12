@@ -1378,6 +1378,25 @@ deferred SlotRecovery.initiate          -- see: slot-recovery.allium
 
 This allows the main specification to remain succinct while acknowledging that detail exists elsewhere.
 
+The deferred path is a dotted name — not a general expression — with an optional `use`-alias qualifier, following the same coordinate system as other cross-module references:
+
+```
+deferred Name
+deferred Name.field.sub
+deferred billing/InvoiceWorkflow            -- imported via `use ... as billing`
+deferred billing/InvoiceWorkflow.initiate
+```
+
+Calls, operators, and parenthesised forms are not valid deferred paths. The whole path must sit on one line.
+
+A location hint tells readers and tooling where the detail lives. It is either a trailing comment on the declaration line — a `-- see: <path>` marker or a URL — or a quoted path that is part of the declaration itself:
+
+```
+deferred SlotRecovery.initiate "detailed/slot-recovery.allium"
+```
+
+The checker warns on deferred declarations that carry no location hint in either form.
+
 Deferred specifications are invoked at call sites using dot notation. They can appear as standalone ensures clauses or as expressions that return a value:
 
 ```

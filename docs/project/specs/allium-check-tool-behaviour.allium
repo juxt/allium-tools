@@ -334,3 +334,13 @@ rule DeferredWithLocationHintSuppressesWarning {
 
     ensures: FindingNotObserved(code: "allium.deferred.missingLocationHint", declaration: deferred_declaration)
 }
+
+rule DeferredPathConstrainedToDottedName {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: file contains deferred_declaration
+    requires: deferred_declaration path is not a dotted name with an optional use-alias qualifier
+    -- accepted forms: Name, Name.field.sub, alias/Name, alias/Name.field,
+    -- each optionally followed by a quoted location hint on the same line
+
+    ensures: FindingObserved(severity: error)
+}

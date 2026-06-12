@@ -4343,10 +4343,11 @@ impl Ctx<'_> {
             // `^\s*deferred\s+([A-Za-z_][A-Za-z0-9_.]*)(.*)$` and applies the
             // predicate to the suffix after the captured name. Replay that match
             // from the `deferred` keyword rather than trusting the parsed path's
-            // span — the parsed expression can extend past the flat name (qualified
-            // `alias/Name` paths, expression-shaped paths like `Foo("x")`) or start
-            // after it (`deferred (Foo)`), which would move the suffix boundary and
-            // flip the verdict. Scanning the suffix (not the whole line) matters for
+            // span — the path grammar stops before a dangling `.` that the
+            // TypeScript capture includes (`deferred Foo.`), and a qualified
+            // `alias/Name` path extends past the flat name the capture stops at —
+            // either would move the suffix boundary and flip the verdict or the
+            // reported name. Scanning the suffix (not the whole line) matters for
             // the URL markers, whose leading letters would otherwise be misread as
             // part of an unspaced path (e.g. `Foohttps://x`).
             // The JavaScript `m` flag anchors `^`/`$` at `\n`, `\r`, U+2028 and
@@ -6258,14 +6259,29 @@ mod tests {
 
     #[test]
     fn deferred_expression_path_with_quote_suppresses() {
-        // The parsed path of an expression-shaped deferred declaration extends past
-        // the flat name, so a suffix scan anchored at `path.span().end` would miss
-        // the quote. The check replays the TypeScript name capture instead, so the
-        // quote lands in the suffix and suppresses — matching the TS analyzer.
+        // An expression-shaped line still forms a `DeferredDecl` for the flat
+        // name (the leftover tokens error at declaration level), and the
+        // replayed TypeScript capture puts the quote in the suffix — so the
+        // warning stays suppressed, matching the TS analyzer's regex lane.
         let ds = analyze_src("deferred Foo(\"x\")\n");
         assert!(!has_code(&ds, "allium.deferred.missingLocationHint"));
         let ds = analyze_src("deferred Foo = \"x\"\n");
         assert!(!has_code(&ds, "allium.deferred.missingLocationHint"));
+    }
+
+    #[test]
+    fn deferred_trailing_dot_warns_with_captured_name() {
+        // The path grammar stops before the dangling `.`, so the declaration
+        // still forms and the hint check runs; the TypeScript capture includes
+        // the dot, so both sides warn under `Dangling.` (plus a parse error on
+        // the leftover dot, identical in both front ends).
+        let ds = analyze_src("deferred Dangling.\n");
+        let hints: Vec<&Diagnostic> = ds
+            .iter()
+            .filter(|d| d.code == Some("allium.deferred.missingLocationHint"))
+            .collect();
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].message.contains("'Dangling.'"));
     }
 
     #[test]
@@ -6286,9 +6302,10 @@ mod tests {
 
     #[test]
     fn deferred_unmatchable_path_stays_silent() {
-        // The TypeScript regex requires `deferred` + whitespace + `[A-Za-z_]`; a
-        // parenthesised path never matches it (the paren is not part of the parsed
-        // path's span, so anchoring on the span would wrongly find a name).
+        // A parenthesised path fails the path grammar (`expected deferred
+        // name`), so no `DeferredDecl` forms and no warning fires; the
+        // TypeScript regex lane never matches the paren either. Both sides
+        // surface the same parse error instead.
         let ds = analyze_src("deferred (Foo)\n");
         assert!(!has_code(&ds, "allium.deferred.missingLocationHint"));
     }
