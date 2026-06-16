@@ -1307,3 +1307,48 @@ test("accepts a qualified type name in a default declaration", () => {
     false,
   );
 });
+
+// Default field-schema drift + rule 14c (allium/#43 follow-up)
+test("flags unknown fields in a default (drift), including nested", () => {
+  const top = analyzeAllium(
+    `entity Policy {\n  id: String\n}\ndefault Policy p = { id: "x", naem: "typo" }`,
+  );
+  assert.ok(top.some((f) => f.code === "allium.default.unknownField"));
+
+  const nested = analyzeAllium(
+    `value P {\n  clause_order: List<String>\n}\nentity Policy {\n  id: String\n  predicate: P\n}\ndefault Policy p = { id: "x", predicate: { bogus: 5 } }`,
+  );
+  assert.ok(nested.some((f) => f.code === "allium.default.unknownField"));
+});
+
+test("does not flag known fields, or fields on a qualified (imported) default", () => {
+  const known = analyzeAllium(
+    `entity E {\n  id: String\n  label: String\n}\ndefault E e = { id: "x", label: "y" }`,
+  );
+  assert.equal(
+    known.some((f) => f.code === "allium.default.unknownField"),
+    false,
+  );
+  const qualified = analyzeAllium(
+    `use "./p.allium" as gp\n\ndefault gp/Policy p = { anything: 1, goes: 2 }`,
+  );
+  assert.equal(
+    qualified.some((f) => f.code === "allium.default.unknownField"),
+    false,
+  );
+});
+
+test("rule 14c: empty list literal must target a List<T> field", () => {
+  const bad = analyzeAllium(
+    `entity E {\n  id: String\n}\ndefault E e = { id: [] }`,
+  );
+  assert.ok(bad.some((f) => f.code === "allium.list.emptyListNoElementType"));
+
+  const ok = analyzeAllium(
+    `entity E {\n  tags: List<String>\n}\ndefault E e = { tags: [] }`,
+  );
+  assert.equal(
+    ok.some((f) => f.code === "allium.list.emptyListNoElementType"),
+    false,
+  );
+});

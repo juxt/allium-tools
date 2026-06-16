@@ -223,6 +223,8 @@ double-firing on the body.
 | `allium.let.duplicateBinding` | error | Yes | Yes |
 | `allium.config.undefinedReference` | warning | Yes | Yes |
 | `allium.list.mixedElementTypes` | error | Yes | Yes |
+| `allium.list.emptyListNoElementType` | error | Yes | Yes |
+| `allium.default.unknownField` | error | Yes | Yes |
 | `allium.surface.unusedPath` | info | Disabled | Yes |
 
 Two language features were added for juxt/allium#43:
@@ -243,11 +245,17 @@ Two language features were added for juxt/allium#43:
   qualified triggers and config references. Both implementations validate that
   the alias is a known `use` import and emit `allium.default.undefinedImportedAlias`
   otherwise (Rust: `check_qualified_default_aliases`; TypeScript:
-  `findDefaultTypeReferenceIssues`). Note this does not yet validate the
-  literal's field set against the imported entity's schema — the checker has no
-  default-field-set validation in either implementation, so the cross-module
-  drift detection envisioned in the issue is not implemented; the qualified form
-  parses and resolves, removing the need to redeclare the type locally.
+  `findDefaultTypeReferenceIssues`). Default literals are validated against the
+  declared schema of **local** entity/value types (`check_default_field_schemas`
+  / `findDefaultFieldSchemaIssues`): a field the type does not declare is
+  reported as `allium.default.unknownField` (recursing into nested object
+  literals), and an empty list literal whose target field is not a `List<T>` is
+  reported as `allium.list.emptyListNoElementType` (language-reference rule 14c).
+  Qualified (imported) default types are **not** validated this way — their field
+  schema is not visible to a single-module pass; cross-module drift detection
+  would require plumbing imported entity field sets through `CrossModuleContext`
+  (as is done for triggers) and would be CLI-multi-file-only, since the
+  single-file TypeScript analyzer cannot see other modules.
 
 `allium.surface.requiresWithoutDeferred` is TypeScript-only (no Rust equivalent yet). When porting it, note the deferred-name matching semantics fixed in issue #26: a named requires block matches a deferred declaration by its full name, by a trailing `.`-separated segment, or — for module-qualified declarations like `deferred billing/InvoiceWorkflow` — by the unqualified name after the `alias/` prefix. The alias alone must not satisfy the match.
 
