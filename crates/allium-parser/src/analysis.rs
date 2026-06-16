@@ -4440,9 +4440,40 @@ impl Ctx<'_> {
                         )
                         .with_code("allium.rule.invalidTrigger"),
                     );
+                } else if let Some((param, span)) = first_named_trigger_param(value) {
+                    self.push(
+                        Diagnostic::error(
+                            span,
+                            format!(
+                                "Rule '{rule_name}' trigger parameter '{param}' uses a 'name: value' form. External-stimulus and chained trigger parameters are bare names (optionally suffixed with '?', or '_' to discard); the 'name: value' form is only valid in trigger emissions. Write '{param}' without the annotation.",
+                            ),
+                        )
+                        .with_code("allium.rule.invalidTrigger"),
+                    );
                 }
             }
         }
+    }
+}
+
+/// Finds the first named/typed parameter in an external-stimulus or chained
+/// trigger call (e.g. `when: AccountSeen(account: Account)`). The receiving
+/// side of such triggers takes bare parameter names; the `name: value` form is
+/// reserved for trigger *emissions*. Recurses into `or`-combined triggers,
+/// mirroring `is_valid_trigger`. Returns the offending param name and its span.
+fn first_named_trigger_param(expr: &Expr) -> Option<(&str, Span)> {
+    match expr {
+        Expr::Call { args, .. } => args.iter().find_map(|arg| match arg {
+            CallArg::Named(n) => Some((n.name.name.as_str(), n.span)),
+            _ => None,
+        }),
+        Expr::LogicalOp {
+            op: LogicalOp::Or,
+            left,
+            right,
+            ..
+        } => first_named_trigger_param(left).or_else(|| first_named_trigger_param(right)),
+        _ => None,
     }
 }
 
@@ -4619,8 +4650,19 @@ fn collect_bound_names<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
         }
         Expr::Call { args, .. } => {
             for arg in args {
-                if let CallArg::Positional(Expr::Ident(id)) = arg {
-                    out.insert(&id.name);
+                match arg {
+                    CallArg::Positional(Expr::Ident(id)) => {
+                        out.insert(&id.name);
+                    }
+                    // A named/typed param (`account: Account`) is an invalid
+                    // trigger form, reported separately by
+                    // `first_named_trigger_param`. Still bind the name so the
+                    // malformed trigger doesn't also produce a misleading
+                    // `undefinedBinding` on every body reference to it.
+                    CallArg::Named(n) => {
+                        out.insert(&n.name.name);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -6356,6 +6398,39 @@ mod tests {
             "use \"./emitter.allium\" as emitter\n\nrule HandlePing {\n  when: emitter/Pinged(subject)\n  ensures: PingHandled(subject: subject)\n}\n",
         );
         assert!(!has_code(&ds, "allium.rule.invalidTrigger"));
+    }
+
+    #[test]
+    fn typed_trigger_param_reported_at_trigger() {
+        // `when: AccountSeen(account: Account)` — external-stimulus trigger
+        // params are bare names; the `name: value` form is invalid here
+        // (allium-tools#42). The diagnostic must land on the trigger param, not
+        // produce a misleading `undefinedBinding` on each body reference.
+        let ds = analyze_src(
+            "entity Account { name: String }\nentity Greeting { label: String }\n\nrule TypedParam {\n  when: AccountSeen(account: Account)\n  ensures: Greeting.created(label: account.name)\n}\n",
+        );
+        let invalid: Vec<&Diagnostic> = ds
+            .iter()
+            .filter(|d| d.code == Some("allium.rule.invalidTrigger"))
+            .collect();
+        assert_eq!(invalid.len(), 1, "exactly one invalidTrigger diagnostic");
+        assert!(invalid[0].message.contains("'account'"));
+        assert!(invalid[0].message.contains("bare names"));
+        // The misplaced body diagnostic must be suppressed.
+        assert!(
+            !has_code(&ds, "allium.rule.undefinedBinding"),
+            "typed trigger param must not also fire undefinedBinding on the body"
+        );
+    }
+
+    #[test]
+    fn untyped_trigger_param_ok() {
+        // The bare-name form is the correct way to declare a trigger param.
+        let ds = analyze_src(
+            "entity Account { name: String }\nentity Greeting { label: String }\n\nrule UntypedParam {\n  when: AccountSeen(account)\n  ensures: Greeting.created(label: account.name)\n}\n",
+        );
+        assert!(!has_code(&ds, "allium.rule.invalidTrigger"));
+        assert!(!has_code(&ds, "allium.rule.undefinedBinding"));
     }
 
     // -- Duplicate let --
