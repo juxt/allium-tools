@@ -77,6 +77,8 @@ pub enum BlockKind {
 #[derive(Debug, Clone, Serialize)]
 pub struct DefaultDecl {
     pub span: Span,
+    /// Module alias for a qualified type name (`default alias/Type name = ...`).
+    pub type_alias: Option<Ident>,
     pub type_name: Option<Ident>,
     pub name: Ident,
     pub value: Expr,
@@ -295,6 +297,9 @@ pub enum Expr {
     /// `{ a, b, c }` — set literal
     SetLiteral { span: Span, elements: Vec<Expr> },
 
+    /// `[ a, b, c ]` — list literal (ordered, duplicates permitted; produces `List<T>`)
+    ListLiteral { span: Span, elements: Vec<Expr> },
+
     /// `{ key: value, ... }` — object literal
     ObjectLiteral { span: Span, fields: Vec<NamedArg> },
 
@@ -501,6 +506,7 @@ impl Expr {
             | Expr::Within { span }
             | Expr::DurationLiteral { span, .. }
             | Expr::SetLiteral { span, .. }
+            | Expr::ListLiteral { span, .. }
             | Expr::ObjectLiteral { span, .. }
             | Expr::GenericType { span, .. }
             | Expr::MemberAccess { span, .. }

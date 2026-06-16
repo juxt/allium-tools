@@ -549,24 +549,39 @@ impl<'s> Parser<'s> {
     fn parse_default_decl(&mut self) -> Option<DefaultDecl> {
         let start = self.expect(TokenKind::Default)?.span;
 
-        // `default [TypeName] instanceName = value`
-        // The type name is optional. If the next two tokens are both words
-        // and the second is followed by `=`, the first is the type.
-        let (type_name, name) = if self.peek_kind().is_word()
+        // `default [alias/][TypeName] instanceName = value`
+        // The type name is optional and may be qualified by a module alias.
+        // Disambiguate by lookahead to the `=` that precedes the value:
+        //   alias / Type name =   -> qualified type
+        //   Type name =           -> unqualified type
+        //   name =                -> no type
+        let (type_alias, type_name, name) = if self.peek_kind().is_word()
+            && self.peek_at(1).kind == TokenKind::Slash
+            && self.peek_at(2).kind.is_word()
+            && self.peek_at(3).kind.is_word()
+            && self.peek_at(4).kind == TokenKind::Eq
+        {
+            let alias = self.parse_ident_in("module alias")?;
+            self.expect(TokenKind::Slash)?;
+            let t = self.parse_ident_in("type name")?;
+            let n = self.parse_ident_in("default name")?;
+            (Some(alias), Some(t), n)
+        } else if self.peek_kind().is_word()
             && self.peek_at(1).kind.is_word()
             && self.peek_at(2).kind == TokenKind::Eq
         {
             let t = self.parse_ident_in("type name")?;
             let n = self.parse_ident_in("default name")?;
-            (Some(t), n)
+            (None, Some(t), n)
         } else {
-            (None, self.parse_ident_in("default name")?)
+            (None, None, self.parse_ident_in("default name")?)
         };
 
         self.expect(TokenKind::Eq)?;
         let value = self.parse_expr(0)?;
         Some(DefaultDecl {
             span: start.merge(value.span()),
+            type_alias,
             type_name,
             name,
             value,
@@ -1798,11 +1813,7 @@ impl<'s> Parser<'s> {
             TokenKind::If => self.parse_if_expr(),
             TokenKind::For => self.parse_for_expr(),
             TokenKind::LBrace => self.parse_brace_expr(),
-            TokenKind::LBracket => {
-                let t = self.advance();
-                self.error(t.span, "list literals `[...]` are not supported; use `Set<T>` type annotation or `{...}` set literal");
-                None
-            }
+            TokenKind::LBracket => self.parse_list_literal(),
             TokenKind::LParen => self.parse_paren_expr(),
             TokenKind::Number => {
                 let t = self.advance();
@@ -2498,6 +2509,22 @@ impl<'s> Parser<'s> {
         }
         let end = self.expect(TokenKind::RBrace)?.span;
         Some(Expr::SetLiteral {
+            span: start.merge(end),
+            elements,
+        })
+    }
+
+    // `[ a, b, c ]` — list literal. Ordered, duplicates permitted; produces
+    // `List<T>`. Valid in any expression position, like the `{...}` set literal.
+    fn parse_list_literal(&mut self) -> Option<Expr> {
+        let start = self.advance().span; // consume [
+        let mut elements = Vec::new();
+        while !self.at(TokenKind::RBracket) && !self.at_eof() {
+            elements.push(self.parse_expr(0)?);
+            self.eat(TokenKind::Comma);
+        }
+        let end = self.expect(TokenKind::RBracket)?.span;
+        Some(Expr::ListLiteral {
             span: start.merge(end),
             elements,
         })
@@ -3227,8 +3254,8 @@ rule ProcessDigests {
     }
 
     #[test]
-    fn spec_reject_list_literal() {
-        // The spec does not define `[...]` list literal syntax.
+    fn spec_list_literal_parses() {
+        // `[...]` list literals are valid in any expression position.
         let src = r#"rule R {
     when: X()
     ensures:
@@ -3236,10 +3263,36 @@ rule ProcessDigests {
         Done()
 }"#;
         let r = parse_ok(src);
-        assert!(
-            r.diagnostics.iter().any(|d| d.severity == Severity::Error),
-            "expected error for `[...]` list literal (not in spec), but parsed without errors"
-        );
+        assert_eq!(r.diagnostics.len(), 0, "list literal should parse cleanly");
+    }
+
+    #[test]
+    fn list_literal_ast_shape() {
+        let r = parse_ok("default E e = { items: [1, 2, 3] }");
+        let Decl::Default(def) = &r.module.declarations[0] else { panic!() };
+        let Expr::ObjectLiteral { fields, .. } = &def.value else { panic!("expected object literal") };
+        let Expr::ListLiteral { elements, .. } = &fields[0].value else {
+            panic!("expected ListLiteral, got {:?}", fields[0].value)
+        };
+        assert_eq!(elements.len(), 3);
+    }
+
+    #[test]
+    fn empty_list_literal_parses() {
+        let r = parse_ok("default E e = { items: [] }");
+        assert_eq!(r.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn qualified_default_type_parses() {
+        let r = parse_ok("use \"./p.allium\" as gp\n\ndefault gp/Policy my_policy = { id: \"x\" }");
+        let def = r.module.declarations.iter().find_map(|d| match d {
+            Decl::Default(def) => Some(def),
+            _ => None,
+        }).expect("default decl");
+        assert_eq!(def.type_alias.as_ref().map(|a| a.name.as_str()), Some("gp"));
+        assert_eq!(def.type_name.as_ref().map(|t| t.name.as_str()), Some("Policy"));
+        assert_eq!(def.name.name, "my_policy");
     }
 
     // -- given block ----------------------------------------------------------

@@ -222,7 +222,25 @@ double-firing on the body.
 | `allium.rule.undefinedBinding` | error | Yes | Yes |
 | `allium.let.duplicateBinding` | error | Yes | Yes |
 | `allium.config.undefinedReference` | warning | Yes | Yes |
+| `allium.list.mixedElementTypes` | error | Yes | Yes |
 | `allium.surface.unusedPath` | info | Disabled | Yes |
+
+Two language features were added for juxt/allium#43:
+
+- **`[...]` list literals** producing `List<T>`, valid in any expression
+  position. Parsing lives in the Rust front end (`parse_list_literal`,
+  `Expr::ListLiteral`) and so reaches both implementations through the WASM
+  parser; the previous "list literals are not supported" rejection was removed.
+  `allium.list.mixedElementTypes` flags a list whose elements are of differing
+  literal types (e.g. `["a", 5]`); elements whose type is not determinable
+  without a type system (identifiers, calls) are skipped, so there are no false
+  positives. The Rust check (`check_list_literal_homogeneity`) and the
+  TypeScript check (`findListLiteralHomogeneityIssues`, which walks the
+  front-end AST) emit byte-identical messages.
+- **Qualified type names in `default` declarations** (`default alias/Type x = ...`).
+  Parsing is in the Rust front end (`DefaultDecl.type_alias`) and reaches both
+  implementations via WASM; the qualified name resolves cross-module, like
+  qualified triggers and config references.
 
 `allium.surface.requiresWithoutDeferred` is TypeScript-only (no Rust equivalent yet). When porting it, note the deferred-name matching semantics fixed in issue #26: a named requires block matches a deferred declaration by its full name, by a trailing `.`-separated segment, or — for module-qualified declarations like `deferred billing/InvoiceWorkflow` — by the unqualified name after the `alias/` prefix. The alias alone must not satisfy the match.
 

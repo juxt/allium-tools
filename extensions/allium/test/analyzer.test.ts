@@ -1259,3 +1259,51 @@ test("downgrades external entity source hint to info when referenced in rule log
   assert.ok(hint);
   assert.equal(hint?.severity, "info");
 });
+
+// List literals (allium/#43 Gap A)
+test("accepts a list literal and flags heterogeneous elements", () => {
+  const ok = analyzeAllium(
+    `entity E {\n  items: List<String>\n}\ndefault E e = { items: ["a", "b"] }`,
+  );
+  assert.equal(
+    ok.some((f) => f.code === "allium.parse.error"),
+    false,
+  );
+  assert.equal(
+    ok.some((f) => f.code === "allium.list.mixedElementTypes"),
+    false,
+  );
+
+  const bad = analyzeAllium(
+    `entity E {\n  items: List<Integer>\n}\ndefault E e = { items: ["a", 5] }`,
+  );
+  assert.ok(bad.some((f) => f.code === "allium.list.mixedElementTypes"));
+});
+
+test("does not flag empty or non-literal list elements", () => {
+  const empty = analyzeAllium(
+    `entity E {\n  items: List<String>\n}\ndefault E e = { items: [] }`,
+  );
+  assert.equal(
+    empty.some((f) => f.code === "allium.list.mixedElementTypes"),
+    false,
+  );
+  const idents = analyzeAllium(
+    `entity E {\n  items: List<String>\n}\ndefault E e = { items: [foo, bar] }`,
+  );
+  assert.equal(
+    idents.some((f) => f.code === "allium.list.mixedElementTypes"),
+    false,
+  );
+});
+
+// Qualified type names in default declarations (allium/#43 Gap B)
+test("accepts a qualified type name in a default declaration", () => {
+  const findings = analyzeAllium(
+    `use "./parent.allium" as gp\n\ndefault gp/Policy my_policy = { id: "p1" }`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.parse.error"),
+    false,
+  );
+});

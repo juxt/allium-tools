@@ -3,6 +3,7 @@ import {
   parseAlliumBlocks,
   parseAlliumDocument,
 } from "./parser";
+import { parseAllium } from "./wasm-ast";
 import type { WasmDiagnostic } from "./wasm-ast";
 
 export type FindingSeverity = "error" | "warning" | "info";
@@ -120,6 +121,7 @@ export function analyzeAllium(
     }
   }
   findings.push(...findInvalidTriggerIssues(lineStarts, blocks));
+  findings.push(...findListLiteralHomogeneityIssues(text, lineStarts));
 
   findings.push(...findDuplicateConfigKeys(maskedText, lineStarts, blocks));
   findings.push(...findDuplicateDefaultNames(maskedText, lineStarts));
@@ -1485,7 +1487,7 @@ function findDuplicateDefaultNames(
   const findings: Finding[] = [];
   const seen = new Set<string>();
   const pattern =
-    /^\s*default\s+[A-Za-z_][A-Za-z0-9_]*(?:\s+([A-Za-z_][A-Za-z0-9_]*))?\s*=/gm;
+    /^\s*default\s+[A-Za-z_][A-Za-z0-9_]*(?:\/[A-Za-z_][A-Za-z0-9_]*)?(?:\s+([A-Za-z_][A-Za-z0-9_]*))?\s*=/gm;
   for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
     const instanceName = match[1];
     if (!instanceName) {
@@ -2639,6 +2641,88 @@ function offsetToPosition(
   }
 
   return { line: 0, character: offset };
+}
+
+// Literal AST variants whose type is determinable without a type system, for
+// the list-literal homogeneity check. Mirrors `literal_kind` in the Rust
+// analyzer; elements of any other variant (identifiers, calls, ...) have
+// unknown type and are skipped so we never report a false positive.
+const LIST_LITERAL_ELEMENT_KIND: Record<string, string> = {
+  StringLiteral: "string",
+  NumberLiteral: "number",
+  BoolLiteral: "boolean",
+  DurationLiteral: "duration",
+  BacktickLiteral: "backtick literal",
+};
+
+/**
+ * Flags list literals whose elements are of differing literal types
+ * (e.g. `["a", 5]`). Walks the raw front-end AST, since the analyzer's other
+ * lanes work on text/blocks and have no expression tree. Kept in parity with
+ * the Rust `check_list_literal_homogeneity`.
+ */
+function findListLiteralHomogeneityIssues(
+  text: string,
+  lineStarts: number[],
+): Finding[] {
+  const findings: Finding[] = [];
+  let module: unknown;
+  try {
+    module = parseAllium(text).module;
+  } catch {
+    return findings;
+  }
+
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        visit(item);
+      }
+      return;
+    }
+    if (!node || typeof node !== "object") {
+      return;
+    }
+    const obj = node as Record<string, unknown>;
+    const listLit = obj.ListLiteral as
+      | { span?: { start: number; end: number }; elements?: unknown[] }
+      | undefined;
+    if (listLit && Array.isArray(listLit.elements)) {
+      let firstKind: string | undefined;
+      for (const el of listLit.elements) {
+        if (!el || typeof el !== "object") {
+          continue;
+        }
+        const variant = Object.keys(el as object)[0];
+        const kind = LIST_LITERAL_ELEMENT_KIND[variant];
+        if (!kind) {
+          continue;
+        }
+        if (firstKind === undefined) {
+          firstKind = kind;
+        } else if (firstKind !== kind) {
+          const span = listLit.span ?? { start: 0, end: 0 };
+          findings.push(
+            rangeFinding(
+              lineStarts,
+              span.start,
+              span.end,
+              "allium.list.mixedElementTypes",
+              `List literal has elements of differing types ('${firstKind}' and '${kind}'); all elements of a list must share a type.`,
+              "error",
+            ),
+          );
+          break;
+        }
+      }
+    }
+    for (const value of Object.values(obj)) {
+      visit(value);
+    }
+  };
+
+  visit(module);
+  return findings;
 }
 
 function rangeFinding(
