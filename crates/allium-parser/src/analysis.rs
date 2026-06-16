@@ -94,6 +94,8 @@ fn run_checks(mut ctx: Ctx<'_>, source: &str) -> Vec<Diagnostic> {
     ctx.check_rule_undefined_bindings();
     ctx.check_duplicate_let_bindings();
     ctx.check_config_undefined_references();
+    ctx.check_list_literal_homogeneity();
+    ctx.check_qualified_default_aliases();
 
     apply_suppressions(ctx.diagnostics, source)
 }
@@ -3663,7 +3665,7 @@ fn collect_accessed_fields_from_expr<'a>(expr: &'a Expr, out: &mut HashSet<&'a s
             collect_accessed_fields_from_expr(subject, out);
             collect_accessed_fields_from_expr(new_state, out);
         }
-        Expr::SetLiteral { elements, .. } => {
+        Expr::SetLiteral { elements, .. } | Expr::ListLiteral { elements, .. } => {
             for e in elements {
                 collect_accessed_fields_from_expr(e, out);
             }
@@ -3940,7 +3942,7 @@ fn collect_uppercase_idents_from_expr<'a>(expr: &'a Expr, out: &mut Vec<Referenc
                 collect_uppercase_idents_from_expr(a, out);
             }
         }
-        Expr::SetLiteral { elements, .. } => {
+        Expr::SetLiteral { elements, .. } | Expr::ListLiteral { elements, .. } => {
             for e in elements {
                 collect_uppercase_idents_from_expr(e, out);
             }
@@ -4035,6 +4037,14 @@ impl<'a> ReferencedIdent<'a> {
             qualified: false,
         }
     }
+
+    fn qualified(id: &'a Ident) -> Self {
+        Self {
+            name: &id.name,
+            span: id.span,
+            qualified: true,
+        }
+    }
 }
 
 /// Collect every uppercase identifier referenced in expressions across a
@@ -4063,7 +4073,15 @@ fn collect_referenced_ident_nodes(module: &Module) -> Vec<ReferencedIdent<'_>> {
             }
             Decl::Default(def) => {
                 if let Some(tn) = &def.type_name {
-                    idents.push(ReferencedIdent::unqualified(tn));
+                    // A qualified type (`default alias/Type x = ...`) names an
+                    // entity from an imported module; mark it qualified so it
+                    // resolves cross-module rather than being flagged as an
+                    // undefined local type.
+                    if def.type_alias.is_some() {
+                        idents.push(ReferencedIdent::qualified(tn));
+                    } else {
+                        idents.push(ReferencedIdent::unqualified(tn));
+                    }
                 }
                 collect_uppercase_idents_from_expr(&def.value, &mut idents);
             }
@@ -4308,7 +4326,7 @@ fn collect_qrefs_from_expr(expr: &Expr, out: &mut Vec<(String, String)>) {
                 collect_qrefs_from_expr(a, out);
             }
         }
-        Expr::SetLiteral { elements, .. } => {
+        Expr::SetLiteral { elements, .. } | Expr::ListLiteral { elements, .. } => {
             for e in elements {
                 collect_qrefs_from_expr(e, out);
             }
@@ -4474,6 +4492,250 @@ fn first_named_trigger_param(expr: &Expr) -> Option<(&str, Span)> {
             ..
         } => first_named_trigger_param(left).or_else(|| first_named_trigger_param(right)),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// List literal element homogeneity
+// ---------------------------------------------------------------------------
+
+/// The literal kind of a list element, for the homogeneity check. Only
+/// elements whose type is determinable without a full type system are
+/// classified; anything else (identifiers, calls, member access, nested
+/// collections, ...) is `None` and excluded from the check, so we never
+/// report a false positive on elements whose types we cannot know.
+fn literal_kind(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::StringLiteral(_) => Some("string"),
+        Expr::NumberLiteral { .. } => Some("number"),
+        Expr::BoolLiteral { .. } => Some("boolean"),
+        Expr::DurationLiteral { .. } => Some("duration"),
+        Expr::BacktickLiteral { .. } => Some("backtick literal"),
+        _ => None,
+    }
+}
+
+impl Ctx<'_> {
+    fn check_list_literal_homogeneity(&mut self) {
+        let mut lists: Vec<(&[Expr], Span)> = Vec::new();
+        for d in &self.module.declarations {
+            match d {
+                Decl::Block(b) => {
+                    for item in &b.items {
+                        collect_list_literals_from_item(&item.kind, &mut lists);
+                    }
+                }
+                Decl::Variant(v) => {
+                    for item in &v.items {
+                        collect_list_literals_from_item(&item.kind, &mut lists);
+                    }
+                }
+                Decl::Invariant(inv) => collect_list_literals_from_expr(&inv.body, &mut lists),
+                Decl::Default(def) => collect_list_literals_from_expr(&def.value, &mut lists),
+                _ => {}
+            }
+        }
+
+        for (elements, span) in lists {
+            // Compare only elements whose literal kind is determinable; a list
+            // mixing, e.g., a string and a number is a type error. Elements
+            // whose type can't be known without a type system are skipped.
+            let mut first: Option<&'static str> = None;
+            for e in elements {
+                let Some(kind) = literal_kind(e) else { continue };
+                match first {
+                    None => first = Some(kind),
+                    Some(expected) if expected != kind => {
+                        self.push(
+                            Diagnostic::error(
+                                span,
+                                format!(
+                                    "List literal has elements of differing types ('{expected}' and '{kind}'); all elements of a list must share a type.",
+                                ),
+                            )
+                            .with_code("allium.list.mixedElementTypes"),
+                        );
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+impl Ctx<'_> {
+    /// A qualified type name in a `default` (`default alias/Type x = ...`) must
+    /// reference a module brought into scope by `use "..." as alias`. Keeps
+    /// parity with the TypeScript `findDefaultTypeReferenceIssues` alias check.
+    fn check_qualified_default_aliases(&mut self) {
+        let mut aliases: HashSet<&str> = HashSet::new();
+        for d in &self.module.declarations {
+            if let Decl::Use(u) = d {
+                if let Some(alias) = &u.alias {
+                    aliases.insert(alias.name.as_str());
+                }
+            }
+        }
+        for d in &self.module.declarations {
+            let Decl::Default(def) = d else { continue };
+            let (Some(alias), Some(type_name)) = (&def.type_alias, &def.type_name) else {
+                continue;
+            };
+            if !aliases.contains(alias.name.as_str()) {
+                self.push(
+                    Diagnostic::error(
+                        alias.span.merge(type_name.span),
+                        format!(
+                            "Type reference '{}/{}' uses unknown import alias '{}'.",
+                            alias.name, type_name.name, alias.name
+                        ),
+                    )
+                    .with_code("allium.default.undefinedImportedAlias"),
+                );
+            }
+        }
+    }
+}
+
+fn collect_list_literals_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<(&'a [Expr], Span)>) {
+    match kind {
+        BlockItemKind::Clause { value, .. }
+        | BlockItemKind::Assignment { value, .. }
+        | BlockItemKind::ParamAssignment { value, .. }
+        | BlockItemKind::Let { value, .. }
+        | BlockItemKind::PathAssignment { value, .. }
+        | BlockItemKind::InvariantBlock { body: value, .. }
+        | BlockItemKind::FieldWithWhen { value, .. } => {
+            collect_list_literals_from_expr(value, out);
+        }
+        BlockItemKind::ForBlock { collection, filter, items, .. } => {
+            collect_list_literals_from_expr(collection, out);
+            if let Some(f) = filter {
+                collect_list_literals_from_expr(f, out);
+            }
+            for item in items {
+                collect_list_literals_from_item(&item.kind, out);
+            }
+        }
+        BlockItemKind::IfBlock { branches, else_items } => {
+            for b in branches {
+                collect_list_literals_from_expr(&b.condition, out);
+                for item in &b.items {
+                    collect_list_literals_from_item(&item.kind, out);
+                }
+            }
+            if let Some(items) = else_items {
+                for item in items {
+                    collect_list_literals_from_item(&item.kind, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_list_literals_from_expr<'a>(expr: &'a Expr, out: &mut Vec<(&'a [Expr], Span)>) {
+    if let Expr::ListLiteral { elements, span } = expr {
+        out.push((elements, *span));
+    }
+    walk_expr_children(expr, &mut |child| collect_list_literals_from_expr(child, out));
+}
+
+/// Invokes `f` on each immediate sub-expression of `expr`. Mirrors the
+/// traversal in [`collect_accessed_fields_from_expr`] but is generic, so
+/// expression-tree walks need not each duplicate the full match.
+fn walk_expr_children<'a>(expr: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
+    match expr {
+        Expr::MemberAccess { object, .. } | Expr::OptionalAccess { object, .. } => f(object),
+        Expr::Call { function, args, .. } => {
+            f(function);
+            for a in args {
+                match a {
+                    CallArg::Positional(e) => f(e),
+                    CallArg::Named(n) => f(&n.value),
+                }
+            }
+        }
+        Expr::BinaryOp { left, right, .. }
+        | Expr::Comparison { left, right, .. }
+        | Expr::LogicalOp { left, right, .. }
+        | Expr::Pipe { left, right, .. }
+        | Expr::NullCoalesce { left, right, .. } => {
+            f(left);
+            f(right);
+        }
+        Expr::Not { operand, .. }
+        | Expr::Exists { operand, .. }
+        | Expr::NotExists { operand, .. }
+        | Expr::TypeOptional { inner: operand, .. } => f(operand),
+        Expr::In { element, collection, .. } | Expr::NotIn { element, collection, .. } => {
+            f(element);
+            f(collection);
+        }
+        Expr::Where { source, condition, .. }
+        | Expr::With { source, predicate: condition, .. } => {
+            f(source);
+            f(condition);
+        }
+        Expr::WhenGuard { action, condition, .. } => {
+            f(action);
+            f(condition);
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                f(item);
+            }
+        }
+        Expr::Binding { value, .. } | Expr::LetExpr { value, .. } => f(value),
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                f(&b.condition);
+                f(&b.body);
+            }
+            if let Some(body) = else_body {
+                f(body);
+            }
+        }
+        Expr::For { collection, filter, body, .. } => {
+            f(collection);
+            if let Some(filt) = filter {
+                f(filt);
+            }
+            f(body);
+        }
+        Expr::Lambda { body, .. } => f(body),
+        Expr::JoinLookup { entity, fields, .. } => {
+            f(entity);
+            for jf in fields {
+                if let Some(v) = &jf.value {
+                    f(v);
+                }
+            }
+        }
+        Expr::TransitionsTo { subject, new_state, .. }
+        | Expr::Becomes { subject, new_state, .. } => {
+            f(subject);
+            f(new_state);
+        }
+        Expr::SetLiteral { elements, .. } | Expr::ListLiteral { elements, .. } => {
+            for e in elements {
+                f(e);
+            }
+        }
+        Expr::ObjectLiteral { fields, .. } => {
+            for fld in fields {
+                f(&fld.value);
+            }
+        }
+        Expr::GenericType { name, args, .. } => {
+            f(name);
+            for a in args {
+                f(a);
+            }
+        }
+        Expr::ProjectionMap { source, .. } => f(source),
+        _ => {}
     }
 }
 
@@ -5121,7 +5383,7 @@ fn expr_contains_ident(expr: &Expr, name: &str) -> bool {
         Expr::Binding { name: n, value, .. } => {
             n.name == name || expr_contains_ident(value, name)
         }
-        Expr::SetLiteral { elements, .. } => {
+        Expr::SetLiteral { elements, .. } | Expr::ListLiteral { elements, .. } => {
             elements.iter().any(|e| expr_contains_ident(e, name))
         }
         Expr::ObjectLiteral { fields, .. } => {
@@ -6431,6 +6693,51 @@ mod tests {
         );
         assert!(!has_code(&ds, "allium.rule.invalidTrigger"));
         assert!(!has_code(&ds, "allium.rule.undefinedBinding"));
+    }
+
+    // -- List literal homogeneity --
+
+    #[test]
+    fn homogeneous_list_literal_ok() {
+        let ds = analyze_src("default E e = { items: [\"a\", \"b\", \"c\"] }");
+        assert!(!has_code(&ds, "allium.list.mixedElementTypes"));
+    }
+
+    #[test]
+    fn empty_list_literal_ok() {
+        let ds = analyze_src("default E e = { items: [] }");
+        assert!(!has_code(&ds, "allium.list.mixedElementTypes"));
+    }
+
+    #[test]
+    fn heterogeneous_list_literal_flagged() {
+        let ds = analyze_src("default E e = { items: [\"a\", 5] }");
+        assert!(has_code(&ds, "allium.list.mixedElementTypes"));
+    }
+
+    #[test]
+    fn list_literal_of_identifiers_not_flagged() {
+        // Non-literal elements have unknown type without a type system; never
+        // false-positive on them.
+        let ds = analyze_src("default E e = { items: [foo, bar] }");
+        assert!(!has_code(&ds, "allium.list.mixedElementTypes"));
+    }
+
+    // -- Qualified default type aliases --
+
+    #[test]
+    fn qualified_default_known_alias_ok() {
+        let ds = analyze_src(
+            "use \"./p.allium\" as gp\n\ndefault gp/Policy my_policy = { id: \"x\" }",
+        );
+        assert!(!has_code(&ds, "allium.default.undefinedImportedAlias"));
+    }
+
+    #[test]
+    fn qualified_default_unknown_alias_flagged() {
+        // `zz` is not imported — must be flagged, matching the TS analyzer.
+        let ds = analyze_src("default zz/Policy my_policy = { id: \"x\" }");
+        assert!(has_code(&ds, "allium.default.undefinedImportedAlias"));
     }
 
     // -- Duplicate let --
