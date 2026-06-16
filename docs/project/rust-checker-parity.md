@@ -185,6 +185,18 @@ issue #19:
   (`ensuresClauseRegions`). Both still collect only the leading call of each
   branch body, consistent with the leading-call-only convention above.
 
+A further refinement landed in both implementations for issue #42: a typed or
+named parameter in an external-stimulus / chained trigger call (e.g.
+`when: AccountSeen(account: Account)`) is now reported as `rule.invalidTrigger`
+on the offending parameter, with a message explaining that such params are bare
+names (`?`/`_` permitted) and the `name: value` form is only valid in trigger
+emissions. Previously both checkers accepted the malformed call shape and then
+emitted a misleading `rule.undefinedBinding` for every body reference to the
+param. The name is now also added to the rule's binding scope
+(Rust: `collect_bound_names`; TypeScript: the `whenCallPattern` loop) so the
+malformed trigger produces exactly one diagnostic, at the trigger, rather than
+double-firing on the body.
+
 ## Diagnostic codes implemented
 
 | Code | Severity | Rust | TypeScript |

@@ -2444,6 +2444,15 @@ function collectRuleBoundNames(
       }
       if (/^[A-Za-z_][A-Za-z0-9_]*\??$/.test(name)) {
         bound.add(name.replace(/\?$/, ""));
+      } else {
+        // Named/typed param (`account: Account`) is an invalid trigger form,
+        // reported separately by findInvalidTriggerIssues. Still bind the name
+        // so the malformed trigger doesn't also produce a misleading
+        // undefinedBinding on every body reference to it.
+        const named = name.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:/);
+        if (named) {
+          bound.add(named[1]);
+        }
       }
     }
   }
@@ -3778,6 +3787,25 @@ function findInvalidTriggerIssues(
     }
     const trigger = whenMatch[1].trim();
     if (isValidTriggerShape(trigger)) {
+      // The call form is structurally valid, but external-stimulus and chained
+      // trigger parameters must be bare names — a `name: value` param (e.g. a
+      // type annotation `account: Account`) is invalid. Report it at the param,
+      // not as a misplaced undefinedBinding on the body (allium-tools#42).
+      const named = firstNamedTriggerParam(trigger);
+      if (named) {
+        const lineOffset = rule.bodyStartOffset + rule.body.indexOf(whenMatch[0]);
+        const paramOffset = lineOffset + whenMatch[0].indexOf(trigger) + named.index;
+        findings.push(
+          rangeFinding(
+            lineStarts,
+            paramOffset,
+            paramOffset + named.name.length,
+            "allium.rule.invalidTrigger",
+            `Rule '${rule.name}' trigger parameter '${named.name}' uses a 'name: value' form. External-stimulus and chained trigger parameters are bare names (optionally suffixed with '?', or '_' to discard); the 'name: value' form is only valid in trigger emissions. Write '${named.name}' without the annotation.`,
+            "error",
+          ),
+        );
+      }
       continue;
     }
     const lineOffset = rule.bodyStartOffset + rule.body.indexOf(whenMatch[0]);
@@ -3793,6 +3821,35 @@ function findInvalidTriggerIssues(
     );
   }
   return findings;
+}
+
+/**
+ * Finds the first named/typed parameter in an external-stimulus or chained
+ * trigger call (e.g. `AccountSeen(account: Account)`). The `Name(...)` matcher
+ * also walks each call of an `or`-combined trigger. Returns the param name and
+ * its index within `trigger`, or null when every param is a bare name.
+ */
+function firstNamedTriggerParam(
+  trigger: string,
+): { name: string; index: number } | null {
+  const callPattern =
+    /[A-Za-z_][A-Za-z0-9_]*(?:\/[A-Za-z_][A-Za-z0-9_]*)?\s*\(([^)]*)\)/g;
+  for (
+    let call = callPattern.exec(trigger);
+    call;
+    call = callPattern.exec(trigger)
+  ) {
+    const argsStr = call[1];
+    const argsStart = call.index + call[0].indexOf(argsStr, call[0].indexOf("("));
+    const namedArg = /(?:^|,)\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/.exec(argsStr);
+    if (namedArg) {
+      return {
+        name: namedArg[1],
+        index: argsStart + namedArg.index + namedArg[0].indexOf(namedArg[1]),
+      };
+    }
+  }
+  return null;
 }
 
 function isValidTriggerShape(trigger: string): boolean {

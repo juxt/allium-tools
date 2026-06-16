@@ -179,6 +179,38 @@ test("accepts combined external-stimulus triggers joined by or", () => {
   );
 });
 
+test("reports typed external-stimulus trigger param at the trigger, not the body", () => {
+  // allium-tools#42: a `name: Type` param is invalid; the diagnostic must land
+  // on the trigger param and must not double-fire as undefinedBinding.
+  const findings = analyzeAllium(
+    `entity Account { name: String }\nentity Greeting { label: String }\n\nrule TypedParam {\n  when: AccountSeen(account: Account)\n  ensures: Greeting.created(label: account.name)\n}`,
+  );
+  const invalid = findings.filter(
+    (f) => f.code === "allium.rule.invalidTrigger",
+  );
+  assert.equal(invalid.length, 1);
+  assert.ok(invalid[0].message.includes("'account'"));
+  assert.ok(invalid[0].message.includes("bare names"));
+  assert.equal(
+    findings.some((f) => f.code === "allium.rule.undefinedBinding"),
+    false,
+  );
+});
+
+test("accepts bare external-stimulus trigger param", () => {
+  const findings = analyzeAllium(
+    `entity Account { name: String }\nentity Greeting { label: String }\n\nrule UntypedParam {\n  when: AccountSeen(account)\n  ensures: Greeting.created(label: account.name)\n}`,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.rule.invalidTrigger"),
+    false,
+  );
+  assert.equal(
+    findings.some((f) => f.code === "allium.rule.undefinedBinding"),
+    false,
+  );
+});
+
 test("reports temporal trigger without guard", () => {
   const findings = analyzeAllium(
     `rule Expires {\n  when: invitation: Invitation.expires_at <= now\n  ensures: invitation.status = expired\n}`,
