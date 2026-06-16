@@ -240,7 +240,14 @@ Two language features were added for juxt/allium#43:
 - **Qualified type names in `default` declarations** (`default alias/Type x = ...`).
   Parsing is in the Rust front end (`DefaultDecl.type_alias`) and reaches both
   implementations via WASM; the qualified name resolves cross-module, like
-  qualified triggers and config references.
+  qualified triggers and config references. Both implementations validate that
+  the alias is a known `use` import and emit `allium.default.undefinedImportedAlias`
+  otherwise (Rust: `check_qualified_default_aliases`; TypeScript:
+  `findDefaultTypeReferenceIssues`). Note this does not yet validate the
+  literal's field set against the imported entity's schema — the checker has no
+  default-field-set validation in either implementation, so the cross-module
+  drift detection envisioned in the issue is not implemented; the qualified form
+  parses and resolves, removing the need to redeclare the type locally.
 
 `allium.surface.requiresWithoutDeferred` is TypeScript-only (no Rust equivalent yet). When porting it, note the deferred-name matching semantics fixed in issue #26: a named requires block matches a deferred declaration by its full name, by a trailing `.`-separated segment, or — for module-qualified declarations like `deferred billing/InvoiceWorkflow` — by the unqualified name after the `alias/` prefix. The alias alone must not satisfy the match.
 

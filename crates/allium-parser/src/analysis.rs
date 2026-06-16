@@ -95,6 +95,7 @@ fn run_checks(mut ctx: Ctx<'_>, source: &str) -> Vec<Diagnostic> {
     ctx.check_duplicate_let_bindings();
     ctx.check_config_undefined_references();
     ctx.check_list_literal_homogeneity();
+    ctx.check_qualified_default_aliases();
 
     apply_suppressions(ctx.diagnostics, source)
 }
@@ -4563,6 +4564,40 @@ impl Ctx<'_> {
     }
 }
 
+impl Ctx<'_> {
+    /// A qualified type name in a `default` (`default alias/Type x = ...`) must
+    /// reference a module brought into scope by `use "..." as alias`. Keeps
+    /// parity with the TypeScript `findDefaultTypeReferenceIssues` alias check.
+    fn check_qualified_default_aliases(&mut self) {
+        let mut aliases: HashSet<&str> = HashSet::new();
+        for d in &self.module.declarations {
+            if let Decl::Use(u) = d {
+                if let Some(alias) = &u.alias {
+                    aliases.insert(alias.name.as_str());
+                }
+            }
+        }
+        for d in &self.module.declarations {
+            let Decl::Default(def) = d else { continue };
+            let (Some(alias), Some(type_name)) = (&def.type_alias, &def.type_name) else {
+                continue;
+            };
+            if !aliases.contains(alias.name.as_str()) {
+                self.push(
+                    Diagnostic::error(
+                        alias.span.merge(type_name.span),
+                        format!(
+                            "Type reference '{}/{}' uses unknown import alias '{}'.",
+                            alias.name, type_name.name, alias.name
+                        ),
+                    )
+                    .with_code("allium.default.undefinedImportedAlias"),
+                );
+            }
+        }
+    }
+}
+
 fn collect_list_literals_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<(&'a [Expr], Span)>) {
     match kind {
         BlockItemKind::Clause { value, .. }
@@ -6686,6 +6721,23 @@ mod tests {
         // false-positive on them.
         let ds = analyze_src("default E e = { items: [foo, bar] }");
         assert!(!has_code(&ds, "allium.list.mixedElementTypes"));
+    }
+
+    // -- Qualified default type aliases --
+
+    #[test]
+    fn qualified_default_known_alias_ok() {
+        let ds = analyze_src(
+            "use \"./p.allium\" as gp\n\ndefault gp/Policy my_policy = { id: \"x\" }",
+        );
+        assert!(!has_code(&ds, "allium.default.undefinedImportedAlias"));
+    }
+
+    #[test]
+    fn qualified_default_unknown_alias_flagged() {
+        // `zz` is not imported — must be flagged, matching the TS analyzer.
+        let ds = analyze_src("default zz/Policy my_policy = { id: \"x\" }");
+        assert!(has_code(&ds, "allium.default.undefinedImportedAlias"));
     }
 
     // -- Duplicate let --
