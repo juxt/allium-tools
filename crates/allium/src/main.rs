@@ -194,6 +194,11 @@ struct CrossModuleContext {
     /// Per-file: `use` alias → trigger names the aliased module provides or
     /// emits. Aliases whose targets are outside the check set are absent.
     imported_triggers: HashMap<PathBuf, HashMap<String, HashSet<String>>>,
+    /// Per-file: `use` alias → (imported entity/value type → declared field
+    /// names). Lets a qualified `default alias/Type` literal be validated
+    /// against the imported schema. Aliases whose targets are outside the check
+    /// set are absent.
+    imported_entity_fields: HashMap<PathBuf, HashMap<String, HashMap<String, HashSet<String>>>>,
     /// Per-file: names and triggers that more than one imported module could
     /// resolve, so unqualified references to them are ambiguous (issue #15).
     ambiguous_imports: HashMap<PathBuf, AmbiguousImports>,
@@ -207,7 +212,7 @@ struct CrossModuleContext {
 fn run_multi_file(
     command: &str,
     args: &[String],
-    analyse_file: impl Fn(&Path, &str, &allium_parser::ParseResult, &SourceMap, &HashSet<String>, &HashSet<String>, &HashMap<String, HashSet<String>>, &AmbiguousImports) -> FileResult,
+    analyse_file: impl Fn(&Path, &str, &allium_parser::ParseResult, &SourceMap, &HashSet<String>, &HashSet<String>, &HashMap<String, HashSet<String>>, &HashMap<String, HashMap<String, HashSet<String>>>, &AmbiguousImports) -> FileResult,
 ) -> ExitCode {
     let files = resolve_files(args);
     if files.is_empty() {
@@ -247,8 +252,9 @@ fn run_multi_file(
         let refs = ctx.external_refs.get(&key).cloned().unwrap_or_default();
         let use_paths = ctx.resolved_use_paths.get(&key).cloned().unwrap_or_default();
         let imports = ctx.imported_triggers.get(&key).cloned().unwrap_or_default();
+        let imported_fields = ctx.imported_entity_fields.get(&key).cloned().unwrap_or_default();
         let ambiguous = ctx.ambiguous_imports.get(&key).unwrap_or(&no_ambiguity);
-        let file_result = analyse_file(&pf.path, &pf.source, &pf.result, &source_map, &refs, &use_paths, &imports, ambiguous);
+        let file_result = analyse_file(&pf.path, &pf.source, &pf.result, &source_map, &refs, &use_paths, &imports, &imported_fields, ambiguous);
 
         if file_result.has_issues {
             any_issues = true;
@@ -299,9 +305,26 @@ fn build_cross_module_context(parsed: &[ParsedFile]) -> CrossModuleContext {
         })
         .collect();
 
+    // Pre-compute each file's entity/value type → field-name schema so importing
+    // files can validate `default alias/Type = { ... }` literals against the
+    // imported type's declared fields.
+    let entity_field_outputs: HashMap<PathBuf, HashMap<String, HashSet<String>>> = parsed
+        .iter()
+        .map(|pf| {
+            (
+                canonical_key(&pf.path),
+                allium_parser::collect_entity_field_schemas(&pf.result.module),
+            )
+        })
+        .collect();
+
     let mut external_refs: HashMap<PathBuf, HashSet<String>> = HashMap::new();
     let mut resolved_use_paths: HashMap<PathBuf, HashSet<String>> = HashMap::new();
     let mut imported_triggers: HashMap<PathBuf, HashMap<String, HashSet<String>>> = HashMap::new();
+    let mut imported_entity_fields: HashMap<
+        PathBuf,
+        HashMap<String, HashMap<String, HashSet<String>>>,
+    > = HashMap::new();
     let mut ambiguous_imports: HashMap<PathBuf, AmbiguousImports> = HashMap::new();
 
     for pf in parsed {
@@ -373,6 +396,17 @@ fn build_cross_module_context(parsed: &[ParsedFile]) -> CrossModuleContext {
         }
         imported_triggers.insert(file_key.clone(), imported_for_file);
 
+        // 3b. Imported entity field schemas — for each alias whose target is in
+        //     the check set, that module's entity/value type → field names.
+        let mut imported_fields_for_file: HashMap<String, HashMap<String, HashSet<String>>> =
+            HashMap::new();
+        for (alias, target_key) in &alias_targets {
+            if let Some(fields) = entity_field_outputs.get(target_key) {
+                imported_fields_for_file.insert((*alias).to_string(), fields.clone());
+            }
+        }
+        imported_entity_fields.insert(file_key.clone(), imported_fields_for_file);
+
         // 4. Ambiguous imports — names declared, and triggers provided or
         //    emitted, by more than one distinct imported file. Keyed by
         //    distinct target so that two aliases for the same file are not
@@ -426,6 +460,7 @@ fn build_cross_module_context(parsed: &[ParsedFile]) -> CrossModuleContext {
         external_refs,
         resolved_use_paths,
         imported_triggers,
+        imported_entity_fields,
         ambiguous_imports,
     }
 }
@@ -440,8 +475,8 @@ fn canonical_key(path: &Path) -> PathBuf {
 }
 
 fn cmd_check(args: &[String]) -> ExitCode {
-    run_multi_file("check", args, |path, source, result, source_map, external_refs, resolved_use_paths, imported_triggers, ambiguous_imports| {
-        let analysis = allium_parser::analyze_with_cross_module(&result.module, source, external_refs, resolved_use_paths, imported_triggers, ambiguous_imports);
+    run_multi_file("check", args, |path, source, result, source_map, external_refs, resolved_use_paths, imported_triggers, imported_entity_fields, ambiguous_imports| {
+        let analysis = allium_parser::analyze_with_cross_module(&result.module, source, external_refs, resolved_use_paths, imported_triggers, imported_entity_fields, ambiguous_imports);
         let diagnostics: Vec<serde_json::Value> = result
             .diagnostics
             .iter()
@@ -456,8 +491,8 @@ fn cmd_check(args: &[String]) -> ExitCode {
 }
 
 fn cmd_analyse(args: &[String]) -> ExitCode {
-    run_multi_file("analyse", args, |path, source, result, source_map, external_refs, resolved_use_paths, imported_triggers, ambiguous_imports| {
-        let analyse_result = allium_parser::analyse_with_cross_module(&result.module, source, external_refs, resolved_use_paths, imported_triggers, ambiguous_imports);
+    run_multi_file("analyse", args, |path, source, result, source_map, external_refs, resolved_use_paths, imported_triggers, imported_entity_fields, ambiguous_imports| {
+        let analyse_result = allium_parser::analyse_with_cross_module(&result.module, source, external_refs, resolved_use_paths, imported_triggers, imported_entity_fields, ambiguous_imports);
         let diagnostics: Vec<serde_json::Value> = result
             .diagnostics
             .iter()

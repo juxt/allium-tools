@@ -251,11 +251,18 @@ Two language features were added for juxt/allium#43:
   reported as `allium.default.unknownField` (recursing into nested object
   literals), and an empty list literal whose target field is not a `List<T>` is
   reported as `allium.list.emptyListNoElementType` (language-reference rule 14c).
-  Qualified (imported) default types are **not** validated this way — their field
-  schema is not visible to a single-module pass; cross-module drift detection
-  would require plumbing imported entity field sets through `CrossModuleContext`
-  (as is done for triggers) and would be CLI-multi-file-only, since the
-  single-file TypeScript analyzer cannot see other modules.
+  Qualified (imported) default types are validated cross-module in the Rust CLI's
+  multi-file mode: `collect_entity_field_schemas` exposes each module's
+  entity/value field names, the CLI builds a per-file `imported_entity_fields`
+  map (alias → type → fields) on `CrossModuleContext` exactly as it does for
+  triggers, and `check_default_field_schemas` flags a qualified-default field not
+  declared on the imported type (`allium.default.unknownField`). Aliases or types
+  outside the check set are left unvalidated, never flagged — the same convention
+  as qualified triggers. This is multi-file-CLI-only: the single-file TypeScript
+  analyzer cannot see other modules, so it validates only **local** default types
+  (the same asymmetry already documented for qualified-trigger resolution). The
+  cross-module path carries field *names* only, so rule 14c and nested-object
+  recursion remain local-type-only.
 
 `allium.surface.requiresWithoutDeferred` is TypeScript-only (no Rust equivalent yet). When porting it, note the deferred-name matching semantics fixed in issue #26: a named requires block matches a deferred declaration by its full name, by a trailing `.`-separated segment, or — for module-qualified declarations like `deferred billing/InvoiceWorkflow` — by the unqualified name after the `alias/` prefix. The alias alone must not satisfy the match.
 

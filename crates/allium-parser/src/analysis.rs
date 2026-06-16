@@ -62,18 +62,18 @@ pub fn analyze_with_cross_module(
     external_refs: &HashSet<String>,
     resolved_use_paths: &HashSet<String>,
     imported_triggers: &HashMap<String, HashSet<String>>,
+    imported_entity_fields: &HashMap<String, HashMap<String, HashSet<String>>>,
     ambiguous_imports: &AmbiguousImports,
 ) -> Vec<Diagnostic> {
-    run_checks(
-        Ctx::new(
-            module,
-            external_refs,
-            Some(resolved_use_paths),
-            Some(imported_triggers),
-            Some(ambiguous_imports),
-        ),
-        source,
-    )
+    let mut ctx = Ctx::new(
+        module,
+        external_refs,
+        Some(resolved_use_paths),
+        Some(imported_triggers),
+        Some(ambiguous_imports),
+    );
+    ctx.imported_entity_fields = Some(imported_entity_fields);
+    run_checks(ctx, source)
 }
 
 fn run_checks(mut ctx: Ctx<'_>, source: &str) -> Vec<Diagnostic> {
@@ -131,6 +131,7 @@ pub fn analyse_with_cross_module(
     external_refs: &HashSet<String>,
     resolved_use_paths: &HashSet<String>,
     imported_triggers: &HashMap<String, HashSet<String>>,
+    imported_entity_fields: &HashMap<String, HashMap<String, HashSet<String>>>,
     ambiguous_imports: &AmbiguousImports,
 ) -> crate::diagnostic::AnalyseResult {
     let diagnostics = analyze_with_cross_module(
@@ -139,6 +140,7 @@ pub fn analyse_with_cross_module(
         external_refs,
         resolved_use_paths,
         imported_triggers,
+        imported_entity_fields,
         ambiguous_imports,
     );
     let findings = find_process_issues(module, Some(imported_triggers));
@@ -309,6 +311,11 @@ struct Ctx<'a> {
     /// `Some(map)` = multi-file mode; names and triggers that more than one
     /// imported module could resolve.
     ambiguous_imports: Option<&'a AmbiguousImports>,
+    /// Multi-file mode only: per `use` alias, the imported module's entity/value
+    /// type → declared field names. Lets a qualified `default alias/Type` literal
+    /// be validated against the imported schema. Aliases whose targets fall
+    /// outside the check set are absent. `None` in single-file mode.
+    imported_entity_fields: Option<&'a HashMap<String, HashMap<String, HashSet<String>>>>,
     diagnostics: Vec<Diagnostic>,
     findings: Vec<crate::diagnostic::Finding>,
 }
@@ -327,6 +334,7 @@ impl<'a> Ctx<'a> {
             resolved_use_paths,
             imported_triggers,
             ambiguous_imports,
+            imported_entity_fields: None,
             diagnostics: Vec::new(),
             findings: Vec::new(),
         }
@@ -4157,6 +4165,22 @@ pub fn collect_trigger_outputs(module: &Module) -> HashSet<String> {
     names.into_iter().map(str::to_string).collect()
 }
 
+/// Collect each entity/value type's declared field names, keyed by type name.
+///
+/// Used by multi-file checking to build the per-alias schema map that lets a
+/// qualified `default alias/Type = { ... }` literal be validated against the
+/// imported type's fields (drift detection across `use` imports).
+pub fn collect_entity_field_schemas(module: &Module) -> HashMap<String, HashSet<String>> {
+    let mut out: HashMap<String, HashSet<String>> = HashMap::new();
+    for (name, fields) in collect_local_type_schemas(module) {
+        out.insert(
+            name.to_string(),
+            fields.keys().map(|f| f.to_string()).collect(),
+        );
+    }
+    out
+}
+
 fn collect_qrefs_from_item(kind: &BlockItemKind, out: &mut Vec<(String, String)>) {
     match kind {
         BlockItemKind::Clause { value, .. }
@@ -4613,15 +4637,45 @@ impl Ctx<'_> {
         let mut diagnostics = Vec::new();
         for d in &self.module.declarations {
             let Decl::Default(def) = d else { continue };
-            if def.type_alias.is_some() {
-                continue; // imported type — schema not visible here
-            }
             let (Some(type_name), Expr::ObjectLiteral { fields, .. }) =
                 (&def.type_name, &def.value)
             else {
                 continue;
             };
-            validate_object_literal(fields, &type_name.name, &schemas, &mut diagnostics);
+            match &def.type_alias {
+                None => {
+                    validate_object_literal(fields, &type_name.name, &schemas, &mut diagnostics);
+                }
+                Some(alias) => {
+                    // Qualified `default alias/Type`: validate the top-level
+                    // field set against the imported module's schema, when that
+                    // module is in the check set (multi-file mode). Aliases or
+                    // types outside the check set are left unvalidated rather
+                    // than flagged. Nested validation and rule 14c need the
+                    // imported field *types*, which aren't carried cross-module,
+                    // so only unknown-field drift is checked here.
+                    if let Some(imported) = self
+                        .imported_entity_fields
+                        .and_then(|m| m.get(alias.name.as_str()))
+                        .and_then(|types| types.get(type_name.name.as_str()))
+                    {
+                        for field in fields {
+                            if !imported.contains(field.name.name.as_str()) {
+                                diagnostics.push(
+                                    Diagnostic::error(
+                                        field.name.span,
+                                        format!(
+                                            "Default sets field '{}' which is not declared on '{}/{}'.",
+                                            field.name.name, alias.name, type_name.name
+                                        ),
+                                    )
+                                    .with_code("allium.default.unknownField"),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
         for diag in diagnostics {
             self.push(diag);
@@ -6087,6 +6141,7 @@ mod tests {
             &HashSet::new(),
             &HashSet::new(),
             &imported,
+            &HashMap::new(),
             &AmbiguousImports::default(),
         )
     }
@@ -6133,6 +6188,7 @@ mod tests {
             &HashSet::new(),
             &HashSet::new(),
             &imported,
+            &HashMap::new(),
             &ambiguous,
         )
     }
@@ -6567,7 +6623,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./core.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
         assert!(!has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -6578,7 +6634,7 @@ mod tests {
         let result = parse(&input);
         // Only "./other.allium" is resolved — "./missing.allium" is not.
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
         assert!(has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -6599,7 +6655,7 @@ mod tests {
         let src = "use \"./missing.allium\" as missing\n\nentity Handler {\n  x: String\n}\n";
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new(), &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new(), &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
         assert!(has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -6609,7 +6665,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
         let diag = ds.iter().find(|d| d.code == Some("allium.use.unresolvedPath")).unwrap();
         assert!(diag.message.contains("nowhere.allium"), "message should name the path: {}", diag.message);
     }
@@ -6620,7 +6676,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
         assert!(!has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -6630,7 +6686,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./found.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
         let unresolved: Vec<_> = ds.iter()
             .filter(|d| d.code == Some("allium.use.unresolvedPath"))
             .collect();

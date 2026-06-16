@@ -903,3 +903,62 @@ fn qualified_trigger_with_alias_outside_check_set_not_flagged() {
         diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn qualified_default_drift_flagged_across_modules() {
+    // A `default alias/Type` literal is validated against the imported type's
+    // fields when the target module is in the check set (allium-tools#47).
+    let dir = TempDir::new("xmod-default-drift");
+    dir.write(
+        "parent.allium",
+        "-- allium: 3\nentity Policy {\n  id: String\n  name: String\n}\n",
+    );
+    dir.write(
+        "fragment.allium",
+        "-- allium: 3\nuse \"./parent.allium\" as gp\n\ndefault gp/Policy good = { id: \"p1\", name: \"ok\" }\ndefault gp/Policy drift = { id: \"p2\", naem: \"typo\" }\n",
+    );
+
+    let output = allium()
+        .args(["check", dir.path().to_str().unwrap()])
+        .output()
+        .expect("spawn allium");
+    let diags = parse_diagnostics(&String::from_utf8_lossy(&output.stdout));
+
+    let unknown: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == "allium.default.unknownField")
+        .collect();
+    assert_eq!(
+        unknown.len(),
+        1,
+        "exactly one drift field (naem): {:?}",
+        unknown.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    assert!(unknown[0].message.contains("naem"));
+    assert!(unknown[0].message.contains("gp/Policy"));
+}
+
+#[test]
+fn qualified_default_not_flagged_when_target_outside_check_set() {
+    // Only fragment.allium is checked; the imported module's schema is not
+    // visible, so the qualified default must not be flagged.
+    let dir = TempDir::new("xmod-default-noflag");
+    dir.write(
+        "parent.allium",
+        "-- allium: 3\nentity Policy {\n  id: String\n}\n",
+    );
+    dir.write(
+        "fragment.allium",
+        "-- allium: 3\nuse \"./parent.allium\" as gp\n\ndefault gp/Policy d = { id: \"x\", whatever: 1 }\n",
+    );
+
+    let output = allium()
+        .args(["check", dir.path().join("fragment.allium").to_str().unwrap()])
+        .output()
+        .expect("spawn allium");
+    let codes = diagnostic_codes(&String::from_utf8_lossy(&output.stdout));
+    assert!(
+        !codes.iter().any(|c| c == "allium.default.unknownField"),
+        "qualified default with target outside check set must not be flagged: {codes:?}"
+    );
+}
