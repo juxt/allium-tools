@@ -96,6 +96,7 @@ fn run_checks(mut ctx: Ctx<'_>, source: &str) -> Vec<Diagnostic> {
     ctx.check_config_undefined_references();
     ctx.check_list_literal_homogeneity();
     ctx.check_qualified_default_aliases();
+    ctx.check_default_field_schemas();
 
     apply_suppressions(ctx.diagnostics, source)
 }
@@ -4596,6 +4597,132 @@ impl Ctx<'_> {
             }
         }
     }
+
+    /// Validates `default Type x = { ... }` object literals against the
+    /// declared schema of `Type` (and, recursively, of nested value/entity
+    /// types). Catches drift — an object-literal field that the entity no
+    /// longer declares (`allium.default.unknownField`) — and the rule-14c case
+    /// of an empty list literal whose target field is not a `List<T>`, so it
+    /// has no element type to infer (`allium.list.emptyListNoElementType`).
+    ///
+    /// Only unqualified (local) types are validated: a qualified
+    /// `default alias/Type` names an entity in an imported module whose field
+    /// schema this single-module pass cannot see.
+    fn check_default_field_schemas(&mut self) {
+        let schemas = collect_local_type_schemas(self.module);
+        let mut diagnostics = Vec::new();
+        for d in &self.module.declarations {
+            let Decl::Default(def) = d else { continue };
+            if def.type_alias.is_some() {
+                continue; // imported type — schema not visible here
+            }
+            let (Some(type_name), Expr::ObjectLiteral { fields, .. }) =
+                (&def.type_name, &def.value)
+            else {
+                continue;
+            };
+            validate_object_literal(fields, &type_name.name, &schemas, &mut diagnostics);
+        }
+        for diag in diagnostics {
+            self.push(diag);
+        }
+    }
+}
+
+/// entity/value type name → (field name → declared type expression).
+fn collect_local_type_schemas(module: &Module) -> HashMap<&str, HashMap<&str, &Expr>> {
+    let mut schemas: HashMap<&str, HashMap<&str, &Expr>> = HashMap::new();
+    for d in &module.declarations {
+        let Decl::Block(b) = d else { continue };
+        if !matches!(
+            b.kind,
+            BlockKind::Entity | BlockKind::ExternalEntity | BlockKind::Value
+        ) {
+            continue;
+        }
+        let Some(name) = &b.name else { continue };
+        let mut fields: HashMap<&str, &Expr> = HashMap::new();
+        for item in &b.items {
+            match &item.kind {
+                BlockItemKind::Assignment { name: f, value }
+                | BlockItemKind::FieldWithWhen { name: f, value, .. } => {
+                    fields.insert(f.name.as_str(), value);
+                }
+                _ => {}
+            }
+        }
+        schemas.insert(name.name.as_str(), fields);
+    }
+    schemas
+}
+
+/// Whether a field's declared type expression is a `List<T>` (optionally
+/// wrapped as `List<T>?`).
+fn is_list_type(expr: &Expr) -> bool {
+    match expr {
+        Expr::GenericType { name, .. } => matches!(name.as_ref(), Expr::Ident(id) if id.name == "List"),
+        Expr::TypeOptional { inner, .. } => is_list_type(inner),
+        _ => false,
+    }
+}
+
+/// The base entity/value type name a field declaration refers to, if it is a
+/// direct (optionally optional) named-type reference — used to recurse into
+/// nested object literals. Collection and primitive types yield `None`.
+fn base_type_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Ident(id) => Some(id.name.as_str()),
+        Expr::TypeOptional { inner, .. } => base_type_name(inner),
+        _ => None,
+    }
+}
+
+fn validate_object_literal<'a>(
+    fields: &'a [NamedArg],
+    type_name: &str,
+    schemas: &HashMap<&'a str, HashMap<&'a str, &'a Expr>>,
+    out: &mut Vec<Diagnostic>,
+) {
+    // Unknown type (e.g. a primitive, or a type declared elsewhere) — nothing
+    // to validate against.
+    let Some(schema) = schemas.get(type_name) else { return };
+    for field in fields {
+        let Some(field_type) = schema.get(field.name.name.as_str()) else {
+            out.push(
+                Diagnostic::error(
+                    field.name.span,
+                    format!(
+                        "Default sets field '{}' which is not declared on '{}'.",
+                        field.name.name, type_name
+                    ),
+                )
+                .with_code("allium.default.unknownField"),
+            );
+            continue;
+        };
+        // Rule 14c: an empty list literal needs a `List<T>` target to supply
+        // the element type.
+        if let Expr::ListLiteral { elements, span } = &field.value {
+            if elements.is_empty() && !is_list_type(field_type) {
+                out.push(
+                    Diagnostic::error(
+                        *span,
+                        format!(
+                            "Empty list literal has no inferable element type: target field '{}' is not a List<T>.",
+                            field.name.name
+                        ),
+                    )
+                    .with_code("allium.list.emptyListNoElementType"),
+                );
+            }
+        }
+        // Recurse into a nested object literal against the field's declared type.
+        if let Expr::ObjectLiteral { fields: nested, .. } = &field.value {
+            if let Some(nested_type) = base_type_name(field_type) {
+                validate_object_literal(nested, nested_type, schemas, out);
+            }
+        }
+    }
 }
 
 fn collect_list_literals_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<(&'a [Expr], Span)>) {
@@ -6738,6 +6865,59 @@ mod tests {
         // `zz` is not imported — must be flagged, matching the TS analyzer.
         let ds = analyze_src("default zz/Policy my_policy = { id: \"x\" }");
         assert!(has_code(&ds, "allium.default.undefinedImportedAlias"));
+    }
+
+    // -- Default field-schema validation (drift) + rule 14c --
+
+    #[test]
+    fn default_unknown_field_flagged() {
+        let ds = analyze_src(
+            "entity Policy { id: String }\ndefault Policy p = { id: \"x\", naem: \"typo\" }",
+        );
+        assert!(has_code(&ds, "allium.default.unknownField"));
+    }
+
+    #[test]
+    fn default_known_fields_ok() {
+        let ds = analyze_src(
+            "entity Policy { id: String\n  label: String }\ndefault Policy p = { id: \"x\", label: \"y\" }",
+        );
+        assert!(!has_code(&ds, "allium.default.unknownField"));
+    }
+
+    #[test]
+    fn default_nested_object_unknown_field_flagged() {
+        // Drift in a nested value-type literal is caught recursively.
+        let ds = analyze_src(
+            "value Predicate { clause_order: List<String> }\nentity Policy { id: String\n  predicate: Predicate }\ndefault Policy p = { id: \"x\", predicate: { bogus: 5 } }",
+        );
+        assert!(has_code(&ds, "allium.default.unknownField"));
+    }
+
+    #[test]
+    fn empty_list_in_list_field_ok() {
+        let ds = analyze_src(
+            "entity E { tags: List<String> }\ndefault E e = { tags: [] }",
+        );
+        assert!(!has_code(&ds, "allium.list.emptyListNoElementType"));
+    }
+
+    #[test]
+    fn empty_list_in_non_list_field_flagged() {
+        let ds = analyze_src(
+            "entity E { id: String }\ndefault E e = { id: [] }",
+        );
+        assert!(has_code(&ds, "allium.list.emptyListNoElementType"));
+    }
+
+    #[test]
+    fn qualified_default_fields_not_validated() {
+        // Imported type's schema isn't visible to a single-module pass; no
+        // unknown-field false positives on a qualified default.
+        let ds = analyze_src(
+            "use \"./p.allium\" as gp\n\ndefault gp/Policy p = { anything: 1, goes: 2 }",
+        );
+        assert!(!has_code(&ds, "allium.default.unknownField"));
     }
 
     // -- Duplicate let --

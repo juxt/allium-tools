@@ -122,6 +122,7 @@ export function analyzeAllium(
   }
   findings.push(...findInvalidTriggerIssues(lineStarts, blocks));
   findings.push(...findListLiteralHomogeneityIssues(text, lineStarts));
+  findings.push(...findDefaultFieldSchemaIssues(text, lineStarts));
 
   findings.push(...findDuplicateConfigKeys(maskedText, lineStarts, blocks));
   findings.push(...findDuplicateDefaultNames(maskedText, lineStarts));
@@ -2722,6 +2723,183 @@ function findListLiteralHomogeneityIssues(
   };
 
   visit(module);
+  return findings;
+}
+
+type AstNode = Record<string, unknown>;
+type TypeSchema = Map<string, Map<string, AstNode>>;
+
+// The single variant key of an externally-tagged AST node (e.g. "ListLiteral").
+function nodeVariant(node: unknown): string | undefined {
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    return undefined;
+  }
+  return Object.keys(node as object)[0];
+}
+
+function isListType(typeExpr: unknown): boolean {
+  const variant = nodeVariant(typeExpr);
+  const body = (typeExpr as AstNode)?.[variant ?? ""] as AstNode | undefined;
+  if (variant === "GenericType") {
+    const name = body?.name as AstNode | undefined;
+    const ident = name?.Ident as AstNode | undefined;
+    return ident?.name === "List";
+  }
+  if (variant === "TypeOptional") {
+    return isListType(body?.inner);
+  }
+  return false;
+}
+
+function baseTypeName(typeExpr: unknown): string | undefined {
+  const variant = nodeVariant(typeExpr);
+  const body = (typeExpr as AstNode)?.[variant ?? ""] as AstNode | undefined;
+  if (variant === "Ident") {
+    return body?.name as string | undefined;
+  }
+  if (variant === "TypeOptional") {
+    return baseTypeName(body?.inner);
+  }
+  return undefined;
+}
+
+/**
+ * Validates `default Type x = { ... }` literals against the declared schema of
+ * local entity/value types. Catches drift (`allium.default.unknownField`) and
+ * rule 14c (`allium.list.emptyListNoElementType`, an empty `[]` whose target
+ * field is not a `List<T>`), recursing into nested object literals. Mirrors the
+ * Rust `check_default_field_schemas`. Qualified (imported) types are skipped —
+ * their schema is not visible to this single-module pass.
+ */
+function findDefaultFieldSchemaIssues(
+  text: string,
+  lineStarts: number[],
+): Finding[] {
+  const findings: Finding[] = [];
+  let declarations: unknown;
+  try {
+    declarations = (parseAllium(text).module as unknown as AstNode).declarations;
+  } catch {
+    return findings;
+  }
+  if (!Array.isArray(declarations)) {
+    return findings;
+  }
+
+  const schemas: TypeSchema = new Map();
+  for (const decl of declarations) {
+    const block = (decl as AstNode)?.Block as AstNode | undefined;
+    if (!block) {
+      continue;
+    }
+    if (
+      block.kind !== "Entity" &&
+      block.kind !== "ExternalEntity" &&
+      block.kind !== "Value"
+    ) {
+      continue;
+    }
+    const typeName = (block.name as AstNode | undefined)?.name as
+      | string
+      | undefined;
+    if (!typeName) {
+      continue;
+    }
+    const fields = new Map<string, AstNode>();
+    for (const item of (block.items as unknown[]) ?? []) {
+      const kind = (item as AstNode)?.kind as AstNode | undefined;
+      const assignment = (kind?.Assignment ?? kind?.FieldWithWhen) as
+        | AstNode
+        | undefined;
+      if (assignment) {
+        const fname = (assignment.name as AstNode | undefined)?.name as
+          | string
+          | undefined;
+        if (fname) {
+          fields.set(fname, assignment.value as AstNode);
+        }
+      }
+    }
+    schemas.set(typeName, fields);
+  }
+
+  const validate = (fields: unknown[], typeName: string): void => {
+    const schema = schemas.get(typeName);
+    if (!schema) {
+      return;
+    }
+    for (const field of fields) {
+      const nameNode = (field as AstNode)?.name as AstNode | undefined;
+      const fieldName = nameNode?.name as string | undefined;
+      if (!fieldName) {
+        continue;
+      }
+      const fieldType = schema.get(fieldName);
+      if (!fieldType) {
+        const span = (nameNode?.span ?? { start: 0, end: 0 }) as {
+          start: number;
+          end: number;
+        };
+        findings.push(
+          rangeFinding(
+            lineStarts,
+            span.start,
+            span.end,
+            "allium.default.unknownField",
+            `Default sets field '${fieldName}' which is not declared on '${typeName}'.`,
+            "error",
+          ),
+        );
+        continue;
+      }
+      const value = (field as AstNode).value;
+      const valueVariant = nodeVariant(value);
+      if (valueVariant === "ListLiteral") {
+        const listBody = (value as AstNode).ListLiteral as AstNode;
+        const elements = (listBody.elements as unknown[]) ?? [];
+        if (elements.length === 0 && !isListType(fieldType)) {
+          const span = (listBody.span ?? { start: 0, end: 0 }) as {
+            start: number;
+            end: number;
+          };
+          findings.push(
+            rangeFinding(
+              lineStarts,
+              span.start,
+              span.end,
+              "allium.list.emptyListNoElementType",
+              `Empty list literal has no inferable element type: target field '${fieldName}' is not a List<T>.`,
+              "error",
+            ),
+          );
+        }
+      } else if (valueVariant === "ObjectLiteral") {
+        const nestedType = baseTypeName(fieldType);
+        if (nestedType) {
+          const nestedFields =
+            ((value as AstNode).ObjectLiteral as AstNode).fields ?? [];
+          validate(nestedFields as unknown[], nestedType);
+        }
+      }
+    }
+  };
+
+  for (const decl of declarations) {
+    const def = (decl as AstNode)?.Default as AstNode | undefined;
+    if (!def || def.type_alias) {
+      continue;
+    }
+    const typeName = (def.type_name as AstNode | undefined)?.name as
+      | string
+      | undefined;
+    const value = def.value as AstNode | undefined;
+    if (!typeName || nodeVariant(value) !== "ObjectLiteral") {
+      continue;
+    }
+    const fields = ((value as AstNode).ObjectLiteral as AstNode).fields ?? [];
+    validate(fields as unknown[], typeName);
+  }
+
   return findings;
 }
 
