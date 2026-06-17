@@ -68,6 +68,49 @@ jobs:
             allium-${{ matrix.target }}.tar.gz
             allium-${{ matrix.target }}.zip
 
+  # Build a Homebrew bottle per macOS arch from the release binaries, so
+  # `brew install/upgrade allium` POURS a prebuilt package instead of running
+  # the install from source in Homebrew's build sandbox — which aborts on macOS
+  # Tahoe when it realpaths a TCC-protected ~/Documents (juxt/allium#42).
+  # The binary is :any_skip_relocation, so one bottle per arch built on the
+  # OLDEST runner OS covers that arch on all newer macOS via Homebrew's
+  # OS-version fallback. Linux has no TCC sandbox crash, so it needs no bottle.
+  bottles:
+    needs: rust-binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14 # oldest arm64 runner (sonoma) → covers sonoma..latest
+          - target: x86_64-apple-darwin
+            os: macos-13 # oldest x86_64 runner (ventura) → covers ventura..latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download binary artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: allium-${{ matrix.target }}
+          path: bin-artifact
+
+      - name: Build bottle
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ROOT_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}"
+          mkdir -p bottle-out
+          scripts/build-bottle.sh \
+            "${{ matrix.target }}" "$VERSION" \
+            "bin-artifact/allium-${{ matrix.target }}.tar.gz" \
+            "$ROOT_URL" bottle-out | tee "bottle-out/meta-${{ matrix.target }}.txt"
+
+      - name: Upload bottle
+        uses: actions/upload-artifact@v7
+        with:
+          name: allium-bottle-${{ matrix.target }}
+          path: bottle-out/*
+
   build-and-release:
     runs-on: ubuntu-latest
 
@@ -110,7 +153,7 @@ jobs:
           path: artifacts/*
 
   publish-release:
-    needs: [rust-binaries, build-and-release]
+    needs: [rust-binaries, build-and-release, bottles]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
 
@@ -121,6 +164,8 @@ jobs:
           path: artifacts
 
       - name: Publish GitHub release
+        # The `allium-*/*.tar.gz` glob attaches both the binary tarballs and the
+        # `allium-bottle-*/` bottle tarballs (the bottle do root_url points here).
         uses: softprops/action-gh-release@v3
         with:
           files: |
@@ -146,7 +191,7 @@ jobs:
           cargo publish -p allium-cli
 
   update-homebrew:
-    needs: rust-binaries
+    needs: [rust-binaries, bottles]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
@@ -154,7 +199,6 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: allium-*-*-*
           path: artifacts
 
       - name: Compute checksums
@@ -166,9 +210,30 @@ jobs:
             echo "${target}=${sha}" >> "$GITHUB_OUTPUT"
           done
 
+      - name: Assemble bottle block
+        id: bottles
+        run: |
+          # Each bottles-job leg wrote meta-<target>.txt with `tag=` / `sha256=`.
+          block="  bottle do"
+          block="${block}\n    root_url \"https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}\""
+          found=0
+          for meta in artifacts/allium-bottle-*/meta-*.txt; do
+            [ -f "$meta" ] || continue
+            tag=$(sed -n 's/^tag=//p' "$meta")
+            sha=$(sed -n 's/^sha256=//p' "$meta")
+            [ -n "$tag" ] && [ -n "$sha" ] || continue
+            block="${block}\n    sha256 cellar: :any_skip_relocation, ${tag}: \"${sha}\""
+            found=1
+          done
+          block="${block}\n  end"
+          echo "found=${found}" >> "$GITHUB_OUTPUT"
+          printf '%b' "$block" > bottle_block.txt
+          echo "Bottle block:"; cat bottle_block.txt
+
       - name: Update Homebrew formula
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          BOTTLES_FOUND: ${{ steps.bottles.outputs.found }}
           aarch64_apple_darwin: ${{ steps.checksums.outputs.aarch64_apple_darwin }}
           x86_64_apple_darwin: ${{ steps.checksums.outputs.x86_64_apple_darwin }}
           aarch64_unknown_linux_gnu: ${{ steps.checksums.outputs.aarch64_unknown_linux_gnu }}
@@ -177,9 +242,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
 
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/juxt/homebrew-allium.git" tap
-          cd tap
 
-          FORMULA="Formula/allium.rb"
+          FORMULA="tap/Formula/allium.rb"
 
           sed -i "s/^  version \".*\"/  version \"${VERSION}\"/" "$FORMULA"
 
@@ -189,8 +253,22 @@ jobs:
             sed -i "/allium-${target}\.tar\.gz/{n;s/sha256 \"[^\"]*\"/sha256 \"${sha}\"/;}" "$FORMULA"
           done
 
+          # Replace any existing bottle block, then insert the freshly assembled
+          # one after the `version` line. Done in Ruby so the multi-line block
+          # injects cleanly.
+          if [ "${BOTTLES_FOUND}" = "1" ]; then
+            BLOCK="$(cat bottle_block.txt)" ruby -i -e '
+              src = ARGF.read
+              src = src.sub(/^  bottle do\n.*?^  end\n/m, "")
+              block = ENV["BLOCK"]
+              src = src.sub(/^(  version "[^"]*"\n)/) { "#{$1}\n#{block}\n" }
+              print src
+            ' "$FORMULA"
+          fi
+
+          cd tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "$FORMULA"
+          git add "Formula/allium.rb"
           git commit -m "allium ${VERSION}"
           git push
