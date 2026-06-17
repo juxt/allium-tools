@@ -68,13 +68,18 @@ jobs:
             allium-${{ matrix.target }}.tar.gz
             allium-${{ matrix.target }}.zip
 
-  # Build a Homebrew bottle per macOS arch from the release binaries, so
+  # Build an arm64 macOS Homebrew bottle from the release binary, so
   # `brew install/upgrade allium` POURS a prebuilt package instead of running
   # the install from source in Homebrew's build sandbox — which aborts on macOS
   # Tahoe when it realpaths a TCC-protected ~/Documents (juxt/allium#42).
-  # The binary is :any_skip_relocation, so one bottle per arch built on the
-  # OLDEST runner OS covers that arch on all newer macOS via Homebrew's
-  # OS-version fallback. Linux has no TCC sandbox crash, so it needs no bottle.
+  # The binary is :any_skip_relocation, so one bottle built on the OLDEST arm64
+  # runner (sonoma) covers all newer macOS via Homebrew's OS-version fallback.
+  #
+  # arm64-only on purpose: x86_64 macOS bottles require the macos-13 Intel
+  # runner, which is scarce/deprecated and stalled the release indefinitely.
+  # macOS Tahoe is arm64-centric and Intel macOS was already un-bottled, so Intel
+  # keeps source-building as before. Linux has no TCC sandbox crash and needs no
+  # bottle.
   bottles:
     needs: rust-binaries
     if: startsWith(github.ref, 'refs/tags/v')
@@ -83,8 +88,6 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-14 # oldest arm64 runner (sonoma) → covers sonoma..latest
-          - target: x86_64-apple-darwin
-            os: macos-13 # oldest x86_64 runner (ventura) → covers ventura..latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
