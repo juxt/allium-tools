@@ -198,6 +198,13 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
+    # id-token: write lets npm publish --provenance mint a signed build
+    # attestation; contents: read is needed because job-level permissions
+    # override the workflow default (so checkout can still read the repo).
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -238,7 +245,7 @@ jobs:
           if npm view "allium-lsp@${VERSION}" version >/dev/null 2>&1; then
             echo "allium-lsp@${VERSION} is already published — skipping."
           else
-            npm publish --workspace packages/allium-lsp --access public
+            npm publish --workspace packages/allium-lsp --access public --provenance
           fi
 
   update-homebrew:
