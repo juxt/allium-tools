@@ -6,6 +6,14 @@ Allium provides a standard Language Server Protocol (LSP) server, `allium-lsp`, 
 
 The LSP server binary must be available on your system.
 
+### From npm (recommended)
+
+```bash
+npm install -g allium-lsp
+```
+
+This puts the `allium-lsp` binary on your `$PATH`. Requires Node.js ≥ 20.
+
 ### From Release Artifacts
 
 1. Download the `allium-lsp-<version>.tar.gz` for your platform from [GitHub Releases](https://github.com/juxt/allium-tools/releases).

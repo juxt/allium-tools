@@ -114,6 +114,16 @@ Install [nvim-allium](https://github.com/juxt/nvim-allium) with your plugin mana
 
 Install [allium-mode](https://github.com/juxt/allium-mode) via `straight.el`, Doom or manually. It provides syntax highlighting, indentation and LSP integration through `eglot` or `lsp-mode`. See the [Emacs setup guide](docs/editors/emacs.md).
 
+### Other editors
+
+The `allium-lsp` language server works with any LSP-compatible editor. Install it from npm (requires Node.js ≥ 20):
+
+```bash
+npm install -g allium-lsp
+```
+
+Then point your editor's LSP client at `allium-lsp --stdio` for `*.allium` files. See the [generic LSP setup guide](docs/editors/other-editors.md).
+
 ## Documentation
 
 - [Allium language](https://juxt.github.io/allium/) — rationale, usage examples, language reference

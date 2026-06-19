@@ -193,6 +193,45 @@ jobs:
           cargo publish -p allium-parser
           cargo publish -p allium-cli
 
+  publish-npm:
+    needs: build-and-release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: "npm"
+          registry-url: "https://registry.npmjs.org"
+
+      # allium-lsp bundles the WASM parser into its dist/, so the parser must be
+      # built before the package is built — same prelude as build-and-release.
+      - name: Build WASM parser
+        run: |
+          cargo install wasm-pack
+          wasm-pack build crates/allium-wasm --target nodejs --out-dir ../../packages/allium-parser-wasm
+          node -e "const p=require('./packages/allium-parser-wasm/package.json');p.name='allium-parser-wasm';p.scripts={build:'echo ok',test:'echo ok',lint:'echo ok'};require('fs').writeFileSync('./packages/allium-parser-wasm/package.json',JSON.stringify(p,null,2)+'\n')"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build allium-lsp
+        run: npm run --workspace packages/allium-lsp build
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --workspace packages/allium-lsp --access public
+
   update-homebrew:
     needs: [rust-binaries, bottles]
     if: startsWith(github.ref, 'refs/tags/v')

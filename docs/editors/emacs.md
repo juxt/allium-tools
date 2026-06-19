@@ -11,6 +11,14 @@ This guide explains how to set up Allium language support in Emacs using `allium
 
 The LSP server must be available in your system path as `allium-lsp`.
 
+### From npm (recommended)
+
+```bash
+npm install -g allium-lsp
+```
+
+This puts the `allium-lsp` binary on your `$PATH`. Requires Node.js ≥ 20.
+
 ### From release artifacts
 
 1. Download the `allium-lsp-<version>.tar.gz` for your platform from [GitHub Releases](https://github.com/juxt/allium-tools/releases).

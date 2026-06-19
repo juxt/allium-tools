@@ -3,6 +3,20 @@
   "version": "3.4.2",
   "description": "Language Server Protocol server for the Allium language.",
   "license": "MIT",
+  "keywords": ["allium", "lsp", "language-server", "specification"],
+  "homepage": "https://github.com/juxt/allium-tools/tree/main/packages/allium-lsp#readme",
+  "bugs": "https://github.com/juxt/allium-tools/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/juxt/allium-tools.git",
+    "directory": "packages/allium-lsp"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "allium-lsp": "./dist/bin.js"
   },
