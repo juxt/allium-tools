@@ -2535,6 +2535,18 @@ impl<'s> Parser<'s> {
     fn parse_paren_expr(&mut self) -> Option<Expr> {
         let start = self.advance().span; // (
 
+        // Empty parameter list `()` — e.g. a zero-argument contract signature
+        // `op: () -> ReturnType`. Represented as an empty block so the
+        // trailing `-> Type` projection attaches the return type with no
+        // parameters, mirroring how multi-parameter lists become a block.
+        if self.at(TokenKind::RParen) {
+            let end = self.advance().span; // )
+            return Some(Expr::Block {
+                span: start.merge(end),
+                items: Vec::new(),
+            });
+        }
+
         // Detect `(name: expr, ...)` — typed signature parameters.
         if self.peek_kind().is_word() && self.peek_at(1).kind == TokenKind::Colon {
             let mut bindings = Vec::new();
@@ -6310,6 +6322,49 @@ rule R {
             0,
             "expected no errors in v3 lifecycle fixture, got: {:?}",
             errors.iter().map(|d| &d.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn zero_arg_contract_signature_parens() {
+        // `op: () -> ReturnType` declares a zero-argument contract operation.
+        let r = parse_ok(
+            "-- allium: 3\nvalue Foo { value: String }\n\
+             contract Demo { list_things: () -> Set<Foo> }",
+        );
+        assert!(
+            r.diagnostics.iter().all(|d| d.severity != Severity::Error),
+            "zero-arg signature should parse without errors, got: {:?}",
+            r.diagnostics
+                .iter()
+                .map(|d| &d.message)
+                .collect::<Vec<_>>(),
+        );
+
+        // The empty parens parse to an empty parameter list: the signature
+        // value is `Set<Foo>` (a GenericType) whose name is a `() -> Set`
+        // projection with an empty block as its source.
+        let contract = r
+            .module
+            .declarations
+            .iter()
+            .find_map(|d| match d {
+                Decl::Block(b) if b.kind == BlockKind::Contract => Some(b),
+                _ => None,
+            })
+            .expect("contract decl");
+        let BlockItemKind::Assignment { value, .. } = &contract.items[0].kind else {
+            panic!("expected signature assignment, got {:?}", contract.items[0].kind);
+        };
+        let Expr::GenericType { name, .. } = value else {
+            panic!("expected GenericType signature value, got {value:?}");
+        };
+        let Expr::ProjectionMap { source, .. } = name.as_ref() else {
+            panic!("expected `params -> Return` projection, got {name:?}");
+        };
+        assert!(
+            matches!(source.as_ref(), Expr::Block { items, .. } if items.is_empty()),
+            "zero-arg params should be an empty block, got {source:?}",
         );
     }
 }
