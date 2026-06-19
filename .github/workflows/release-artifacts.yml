@@ -227,10 +227,19 @@ jobs:
       - name: Build allium-lsp
         run: npm run --workspace packages/allium-lsp build
 
+      # Skip if this version is already on the registry so re-running a
+      # release (or tagging without bumping the npm version) doesn't fail the
+      # whole workflow on "cannot publish over previously published versions".
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --workspace packages/allium-lsp --access public
+        run: |
+          VERSION="$(node -p "require('./packages/allium-lsp/package.json').version")"
+          if npm view "allium-lsp@${VERSION}" version >/dev/null 2>&1; then
+            echo "allium-lsp@${VERSION} is already published — skipping."
+          else
+            npm publish --workspace packages/allium-lsp --access public
+          fi
 
   update-homebrew:
     needs: [rust-binaries, bottles]
