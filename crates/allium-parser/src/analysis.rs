@@ -46,6 +46,49 @@ pub struct AmbiguousImports {
     pub triggers: HashMap<String, Vec<String>>,
 }
 
+/// Contributions an importing module makes, by qualified reference, to an
+/// imported module's entities and triggers. Analysis runs per file, so an
+/// imported module never sees the importers that drive its entities. These
+/// contributions are aggregated across every importer in the check set and fed
+/// back into the imported module's analysis, so a modular spec is analysed as
+/// the equivalent merged single file would be. Empty in single-file mode and
+/// whenever no `use` edge links the modules — crediting requires a real import
+/// edge, never arbitrary co-supply.
+#[derive(Debug, Default, Clone)]
+pub struct ReverseContributions {
+    /// Trigger names an importer provides via `provides: alias/Trigger(...)`.
+    /// Makes the imported module's rules that listen for them reachable (#63).
+    pub provided_triggers: HashSet<String>,
+    /// Imported entity name → status values an importer assigns, whether via
+    /// `alias/Entity.created(status: X)` (#62) or as the target of a witnessed
+    /// transition (#64).
+    pub assigned_statuses: HashMap<String, HashSet<String>>,
+    /// Imported entity name → transition edges `(from, to)` an importer
+    /// witnesses by guarding on `from` and assigning `to` on a binding typed to
+    /// that entity by the imported module's surface `provides:` (#64).
+    pub witnessed_transitions: HashMap<String, HashSet<(String, String)>>,
+}
+
+impl ReverseContributions {
+    /// True when there is nothing to contribute.
+    pub fn is_empty(&self) -> bool {
+        self.provided_triggers.is_empty()
+            && self.assigned_statuses.is_empty()
+            && self.witnessed_transitions.is_empty()
+    }
+
+    /// Fold another importer's contributions into this aggregate.
+    pub fn merge(&mut self, other: ReverseContributions) {
+        self.provided_triggers.extend(other.provided_triggers);
+        for (entity, statuses) in other.assigned_statuses {
+            self.assigned_statuses.entry(entity).or_default().extend(statuses);
+        }
+        for (entity, edges) in other.witnessed_transitions {
+            self.witnessed_transitions.entry(entity).or_default().extend(edges);
+        }
+    }
+}
+
 /// Run structural checks with full cross-module context.
 ///
 /// `external_refs` — declaration names referenced by other modules (suppresses
@@ -56,6 +99,9 @@ pub struct AmbiguousImports {
 /// absent (enables cross-spec trigger reachability).
 /// `ambiguous_imports` — names and triggers more than one imported module
 /// could resolve (enables ambiguous-reference warnings).
+/// `reverse` — contributions importers make back to this module's entities and
+/// triggers (enables cross-module status, provides and transition crediting).
+#[allow(clippy::too_many_arguments)] // each argument is a distinct cross-module map
 pub fn analyze_with_cross_module(
     module: &Module,
     source: &str,
@@ -64,6 +110,7 @@ pub fn analyze_with_cross_module(
     imported_triggers: &HashMap<String, HashSet<String>>,
     imported_entity_fields: &HashMap<String, HashMap<String, HashSet<String>>>,
     ambiguous_imports: &AmbiguousImports,
+    reverse: &ReverseContributions,
 ) -> Vec<Diagnostic> {
     let mut ctx = Ctx::new(
         module,
@@ -73,6 +120,7 @@ pub fn analyze_with_cross_module(
         Some(ambiguous_imports),
     );
     ctx.imported_entity_fields = Some(imported_entity_fields);
+    ctx.reverse_contributions = Some(reverse);
     run_checks(ctx, source)
 }
 
@@ -116,7 +164,7 @@ pub fn analyse_with_external_refs(
     external_refs: &HashSet<String>,
 ) -> crate::diagnostic::AnalyseResult {
     let diagnostics = analyze_with_external_refs(module, source, external_refs);
-    let findings = find_process_issues(module, None);
+    let findings = find_process_issues(module, None, None);
     crate::diagnostic::AnalyseResult {
         diagnostics,
         findings,
@@ -125,6 +173,7 @@ pub fn analyse_with_external_refs(
 
 /// Run structural checks plus process-level analysis with full cross-module
 /// context.
+#[allow(clippy::too_many_arguments)] // each argument is a distinct cross-module map
 pub fn analyse_with_cross_module(
     module: &Module,
     source: &str,
@@ -133,6 +182,7 @@ pub fn analyse_with_cross_module(
     imported_triggers: &HashMap<String, HashSet<String>>,
     imported_entity_fields: &HashMap<String, HashMap<String, HashSet<String>>>,
     ambiguous_imports: &AmbiguousImports,
+    reverse: &ReverseContributions,
 ) -> crate::diagnostic::AnalyseResult {
     let diagnostics = analyze_with_cross_module(
         module,
@@ -142,8 +192,9 @@ pub fn analyse_with_cross_module(
         imported_triggers,
         imported_entity_fields,
         ambiguous_imports,
+        reverse,
     );
-    let findings = find_process_issues(module, Some(imported_triggers));
+    let findings = find_process_issues(module, Some(imported_triggers), Some(reverse));
     crate::diagnostic::AnalyseResult {
         diagnostics,
         findings,
@@ -230,9 +281,11 @@ impl<'a> EntityInfo<'a> {
 fn find_process_issues(
     module: &Module,
     imported_triggers: Option<&HashMap<String, HashSet<String>>>,
+    reverse: Option<&ReverseContributions>,
 ) -> Vec<crate::diagnostic::Finding> {
     let empty = HashSet::new();
     let mut ctx = Ctx::new(module, &empty, None, imported_triggers, None);
+    ctx.reverse_contributions = reverse;
     let info = EntityInfo::from_module(module);
     ctx.collect_process_findings(&info);
     ctx.collect_conflict_findings(&info);
@@ -316,6 +369,10 @@ struct Ctx<'a> {
     /// be validated against the imported schema. Aliases whose targets fall
     /// outside the check set are absent. `None` in single-file mode.
     imported_entity_fields: Option<&'a HashMap<String, HashMap<String, HashSet<String>>>>,
+    /// Multi-file mode only: contributions importers make back to this module's
+    /// entities and triggers. `None` in single-file mode (and effectively empty
+    /// when no importer references this module).
+    reverse_contributions: Option<&'a ReverseContributions>,
     diagnostics: Vec<Diagnostic>,
     findings: Vec<crate::diagnostic::Finding>,
 }
@@ -335,6 +392,7 @@ impl<'a> Ctx<'a> {
             imported_triggers,
             ambiguous_imports,
             imported_entity_fields: None,
+            reverse_contributions: None,
             diagnostics: Vec::new(),
             findings: Vec::new(),
         }
@@ -859,6 +917,38 @@ impl Ctx<'_> {
             }
         }
 
+        // Fold in contributions from importers: an importer's qualified
+        // creation, or a transition it witnesses on a binding typed to one of
+        // this module's entities. Filtered to declared status values so an
+        // external write to an unknown value can't distort the analysis.
+        if let Some(rev) = self.reverse_contributions {
+            for (entity, statuses) in &rev.assigned_statuses {
+                if let Some((key, (_, values))) = status_by_entity.get_key_value(entity.as_str()) {
+                    let set = assigned_by_entity.entry(*key).or_default();
+                    for s in statuses {
+                        if values.contains(s.as_str()) {
+                            set.insert(s.as_str());
+                        }
+                    }
+                }
+            }
+            for (entity, edges) in &rev.witnessed_transitions {
+                if let Some((key, (_, values))) = status_by_entity.get_key_value(entity.as_str()) {
+                    for (from, to) in edges {
+                        if values.contains(from.as_str()) && values.contains(to.as_str()) {
+                            transitions_by_entity
+                                .entry(*key)
+                                .or_default()
+                                .entry(from.as_str())
+                                .or_default()
+                                .insert(to.as_str());
+                            assigned_by_entity.entry(*key).or_default().insert(to.as_str());
+                        }
+                    }
+                }
+            }
+        }
+
         for (entity_name, (idents, values)) in &status_by_entity {
             let assigned = assigned_by_entity.get(entity_name);
             let transitions = transitions_by_entity.get(entity_name);
@@ -978,6 +1068,13 @@ impl Ctx<'_> {
                 }
             }
         }
+        // Triggers an importer provides by qualified name count as provided
+        // here, so a rule listening for them is not reported unreachable (#63).
+        if let Some(rev) = self.reverse_contributions {
+            for t in &rev.provided_triggers {
+                surface_triggers.insert(t.as_str());
+            }
+        }
 
         // 3. Collect emitted triggers from rule ensures
         let mut emitted_triggers: HashSet<&str> = HashSet::new();
@@ -989,6 +1086,21 @@ impl Ctx<'_> {
 
         // 4. Collect per-rule info (with per-rule field assignments for searched evidence)
         let mut assigned_fields: HashSet<String> = HashSet::new();
+        // Statuses an importer assigns (by qualified creation or a witnessed
+        // transition's target) make the corresponding edges achievable, so a
+        // state an importer drives is not reported as a deadlock (#62, #64).
+        if let Some(rev) = self.reverse_contributions {
+            for (entity, statuses) in &rev.assigned_statuses {
+                for s in statuses {
+                    assigned_fields.insert(format!("{entity}.status.{s}"));
+                }
+            }
+            for (entity, edges) in &rev.witnessed_transitions {
+                for (_from, to) in edges {
+                    assigned_fields.insert(format!("{entity}.status.{to}"));
+                }
+            }
+        }
 
         struct RuleData<'b> {
             name: &'b str,
@@ -3217,6 +3329,13 @@ impl Ctx<'_> {
     fn check_unreachable_triggers(&mut self) {
         // Collect triggers provided by surfaces
         let mut provided: HashSet<&str> = HashSet::new();
+        // Triggers provided by an importer's surface via a qualified name count
+        // as provided for this module's listening rules (#63).
+        if let Some(rev) = self.reverse_contributions {
+            for t in &rev.provided_triggers {
+                provided.insert(t.as_str());
+            }
+        }
         for surface in self.blocks(BlockKind::Surface) {
             for item in &surface.items {
                 let BlockItemKind::Clause { keyword, value } = &item.kind else {
@@ -4163,6 +4282,343 @@ pub fn collect_trigger_outputs(module: &Module) -> HashSet<String> {
         }
     }
     names.into_iter().map(str::to_string).collect()
+}
+
+/// Collect the contributions `importer` makes to `imported` through the given
+/// `use` alias. Only qualified references using `alias` are considered, so an
+/// unrelated co-supplied file contributes nothing. Statuses and transitions are
+/// filtered to values `imported` actually declares.
+pub fn collect_reverse_contributions(
+    importer: &Module,
+    alias: &str,
+    imported: &Module,
+) -> ReverseContributions {
+    let mut out = ReverseContributions::default();
+
+    // Status values the imported module declares, per entity.
+    let imported_info = EntityInfo::from_module(imported);
+    let status_by_entity = imported_info.status_by_entity();
+
+    // Command → positional parameter entity types, from the imported module's
+    // surface `provides:` declarations (`Trigger(b: Entity)`). Used to type an
+    // importer rule's `when:` binding across the import boundary.
+    let mut command_param_types: HashMap<&str, Vec<Option<&str>>> = HashMap::new();
+    for b in module_blocks(imported, BlockKind::Surface) {
+        for item in &b.items {
+            if let BlockItemKind::Clause { keyword, value } = &item.kind {
+                if keyword == "provides" {
+                    collect_command_param_types(value, &status_by_entity, &mut command_param_types);
+                }
+            }
+        }
+    }
+
+    // 1. Provided triggers: `provides: alias/Trigger(...)` in importer surfaces.
+    for b in module_blocks(importer, BlockKind::Surface) {
+        for item in &b.items {
+            if let BlockItemKind::Clause { keyword, value } = &item.kind {
+                if keyword == "provides" {
+                    collect_qualified_provides(value, alias, &mut out.provided_triggers);
+                }
+            }
+        }
+    }
+
+    // 2 & 3. Qualified creation and witnessed transitions from importer rules.
+    for rule in module_blocks(importer, BlockKind::Rule) {
+        for item in &rule.items {
+            if let BlockItemKind::Clause { keyword, value } = &item.kind {
+                if keyword == "ensures" {
+                    collect_qualified_created(
+                        value, alias, &status_by_entity, &mut out.assigned_statuses,
+                    );
+                }
+            }
+        }
+        collect_witnessed_transition(
+            rule, alias, &command_param_types, &status_by_entity, &mut out,
+        );
+    }
+
+    out
+}
+
+/// Entity/surface/rule blocks of a given kind, as a free function (the `Ctx`
+/// method equivalent, for use before a `Ctx` exists).
+fn module_blocks(module: &Module, kind: BlockKind) -> impl Iterator<Item = &BlockDecl> {
+    module.declarations.iter().filter_map(move |d| match d {
+        Decl::Block(b) if b.kind == kind => Some(b),
+        _ => None,
+    })
+}
+
+/// Collect trigger names provided by qualified `alias/Trigger(...)` calls.
+///
+/// NOTE (known gap): mirrors `collect_call_names` in not walking `for` bodies in
+/// `provides:` (issue #61). A qualified trigger provided only inside a `for`
+/// block is therefore not collected; the general `for`-in-`provides` fix (Group
+/// A) should cover both the local and qualified collectors together.
+fn collect_qualified_provides(expr: &Expr, alias: &str, out: &mut HashSet<String>) {
+    match expr {
+        Expr::Call { function, .. } => {
+            if let Expr::QualifiedName(q) = function.as_ref() {
+                if q.qualifier.as_deref() == Some(alias) && starts_uppercase(&q.name) {
+                    out.insert(q.name.clone());
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_qualified_provides(item, alias, out);
+            }
+        }
+        Expr::WhenGuard { action, .. } => collect_qualified_provides(action, alias, out),
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_qualified_provides(&b.body, alias, out);
+            }
+            if let Some(body) = else_body {
+                collect_qualified_provides(body, alias, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect status assignments from qualified `alias/Entity.created(status: X)`
+/// calls, filtered to declared status values.
+fn collect_qualified_created(
+    expr: &Expr,
+    alias: &str,
+    status_by_entity: &HashMap<&str, HashSet<&str>>,
+    out: &mut HashMap<String, HashSet<String>>,
+) {
+    match expr {
+        Expr::Call { function, args, .. } => {
+            if let Expr::MemberAccess { object, field, .. } = function.as_ref() {
+                if field.name == "created" {
+                    if let Expr::QualifiedName(q) = object.as_ref() {
+                        if q.qualifier.as_deref() == Some(alias) {
+                            if let Some(statuses) = status_by_entity.get(q.name.as_str()) {
+                                for arg in args {
+                                    if let CallArg::Named(named) = arg {
+                                        if named.name.name == "status" {
+                                            if let Expr::Ident(val) = &named.value {
+                                                if statuses.contains(val.name.as_str()) {
+                                                    out.entry(q.name.clone())
+                                                        .or_default()
+                                                        .insert(val.name.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_qualified_created(item, alias, status_by_entity, out);
+            }
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_qualified_created(&b.body, alias, status_by_entity, out);
+            }
+            if let Some(body) = else_body {
+                collect_qualified_created(body, alias, status_by_entity, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// From an importer rule that subscribes to `alias/Trigger(binding)` and mutates
+/// the binding's status, record the witnessed transition and its target
+/// assignment against the imported entity the trigger's payload is typed to.
+///
+/// Two subscription forms are credited: a command subscription typed from the
+/// imported surface's `provides:` parameters, and a `becomes`/`transitions_to`
+/// transition trigger whose qualified subject types the binding directly.
+///
+/// NOTE (known gap): a rule that binds an imported entity by a qualified type
+/// declared on the *importer's own* surface (`context t: alias/Entity`, then
+/// `provides: LocalTrigger(t)`) is not credited — the binding's type lives in
+/// the importer's surface, not the imported module's. That arrangement (issue
+/// #64's "console owns the trigger" workaround) still reports the imported
+/// module's lifecycle warnings. Widening this needs importer-side qualified
+/// binding-type resolution; deferred pending a decision on its semantics.
+fn collect_witnessed_transition(
+    rule: &BlockDecl,
+    alias: &str,
+    command_param_types: &HashMap<&str, Vec<Option<&str>>>,
+    status_by_entity: &HashMap<&str, HashSet<&str>>,
+    out: &mut ReverseContributions,
+) {
+    // binding → imported entity. Two subscription forms are recognised:
+    //   - a command subscription `when: alias/Trigger(binding)`, typed from the
+    //     imported surface's declared parameter types; and
+    //   - a transition trigger `when: b: alias/Entity.status becomes state`,
+    //     whose qualified subject types the binding directly and whose target
+    //     state pins the transition's source.
+    let mut binding_entity: HashMap<&str, &str> = HashMap::new();
+    let mut trigger_source: HashMap<&str, &str> = HashMap::new();
+    for item in &rule.items {
+        let BlockItemKind::Clause { keyword, value } = &item.kind else {
+            continue;
+        };
+        if keyword != "when" {
+            continue;
+        }
+        match value {
+            Expr::Call { function, args, .. } => {
+                if let Expr::QualifiedName(q) = function.as_ref() {
+                    if q.qualifier.as_deref() != Some(alias) {
+                        continue;
+                    }
+                    if let Some(params) = command_param_types.get(q.name.as_str()) {
+                        for (arg, param) in args.iter().zip(params) {
+                            if let (CallArg::Positional(Expr::Ident(b)), Some(entity)) = (arg, param)
+                            {
+                                binding_entity.insert(b.name.as_str(), entity);
+                            }
+                        }
+                    }
+                }
+            }
+            Expr::Binding { name, value: inner, .. } => {
+                if let Some((entity, source)) =
+                    qualified_transition_trigger(inner, alias, status_by_entity)
+                {
+                    binding_entity.insert(name.name.as_str(), entity);
+                    trigger_source.insert(name.name.as_str(), source);
+                }
+            }
+            _ => {}
+        }
+    }
+    if binding_entity.is_empty() {
+        return;
+    }
+
+    // requires: binding.status = from ; ensures: binding.status = to. A
+    // transition trigger contributes its target state as an implicit `from`.
+    let mut froms: HashMap<&str, HashSet<&str>> = HashMap::new();
+    let mut tos: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for (binding, source) in &trigger_source {
+        froms.entry(binding).or_default().insert(source);
+    }
+    for item in &rule.items {
+        let BlockItemKind::Clause { keyword, value } = &item.kind else {
+            continue;
+        };
+        let target = match keyword.as_str() {
+            "requires" => &mut froms,
+            "ensures" => &mut tos,
+            _ => continue,
+        };
+        collect_binding_status_eq(value, &mut |binding, status| {
+            target.entry(binding).or_default().insert(status);
+        });
+    }
+
+    for (binding, entity) in &binding_entity {
+        let Some(valid) = status_by_entity.get(*entity) else {
+            continue;
+        };
+        let Some(to_set) = tos.get(binding) else {
+            continue;
+        };
+        for to in to_set {
+            if !valid.contains(to) {
+                continue;
+            }
+            out.assigned_statuses
+                .entry((*entity).to_string())
+                .or_default()
+                .insert((*to).to_string());
+            if let Some(from_set) = froms.get(binding) {
+                for from in from_set {
+                    if valid.contains(from) {
+                        out.witnessed_transitions
+                            .entry((*entity).to_string())
+                            .or_default()
+                            .insert(((*from).to_string(), (*to).to_string()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Decode a transition-trigger clause value `alias/Entity.status becomes state`
+/// (or `transitions_to`). Returns the imported entity and the target state,
+/// which is the source state of the transition the rule then witnesses. `None`
+/// unless the subject is qualified with `alias` and names a status-bearing
+/// imported entity whose declared values include the state.
+fn qualified_transition_trigger<'a>(
+    expr: &'a Expr,
+    alias: &str,
+    status_by_entity: &HashMap<&'a str, HashSet<&'a str>>,
+) -> Option<(&'a str, &'a str)> {
+    let (subject, new_state) = match expr {
+        Expr::Becomes { subject, new_state, .. }
+        | Expr::TransitionsTo { subject, new_state, .. } => (subject.as_ref(), new_state.as_ref()),
+        _ => return None,
+    };
+    let Expr::MemberAccess { object, field, .. } = subject else {
+        return None;
+    };
+    if field.name != "status" {
+        return None;
+    }
+    let Expr::QualifiedName(q) = object.as_ref() else {
+        return None;
+    };
+    if q.qualifier.as_deref() != Some(alias) {
+        return None;
+    }
+    let (entity, values) = status_by_entity.get_key_value(q.name.as_str())?;
+    let source = expr_as_ident(new_state)?;
+    if !values.contains(source) {
+        return None;
+    }
+    Some((*entity, source))
+}
+
+/// Invoke `cb(binding, status)` for each `binding.status = status` equality,
+/// walking into blocks, conjunctions and conditional branches.
+fn collect_binding_status_eq<'a>(expr: &'a Expr, cb: &mut impl FnMut(&'a str, &'a str)) {
+    match expr {
+        Expr::Comparison { left, op: ComparisonOp::Eq, right, .. } => {
+            if let (Some((binding, "status")), Some(status)) =
+                (expr_as_member_access(left), expr_as_ident(right))
+            {
+                cb(binding, status);
+            }
+        }
+        Expr::LogicalOp { left, right, .. } => {
+            collect_binding_status_eq(left, cb);
+            collect_binding_status_eq(right, cb);
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_binding_status_eq(item, cb);
+            }
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_binding_status_eq(&b.body, cb);
+            }
+            if let Some(body) = else_body {
+                collect_binding_status_eq(body, cb);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Collect each entity/value type's declared field names, keyed by type name.
@@ -6143,6 +6599,7 @@ mod tests {
             &imported,
             &HashMap::new(),
             &AmbiguousImports::default(),
+            &ReverseContributions::default(),
         )
     }
 
@@ -6190,6 +6647,7 @@ mod tests {
             &imported,
             &HashMap::new(),
             &ambiguous,
+            &ReverseContributions::default(),
         )
     }
 
@@ -6623,7 +7081,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./core.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default());
         assert!(!has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -6634,7 +7092,7 @@ mod tests {
         let result = parse(&input);
         // Only "./other.allium" is resolved — "./missing.allium" is not.
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default());
         assert!(has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -6655,7 +7113,7 @@ mod tests {
         let src = "use \"./missing.allium\" as missing\n\nentity Handler {\n  x: String\n}\n";
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new(), &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new(), &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default());
         assert!(has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -6665,7 +7123,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default());
         let diag = ds.iter().find(|d| d.code == Some("allium.use.unresolvedPath")).unwrap();
         assert!(diag.message.contains("nowhere.allium"), "message should name the path: {}", diag.message);
     }
@@ -6676,7 +7134,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default());
         assert!(!has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -6686,7 +7144,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./found.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default());
         let unresolved: Vec<_> = ds.iter()
             .filter(|d| d.code == Some("allium.use.unresolvedPath"))
             .collect();
@@ -7002,5 +7460,91 @@ mod tests {
             "config {\n  max_retries: 3\n}\n\nrule A {\n  when: Ping(x)\n  requires: config.max_retries > 0\n  ensures: Done()\n}\n",
         );
         assert!(!has_code(&ds, "allium.config.undefinedReference"));
+    }
+
+    // -- Reverse cross-module contributions --
+
+    fn module_of(src: &str) -> Module {
+        parse(&format!("-- allium: 3\n{src}")).module
+    }
+
+    #[test]
+    fn reverse_contributions_credit_qualified_creation() {
+        let imported = module_of("entity Ticket {\n  status: open | closed\n}\n");
+        let importer = module_of(
+            "use \"./t.allium\" as tickets\nrule Create {\n  when: Go()\n  ensures: tickets/Ticket.created(status: open)\n}\n",
+        );
+        let rc = collect_reverse_contributions(&importer, "tickets", &imported);
+        assert!(rc.assigned_statuses.get("Ticket").is_some_and(|s| s.contains("open")));
+        assert!(rc.witnessed_transitions.is_empty());
+        assert!(rc.provided_triggers.is_empty());
+    }
+
+    #[test]
+    fn reverse_contributions_credit_qualified_provides() {
+        let imported = module_of("entity Ticket {\n  status: open | closed\n}\n");
+        let importer = module_of(
+            "use \"./t.allium\" as tickets\nsurface Intake {\n  provides:\n    tickets/OpenTicket()\n    tickets/CloseTicket(ticket)\n}\n",
+        );
+        let rc = collect_reverse_contributions(&importer, "tickets", &imported);
+        assert!(rc.provided_triggers.contains("OpenTicket"));
+        assert!(rc.provided_triggers.contains("CloseTicket"));
+    }
+
+    #[test]
+    fn reverse_contributions_credit_witnessed_transition() {
+        let imported = module_of(
+            "entity Ticket {\n  status: closed | archived\n  transitions status {\n    closed -> archived\n    terminal: archived\n  }\n}\n\nsurface Desk {\n  provides:\n    ArchiveTicketRequested(ticket: Ticket)\n      when ticket.status = closed\n}\n",
+        );
+        let importer = module_of(
+            "use \"./t.allium\" as tickets\nrule Archive {\n  when: tickets/ArchiveTicketRequested(ticket)\n  requires: ticket.status = closed\n  ensures: ticket.status = archived\n}\n",
+        );
+        let rc = collect_reverse_contributions(&importer, "tickets", &imported);
+        assert!(rc
+            .witnessed_transitions
+            .get("Ticket")
+            .is_some_and(|e| e.contains(&("closed".to_string(), "archived".to_string()))));
+        // The transition target is also a plain assignment.
+        assert!(rc.assigned_statuses.get("Ticket").is_some_and(|s| s.contains("archived")));
+    }
+
+    #[test]
+    fn reverse_contributions_credit_becomes_transition_trigger_witness() {
+        // The `becomes` transition-trigger form types the binding via its
+        // qualified subject and pins the source state, so it needs no surface.
+        let imported = module_of(
+            "entity Ticket {\n  status: closed | archived\n  transitions status {\n    closed -> archived\n    terminal: archived\n  }\n}\n",
+        );
+        let importer = module_of(
+            "use \"./t.allium\" as tickets\nrule Archive {\n  when: t: tickets/Ticket.status becomes closed\n  ensures: t.status = archived\n}\n",
+        );
+        let rc = collect_reverse_contributions(&importer, "tickets", &imported);
+        assert!(rc
+            .witnessed_transitions
+            .get("Ticket")
+            .is_some_and(|e| e.contains(&("closed".to_string(), "archived".to_string()))));
+        assert!(rc.assigned_statuses.get("Ticket").is_some_and(|s| s.contains("archived")));
+    }
+
+    #[test]
+    fn reverse_contributions_require_the_matching_alias() {
+        let imported = module_of("entity Ticket {\n  status: open | closed\n}\n");
+        let importer = module_of(
+            "use \"./t.allium\" as tickets\nrule Create {\n  when: Go()\n  ensures: tickets/Ticket.created(status: open)\n}\n",
+        );
+        // Asked for a different alias — nothing should be credited.
+        let rc = collect_reverse_contributions(&importer, "other", &imported);
+        assert!(rc.is_empty());
+    }
+
+    #[test]
+    fn reverse_contributions_filter_undeclared_status() {
+        let imported = module_of("entity Ticket {\n  status: open | closed\n}\n");
+        // `pending` is not a declared status value — must not be credited.
+        let importer = module_of(
+            "use \"./t.allium\" as tickets\nrule Create {\n  when: Go()\n  ensures: tickets/Ticket.created(status: pending)\n}\n",
+        );
+        let rc = collect_reverse_contributions(&importer, "tickets", &imported);
+        assert!(rc.is_empty());
     }
 }

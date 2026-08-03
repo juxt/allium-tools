@@ -130,6 +130,18 @@ rule DeadlockEdgesIncludeBlockedReasons {
     ensures: reason != null
 }
 
+-- Reverse cross-module aggregation: a transition an importer witnesses on the
+-- imported entity counts toward that entity's lifecycle, so the edge is
+-- achievable and no deadlock is reported. Requires a real use import edge.
+rule ImporterWitnessedTransitionCountsAsAchievable {
+    when: EntityStateAnalysed(entity, state, terminal_states)
+    requires: entity is imported by another file in the analysis set via use alias
+    requires: importer rule subscribes to an entity trigger qualified via alias, guards on state, and assigns target
+    requires: entity declares a transition edge from state to target
+
+    ensures: NoAchievablePathToTerminal(entity, state) = false
+}
+
 rule DeadlockCycleDetectedViaDFS {
     when: DeadlockReported(entity, state, achievable_edges)
     requires: CycleExistsInAchievableEdges(state, achievable_edges) = true
@@ -168,6 +180,16 @@ rule UnreachableTriggerIncludesSurfacesChecked {
     when: UnreachableTriggerReported(trigger_name, surface_names)
 
     ensures: SurfacesCheckedReported(surface_names)
+}
+
+-- Reverse cross-module aggregation: a trigger an importer provides by
+-- qualified name (alias/Trigger) satisfies the imported module's listeners, so
+-- no unreachable_trigger finding is produced for them.
+rule QualifiedProvidesFromImporterSatisfiesListeners {
+    when: TriggerAnalysed(trigger_name, listening_rules, surface_names)
+    requires: an importer in the analysis set provides trigger_name qualified via use alias
+
+    ensures: AnalyseFindingNotObserved(type: unreachable_trigger, trigger: trigger_name)
 }
 
 -- Conflict finding

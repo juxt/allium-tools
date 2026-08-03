@@ -287,6 +287,61 @@ rule QualifiedTriggerOutsideCheckSetNotFlagged {
     ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
 }
 
+-- Reverse cross-module aggregation: #19 credits a listener's imports for
+-- emitters (forward). These rules credit an importer's contributions back to
+-- the module it imports (reverse), so a modular spec is analysed as the
+-- equivalent merged single file would be. Crediting requires a real use import
+-- edge; the imported module analysed alone keeps its local warnings.
+
+rule QualifiedCreationCreditsImportedStatusLifecycle {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: inputs resolve to multiple files
+    requires: file_a declares entity with status value
+    requires: file_b has use declaration mapping alias to file_a
+    requires: file_b assigns status value via qualified creation (e.g. alias/Entity.created(status: value))
+
+    ensures: FindingNotObserved(code: "allium.status.unreachableValue", status: value)
+}
+
+rule QualifiedProvidesCreditsImportedTriggerReachability {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: inputs resolve to multiple files
+    requires: file_a rule listens for trigger
+    requires: file_b has use declaration mapping alias to file_a
+    requires: file_b surface provides trigger qualified via alias (e.g. alias/Trigger(params))
+
+    ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
+}
+
+rule WitnessedTransitionCreditsImportedLifecycle {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: inputs resolve to multiple files
+    requires: file_a declares entity with transition edge from source to target
+    requires: file_a surface provides trigger with payload typed to entity
+    requires: file_b has use declaration mapping alias to file_a
+    requires: file_b rule subscribes to trigger qualified via alias, guards on source, assigns target
+
+    ensures: FindingNotObserved(code: "allium.status.unreachableValue", status: target)
+    ensures: FindingNotObserved(code: "allium.status.noExit", status: source)
+}
+
+rule ImportedModuleAloneKeepsLocalLifecycleWarnings {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: inputs resolve to a single file
+    requires: file declares status value assigned only by an importer outside the check set
+
+    ensures: FindingObserved(code: "allium.status.unreachableValue", status: value, severity: warning)
+}
+
+rule CoSuppliedFilesWithoutImportEdgeDoNotContribute {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: inputs resolve to multiple files
+    requires: file_a declares entity with status value
+    requires: file_b assigns status value but has no use declaration mapping to file_a
+
+    ensures: FindingObserved(code: "allium.status.unreachableValue", status: value, severity: warning)
+}
+
 rule AmbiguousUnqualifiedNameReferenceWarns {
     when: CheckCommandInvokedWithInputs(inputs)
     requires: inputs resolve to multiple files

@@ -3,7 +3,7 @@ mod test_plan;
 
 use allium_parser::diagnostic::Severity;
 use allium_parser::lexer::SourceMap;
-use allium_parser::AmbiguousImports;
+use allium_parser::{AmbiguousImports, ReverseContributions};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -202,6 +202,10 @@ struct CrossModuleContext {
     /// Per-file: names and triggers that more than one imported module could
     /// resolve, so unqualified references to them are ambiguous (issue #15).
     ambiguous_imports: HashMap<PathBuf, AmbiguousImports>,
+    /// Per-imported-file: contributions its importers make back to it (qualified
+    /// creations, provides and witnessed transitions). Keyed by the imported
+    /// (target) module, aggregated across all its importers in the check set.
+    reverse_contributions: HashMap<PathBuf, ReverseContributions>,
 }
 
 /// Shared loop for commands that process multiple .allium files.
@@ -212,7 +216,7 @@ struct CrossModuleContext {
 fn run_multi_file(
     command: &str,
     args: &[String],
-    analyse_file: impl Fn(&Path, &str, &allium_parser::ParseResult, &SourceMap, &HashSet<String>, &HashSet<String>, &HashMap<String, HashSet<String>>, &HashMap<String, HashMap<String, HashSet<String>>>, &AmbiguousImports) -> FileResult,
+    analyse_file: impl Fn(&Path, &str, &allium_parser::ParseResult, &SourceMap, &HashSet<String>, &HashSet<String>, &HashMap<String, HashSet<String>>, &HashMap<String, HashMap<String, HashSet<String>>>, &AmbiguousImports, &ReverseContributions) -> FileResult,
 ) -> ExitCode {
     let files = resolve_files(args);
     if files.is_empty() {
@@ -246,6 +250,7 @@ fn run_multi_file(
 
     // Pass 3: analyse each file with cross-module context.
     let no_ambiguity = AmbiguousImports::default();
+    let no_reverse = ReverseContributions::default();
     for pf in &parsed {
         let source_map = SourceMap::new(&pf.source);
         let key = canonical_key(&pf.path);
@@ -254,7 +259,8 @@ fn run_multi_file(
         let imports = ctx.imported_triggers.get(&key).cloned().unwrap_or_default();
         let imported_fields = ctx.imported_entity_fields.get(&key).cloned().unwrap_or_default();
         let ambiguous = ctx.ambiguous_imports.get(&key).unwrap_or(&no_ambiguity);
-        let file_result = analyse_file(&pf.path, &pf.source, &pf.result, &source_map, &refs, &use_paths, &imports, &imported_fields, ambiguous);
+        let reverse = ctx.reverse_contributions.get(&key).unwrap_or(&no_reverse);
+        let file_result = analyse_file(&pf.path, &pf.source, &pf.result, &source_map, &refs, &use_paths, &imports, &imported_fields, ambiguous, reverse);
 
         if file_result.has_issues {
             any_issues = true;
@@ -318,9 +324,17 @@ fn build_cross_module_context(parsed: &[ParsedFile]) -> CrossModuleContext {
         })
         .collect();
 
+    // Imported module AST by canonical key, so an importer's contributions can
+    // be resolved against the module it imports (types, status values).
+    let module_by_key: HashMap<PathBuf, &allium_parser::Module> = parsed
+        .iter()
+        .map(|pf| (canonical_key(&pf.path), &pf.result.module))
+        .collect();
+
     let mut external_refs: HashMap<PathBuf, HashSet<String>> = HashMap::new();
     let mut resolved_use_paths: HashMap<PathBuf, HashSet<String>> = HashMap::new();
     let mut imported_triggers: HashMap<PathBuf, HashMap<String, HashSet<String>>> = HashMap::new();
+    let mut reverse_contributions: HashMap<PathBuf, ReverseContributions> = HashMap::new();
     let mut imported_entity_fields: HashMap<
         PathBuf,
         HashMap<String, HashMap<String, HashSet<String>>>,
@@ -353,6 +367,26 @@ fn build_cross_module_context(parsed: &[ParsedFile]) -> CrossModuleContext {
                 if let Some(alias) = &u.alias {
                     alias_targets.insert(alias.name.as_str(), target_key);
                     aliases.insert(alias.name.as_str(), path_text);
+                }
+            }
+        }
+
+        // 0. Reverse contributions — for each alias resolving to a module in the
+        //    check set, the contributions this importer makes back to it
+        //    (qualified creations, provides, witnessed transitions), aggregated
+        //    against the imported (target) module.
+        for (alias, target_key) in &alias_targets {
+            if let Some(target_module) = module_by_key.get(target_key) {
+                let contrib = allium_parser::collect_reverse_contributions(
+                    &pf.result.module,
+                    alias,
+                    target_module,
+                );
+                if !contrib.is_empty() {
+                    reverse_contributions
+                        .entry(target_key.clone())
+                        .or_default()
+                        .merge(contrib);
                 }
             }
         }
@@ -462,6 +496,7 @@ fn build_cross_module_context(parsed: &[ParsedFile]) -> CrossModuleContext {
         imported_triggers,
         imported_entity_fields,
         ambiguous_imports,
+        reverse_contributions,
     }
 }
 
@@ -475,8 +510,8 @@ fn canonical_key(path: &Path) -> PathBuf {
 }
 
 fn cmd_check(args: &[String]) -> ExitCode {
-    run_multi_file("check", args, |path, source, result, source_map, external_refs, resolved_use_paths, imported_triggers, imported_entity_fields, ambiguous_imports| {
-        let analysis = allium_parser::analyze_with_cross_module(&result.module, source, external_refs, resolved_use_paths, imported_triggers, imported_entity_fields, ambiguous_imports);
+    run_multi_file("check", args, |path, source, result, source_map, external_refs, resolved_use_paths, imported_triggers, imported_entity_fields, ambiguous_imports, reverse| {
+        let analysis = allium_parser::analyze_with_cross_module(&result.module, source, external_refs, resolved_use_paths, imported_triggers, imported_entity_fields, ambiguous_imports, reverse);
         let diagnostics: Vec<serde_json::Value> = result
             .diagnostics
             .iter()
@@ -491,8 +526,8 @@ fn cmd_check(args: &[String]) -> ExitCode {
 }
 
 fn cmd_analyse(args: &[String]) -> ExitCode {
-    run_multi_file("analyse", args, |path, source, result, source_map, external_refs, resolved_use_paths, imported_triggers, imported_entity_fields, ambiguous_imports| {
-        let analyse_result = allium_parser::analyse_with_cross_module(&result.module, source, external_refs, resolved_use_paths, imported_triggers, imported_entity_fields, ambiguous_imports);
+    run_multi_file("analyse", args, |path, source, result, source_map, external_refs, resolved_use_paths, imported_triggers, imported_entity_fields, ambiguous_imports, reverse| {
+        let analyse_result = allium_parser::analyse_with_cross_module(&result.module, source, external_refs, resolved_use_paths, imported_triggers, imported_entity_fields, ambiguous_imports, reverse);
         let diagnostics: Vec<serde_json::Value> = result
             .diagnostics
             .iter()
