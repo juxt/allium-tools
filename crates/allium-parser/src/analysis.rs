@@ -4481,10 +4481,10 @@ pub fn collect_trigger_outputs(module: &Module) -> HashSet<String> {
 /// `use` alias. Only qualified references using `alias` are considered, so an
 /// unrelated co-supplied file contributes nothing. Statuses and transitions are
 /// filtered to values `imported` actually declares.
-pub fn collect_reverse_contributions(
-    importer: &Module,
+pub fn collect_reverse_contributions<'a>(
+    importer: &'a Module,
     alias: &str,
-    imported: &Module,
+    imported: &'a Module,
 ) -> ReverseContributions {
     let mut out = ReverseContributions::default();
 
@@ -4492,9 +4492,12 @@ pub fn collect_reverse_contributions(
     let imported_info = EntityInfo::from_module(imported);
     let status_by_entity = imported_info.status_by_entity();
 
-    // Command → positional parameter entity types, from the imported module's
-    // surface `provides:` declarations (`Trigger(b: Entity)`). Used to type an
-    // importer rule's `when:` binding across the import boundary.
+    // Command → positional parameter entity types. Two sources contribute a
+    // parameter typed to a status-bearing imported entity:
+    //   - the imported module's surface `provides:` (`Trigger(b: Entity)`),
+    //     typing a binding the importer subscribes to across the boundary; and
+    //   - the importer's OWN surface `provides:`, where a parameter is typed to
+    //     a qualified imported entity inline or via a `context` binding (#65).
     let mut command_param_types: HashMap<&str, Vec<Option<&str>>> = HashMap::new();
     for b in module_blocks(imported, BlockKind::Surface) {
         for item in &b.items {
@@ -4505,6 +4508,9 @@ pub fn collect_reverse_contributions(
             }
         }
     }
+    collect_importer_command_param_types(
+        importer, alias, &status_by_entity, &mut command_param_types,
+    );
 
     // 1. Provided triggers: `provides: alias/Trigger(...)` in importer surfaces.
     for b in module_blocks(importer, BlockKind::Surface) {
@@ -4574,6 +4580,123 @@ fn collect_qualified_provides(expr: &Expr, alias: &str, out: &mut HashSet<String
                 collect_qualified_provides(body, alias, out);
             }
         }
+        Expr::For { body, .. } => collect_qualified_provides(body, alias, out),
+        _ => {}
+    }
+}
+
+/// Augment `out` with the importer's own surface `provides:` parameter types,
+/// where a parameter is typed to a status-bearing imported entity — inline
+/// (`Trigger(p: alias/Entity)`) or through a surface `context p: alias/Entity`
+/// binding. Lets an importer that owns a trigger still be recognised as
+/// operating on the imported entity (#65).
+fn collect_importer_command_param_types<'a>(
+    importer: &'a Module,
+    alias: &str,
+    status_by_entity: &HashMap<&'a str, HashSet<&'a str>>,
+    out: &mut HashMap<&'a str, Vec<Option<&'a str>>>,
+) {
+    for surface in module_blocks(importer, BlockKind::Surface) {
+        // Surface bindings (context/facing) typed to a qualified imported entity.
+        let mut context_types: HashMap<&str, &str> = HashMap::new();
+        for item in &surface.items {
+            if let BlockItemKind::Clause { keyword, value } = &item.kind {
+                if keyword == "context" || keyword == "facing" {
+                    qualified_context_binding(value, alias, status_by_entity, &mut context_types);
+                }
+            }
+        }
+        for item in &surface.items {
+            if let BlockItemKind::Clause { keyword, value } = &item.kind {
+                if keyword == "provides" {
+                    collect_provides_param_types(
+                        value, alias, &context_types, status_by_entity, out,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Record a surface `context`/`facing` binding typed to a qualified imported
+/// entity: `name: alias/Entity` maps `name` to the imported entity.
+fn qualified_context_binding<'a>(
+    expr: &'a Expr,
+    alias: &str,
+    status_by_entity: &HashMap<&'a str, HashSet<&'a str>>,
+    out: &mut HashMap<&'a str, &'a str>,
+) {
+    match expr {
+        Expr::Binding { name, value, .. } => {
+            if let Expr::QualifiedName(q) = value.as_ref() {
+                if q.qualifier.as_deref() == Some(alias) {
+                    if let Some((entity, _)) = status_by_entity.get_key_value(q.name.as_str()) {
+                        out.insert(&name.name, entity);
+                    }
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                qualified_context_binding(item, alias, status_by_entity, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Map an importer surface's provided-trigger parameters to imported entities,
+/// via inline qualified annotations or the surface's context bindings.
+fn collect_provides_param_types<'a>(
+    expr: &'a Expr,
+    alias: &str,
+    context_types: &HashMap<&'a str, &'a str>,
+    status_by_entity: &HashMap<&'a str, HashSet<&'a str>>,
+    out: &mut HashMap<&'a str, Vec<Option<&'a str>>>,
+) {
+    match expr {
+        Expr::Call { function, args, .. } => {
+            if let Expr::Ident(fn_name) = function.as_ref() {
+                let params: Vec<Option<&str>> = args
+                    .iter()
+                    .map(|arg| match arg {
+                        CallArg::Positional(Expr::Ident(id)) => {
+                            context_types.get(id.name.as_str()).copied()
+                        }
+                        CallArg::Named(n) => match &n.value {
+                            Expr::QualifiedName(q) if q.qualifier.as_deref() == Some(alias) => {
+                                status_by_entity.get_key_value(q.name.as_str()).map(|(k, _)| *k)
+                            }
+                            Expr::Ident(v) => context_types.get(v.name.as_str()).copied(),
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .collect();
+                if params.iter().any(Option::is_some) {
+                    out.insert(&fn_name.name, params);
+                }
+            }
+        }
+        Expr::WhenGuard { action, .. } => {
+            collect_provides_param_types(action, alias, context_types, status_by_entity, out)
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_provides_param_types(item, alias, context_types, status_by_entity, out);
+            }
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_provides_param_types(&b.body, alias, context_types, status_by_entity, out);
+            }
+            if let Some(body) = else_body {
+                collect_provides_param_types(body, alias, context_types, status_by_entity, out);
+            }
+        }
+        Expr::For { body, .. } => {
+            collect_provides_param_types(body, alias, context_types, status_by_entity, out)
+        }
         _ => {}
     }
 }
@@ -4629,21 +4752,16 @@ fn collect_qualified_created(
     }
 }
 
-/// From an importer rule that subscribes to `alias/Trigger(binding)` and mutates
-/// the binding's status, record the witnessed transition and its target
-/// assignment against the imported entity the trigger's payload is typed to.
+/// From an importer rule that mutates the status of a binding typed to an
+/// imported entity, record the witnessed transition and its target assignment
+/// against that entity.
 ///
-/// Two subscription forms are credited: a command subscription typed from the
-/// imported surface's `provides:` parameters, and a `becomes`/`transitions_to`
-/// transition trigger whose qualified subject types the binding directly.
-///
-/// NOTE (known gap): a rule that binds an imported entity by a qualified type
-/// declared on the *importer's own* surface (`context t: alias/Entity`, then
-/// `provides: LocalTrigger(t)`) is not credited — the binding's type lives in
-/// the importer's surface, not the imported module's. That arrangement (issue
-/// #64's "console owns the trigger" workaround) still reports the imported
-/// module's lifecycle warnings. Widening this needs importer-side qualified
-/// binding-type resolution; deferred pending a decision on its semantics.
+/// The binding's imported-entity type is resolved from any of: a qualified
+/// command subscription (`when: alias/Trigger(binding)`) via the imported
+/// surface's parameters; a `becomes`/`transitions_to` transition trigger whose
+/// qualified subject types the binding directly; or a local trigger the
+/// importer owns whose parameters its own surface typed to a qualified imported
+/// entity (`context t: alias/Entity`, then `provides: LocalTrigger(t)`, #65).
 fn collect_witnessed_transition(
     rule: &BlockDecl,
     alias: &str,
@@ -4668,11 +4786,18 @@ fn collect_witnessed_transition(
         }
         match value {
             Expr::Call { function, args, .. } => {
-                if let Expr::QualifiedName(q) = function.as_ref() {
-                    if q.qualifier.as_deref() != Some(alias) {
-                        continue;
-                    }
-                    if let Some(params) = command_param_types.get(q.name.as_str()) {
+                // Resolve the subscribed trigger's parameter types. A qualified
+                // `alias/Trigger` names an imported trigger; a bare `Trigger`
+                // names a local one the importer owns but whose parameters the
+                // importer's surface typed to an imported entity (#65). Either
+                // way the type table is keyed by the bare trigger name.
+                let trigger_name = match function.as_ref() {
+                    Expr::QualifiedName(q) if q.qualifier.as_deref() == Some(alias) => Some(&q.name),
+                    Expr::Ident(id) => Some(&id.name),
+                    _ => None,
+                };
+                if let Some(name) = trigger_name {
+                    if let Some(params) = command_param_types.get(name.as_str()) {
                         for (arg, param) in args.iter().zip(params) {
                             if let (CallArg::Positional(Expr::Ident(b)), Some(entity)) = (arg, param)
                             {
@@ -7847,6 +7972,28 @@ surface AccountManagement {
             .get("Ticket")
             .is_some_and(|e| e.contains(&("closed".to_string(), "archived".to_string()))));
         // The transition target is also a plain assignment.
+        assert!(rc.assigned_statuses.get("Ticket").is_some_and(|s| s.contains("archived")));
+    }
+
+    #[test]
+    fn reverse_contributions_credit_importer_owned_trigger_via_qualified_context() {
+        // #65: the importer owns the trigger and surface; the binding is typed
+        // to the imported entity by the surface's qualified `context`. The
+        // witnessed transition must still be credited.
+        let imported = module_of(
+            "entity Ticket {\n  status: closed | archived\n  transitions status {\n    closed -> archived\n    terminal: archived\n  }\n}\n",
+        );
+        let importer = module_of(
+            "use \"./t.allium\" as tickets\nsurface Desk {\n  context t: tickets/Ticket\n  provides:\n    ArchiveTicketRequested(t)\n      when t.status = closed\n}\nrule Archive {\n  when: ArchiveTicketRequested(ticket)\n  requires: ticket.status = closed\n  ensures: ticket.status = archived\n}\n",
+        );
+        let rc = collect_reverse_contributions(&importer, "tickets", &imported);
+        assert!(
+            rc.witnessed_transitions
+                .get("Ticket")
+                .is_some_and(|e| e.contains(&("closed".to_string(), "archived".to_string()))),
+            "importer-owned trigger typed via qualified context must witness the transition. Got: {:?}",
+            rc.witnessed_transitions
+        );
         assert!(rc.assigned_statuses.get("Ticket").is_some_and(|s| s.contains("archived")));
     }
 

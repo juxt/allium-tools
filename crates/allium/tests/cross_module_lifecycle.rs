@@ -1,7 +1,9 @@
 //! Cross-module reverse aggregation: an importer's qualified contributions to
 //! an imported module's entities and triggers must be credited when both are
 //! in the check set. Covers issues #62 (qualified creation), #63 (qualified
-//! `provides:`), and #64 (a transition witnessed across an import).
+//! `provides:`), #64 (a transition witnessed across an import), and #65 (an
+//! importer-owned trigger whose binding is typed to the imported entity by a
+//! qualified surface context).
 //!
 //! The oracle throughout is the merged single-file control: the two-file pair
 //! must produce exactly what the equivalent one-file spec produces. Analysing
@@ -563,6 +565,89 @@ fn t64_merged_control_is_clean() {
         "merged control must have no deadlock (the oracle).\n{stdout}"
     );
     assert!(ok, "merged control analyse should exit 0.\n{stdout}");
+}
+
+// ===========================================================================
+// #65 — importer owns the trigger; binding typed via a qualified surface context
+// ===========================================================================
+
+const TICKET_65: &str = r#"-- allium: 3
+
+entity Ticket {
+    status: closed | archived
+
+    transitions status {
+        closed -> archived
+        terminal: archived
+    }
+}
+
+rule CreateTicket {
+    when: CreateTicketRequested()
+    ensures: Ticket.created(status: closed)
+}
+
+surface TicketDesk {
+    provides:
+        CreateTicketRequested()
+}
+"#;
+
+const CONSOLE_65: &str = r#"-- allium: 3
+
+use "./ticket.allium" as tickets
+
+surface ArchiveDesk {
+    context t: tickets/Ticket
+    provides:
+        ArchiveTicketRequested(t)
+            when t.status = closed
+}
+
+rule ArchiveClosedTicket {
+    when: ArchiveTicketRequested(ticket)
+    requires: ticket.status = closed
+    ensures: ticket.status = archived
+}
+"#;
+
+#[test]
+fn t65_importer_owned_trigger_credits_transition() {
+    let dir = TempDir::new("65-pair");
+    dir.write("ticket.allium", TICKET_65);
+    dir.write("operator-console.allium", CONSOLE_65);
+
+    let (analyse_ok, analyse_out) = run("analyse", &[dir.path().to_str().unwrap()]);
+    assert!(
+        !parse_findings(&analyse_out).iter().any(|f| f.kind == "deadlock"),
+        "the console witnesses closed -> archived on tickets/Ticket — no deadlock.\nFindings: {:?}",
+        parse_findings(&analyse_out).iter().map(|f| f.summary.clone()).collect::<Vec<_>>()
+    );
+    assert!(analyse_ok, "analyse on the pair should exit 0.\n{analyse_out}");
+
+    let (check_ok, check_out) = run("check", &[dir.path().to_str().unwrap()]);
+    let diags = parse_diagnostics(&check_out);
+    assert!(
+        !diags.iter().any(|d| d.code == "allium.status.noExit" && d.message.contains("closed")),
+        "closed has a witnessed exit — no noExit.\n{check_out}"
+    );
+    assert!(
+        !diags.iter().any(|d| d.code == "allium.status.unreachableValue" && d.message.contains("archived")),
+        "archived is assigned by the witnessing rule — not unreachable.\n{check_out}"
+    );
+    assert!(check_ok, "check on the pair should exit 0.\n{check_out}");
+}
+
+#[test]
+fn t65_deadlock_when_ticket_analysed_alone() {
+    let dir = TempDir::new("65-alone");
+    dir.write("ticket.allium", TICKET_65);
+
+    let (_ok, stdout) = run("analyse", &[&dir.file("ticket.allium")]);
+    assert!(
+        parse_findings(&stdout).iter().any(|f| f.kind == "deadlock"),
+        "analysed alone, ticket.allium has no witness for closed -> archived and must deadlock.\n{stdout}"
+    );
 }
 
 // ===========================================================================

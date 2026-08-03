@@ -152,6 +152,20 @@ rule ImporterWitnessedTransitionCountsAsAchievable {
     ensures: NoAchievablePathToTerminal(entity, state) = false
 }
 
+-- The witness holds however the importer's binding is typed to the imported
+-- entity: a qualified subscription, a becomes/transitions_to trigger, or a
+-- local trigger whose parameter the importer's own surface typed alias/entity
+-- via a context binding (#65).
+rule ImporterOwnedTriggerWitnessCountsAsAchievable {
+    when: EntityStateAnalysed(entity, state, terminal_states)
+    requires: entity is imported by another file in the analysis set via use alias
+    requires: importer surface types a trigger parameter alias/entity via a context binding
+    requires: importer rule subscribes to that trigger, guards on state, and assigns target
+    requires: entity declares a transition edge from state to target
+
+    ensures: NoAchievablePathToTerminal(entity, state) = false
+}
+
 rule DeadlockCycleDetectedViaDFS {
     when: DeadlockReported(entity, state, achievable_edges)
     requires: CycleExistsInAchievableEdges(state, achievable_edges) = true
