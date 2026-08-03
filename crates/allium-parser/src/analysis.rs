@@ -483,6 +483,29 @@ impl<'a> Ctx<'a> {
                     for item in &b.items {
                         collect_accessed_fields_from_item(&item.kind, &mut names);
                     }
+                    // Within an entity, a derived field may reference a sibling
+                    // field by bare name (`is_positive: count > 0`), which is a
+                    // use of that field (#59). Credit bare identifiers only where
+                    // they name one of this entity's own declared fields, so a
+                    // like-named binding elsewhere can't mask a genuine unused.
+                    if matches!(b.kind, BlockKind::Entity | BlockKind::ExternalEntity) {
+                        let field_names: HashSet<&str> = b
+                            .items
+                            .iter()
+                            .filter_map(|it| match &it.kind {
+                                BlockItemKind::Assignment { name, .. }
+                                | BlockItemKind::FieldWithWhen { name, .. } => {
+                                    Some(name.name.as_str())
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        let mut idents = HashSet::new();
+                        for item in &b.items {
+                            collect_idents_from_item(&item.kind, &mut idents);
+                        }
+                        names.extend(idents.intersection(&field_names).copied());
+                    }
                 }
                 Decl::Invariant(inv) => {
                     collect_accessed_fields_from_expr(&inv.body, &mut names);
@@ -3661,6 +3684,151 @@ impl Ctx<'_> {
     }
 }
 
+/// Collect bare identifier names referenced anywhere in a block item's
+/// expressions. Used to detect a derived field referencing a sibling field by
+/// bare name (#59); callers intersect the result with the entity's declared
+/// field names, so unrelated identifiers never widen the accessed set.
+fn collect_idents_from_item<'a>(kind: &'a BlockItemKind, out: &mut HashSet<&'a str>) {
+    match kind {
+        BlockItemKind::Clause { value, .. }
+        | BlockItemKind::Assignment { value, .. }
+        | BlockItemKind::ParamAssignment { value, .. }
+        | BlockItemKind::Let { value, .. }
+        | BlockItemKind::PathAssignment { value, .. }
+        | BlockItemKind::InvariantBlock { body: value, .. }
+        | BlockItemKind::FieldWithWhen { value, .. } => collect_idents_from_expr(value, out),
+        BlockItemKind::ForBlock { collection, filter, items, .. } => {
+            collect_idents_from_expr(collection, out);
+            if let Some(f) = filter {
+                collect_idents_from_expr(f, out);
+            }
+            for item in items {
+                collect_idents_from_item(&item.kind, out);
+            }
+        }
+        BlockItemKind::IfBlock { branches, else_items } => {
+            for b in branches {
+                collect_idents_from_expr(&b.condition, out);
+                for item in &b.items {
+                    collect_idents_from_item(&item.kind, out);
+                }
+            }
+            if let Some(items) = else_items {
+                for item in items {
+                    collect_idents_from_item(&item.kind, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect bare identifier names referenced within an expression. A missed
+/// variant only fails to credit a reference (an over-warn), never suppresses a
+/// genuine one.
+fn collect_idents_from_expr<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
+    match expr {
+        Expr::Ident(id) => {
+            out.insert(&id.name);
+        }
+        Expr::MemberAccess { object, .. } | Expr::OptionalAccess { object, .. } => {
+            collect_idents_from_expr(object, out);
+        }
+        Expr::Call { function, args, .. } => {
+            collect_idents_from_expr(function, out);
+            for a in args {
+                match a {
+                    CallArg::Positional(e) => collect_idents_from_expr(e, out),
+                    CallArg::Named(n) => collect_idents_from_expr(&n.value, out),
+                }
+            }
+        }
+        Expr::BinaryOp { left, right, .. }
+        | Expr::Comparison { left, right, .. }
+        | Expr::LogicalOp { left, right, .. }
+        | Expr::Pipe { left, right, .. }
+        | Expr::NullCoalesce { left, right, .. } => {
+            collect_idents_from_expr(left, out);
+            collect_idents_from_expr(right, out);
+        }
+        Expr::Not { operand, .. }
+        | Expr::Exists { operand, .. }
+        | Expr::NotExists { operand, .. }
+        | Expr::TypeOptional { inner: operand, .. } => {
+            collect_idents_from_expr(operand, out);
+        }
+        Expr::In { element, collection, .. } | Expr::NotIn { element, collection, .. } => {
+            collect_idents_from_expr(element, out);
+            collect_idents_from_expr(collection, out);
+        }
+        Expr::Where { source, condition, .. }
+        | Expr::With { source, predicate: condition, .. } => {
+            collect_idents_from_expr(source, out);
+            collect_idents_from_expr(condition, out);
+        }
+        Expr::WhenGuard { action, condition, .. } => {
+            collect_idents_from_expr(action, out);
+            collect_idents_from_expr(condition, out);
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_idents_from_expr(item, out);
+            }
+        }
+        Expr::Binding { value, .. } | Expr::LetExpr { value, .. } => {
+            collect_idents_from_expr(value, out)
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_idents_from_expr(&b.condition, out);
+                collect_idents_from_expr(&b.body, out);
+            }
+            if let Some(body) = else_body {
+                collect_idents_from_expr(body, out);
+            }
+        }
+        Expr::For { collection, filter, body, .. } => {
+            collect_idents_from_expr(collection, out);
+            if let Some(f) = filter {
+                collect_idents_from_expr(f, out);
+            }
+            collect_idents_from_expr(body, out);
+        }
+        Expr::Lambda { body, .. } => collect_idents_from_expr(body, out),
+        Expr::TransitionsTo { subject, new_state, .. }
+        | Expr::Becomes { subject, new_state, .. } => {
+            collect_idents_from_expr(subject, out);
+            collect_idents_from_expr(new_state, out);
+        }
+        Expr::SetLiteral { elements, .. } | Expr::ListLiteral { elements, .. } => {
+            for e in elements {
+                collect_idents_from_expr(e, out);
+            }
+        }
+        Expr::ObjectLiteral { fields, .. } => {
+            for f in fields {
+                collect_idents_from_expr(&f.value, out);
+            }
+        }
+        Expr::GenericType { name, args, .. } => {
+            collect_idents_from_expr(name, out);
+            for a in args {
+                collect_idents_from_expr(a, out);
+            }
+        }
+        Expr::ProjectionMap { source, .. } => collect_idents_from_expr(source, out),
+        Expr::JoinLookup { entity, fields, .. } => {
+            collect_idents_from_expr(entity, out);
+            for f in fields {
+                if let Some(v) = &f.value {
+                    collect_idents_from_expr(v, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_accessed_fields_from_item<'a>(kind: &'a BlockItemKind, out: &mut HashSet<&'a str>) {
     match kind {
         BlockItemKind::Clause { value, .. }
@@ -3714,10 +3882,22 @@ fn collect_accessed_fields_from_expr<'a>(expr: &'a Expr, out: &mut HashSet<&'a s
         }
         Expr::Call { function, args, .. } => {
             collect_accessed_fields_from_expr(function, out);
+            // A `.created(field: value)` call populates the named fields of the
+            // entity being created, which references them (#60). The key names a
+            // field; the value is an ordinary sub-expression.
+            let is_created = matches!(
+                function.as_ref(),
+                Expr::MemberAccess { field, .. } if field.name == "created"
+            );
             for a in args {
                 match a {
                     CallArg::Positional(e) => collect_accessed_fields_from_expr(e, out),
-                    CallArg::Named(n) => collect_accessed_fields_from_expr(&n.value, out),
+                    CallArg::Named(n) => {
+                        if is_created {
+                            out.insert(&n.name.name);
+                        }
+                        collect_accessed_fields_from_expr(&n.value, out);
+                    }
                 }
             }
         }
@@ -6855,6 +7035,59 @@ mod tests {
         let unused: Vec<_> = ds.iter().filter(|d| d.code == Some("allium.field.unused")).collect();
         assert!(unused.iter().any(|d| d.message.contains("A.y")));
         assert!(!unused.iter().any(|d| d.message.contains("A.x")));
+    }
+
+    #[test]
+    fn field_used_by_sibling_derived_field_not_unused() {
+        // #59: a field referenced (by bare name) inside another derived field's
+        // expression on the same entity is a use.
+        let ds = analyze_src("entity Widget {\n  count: Integer\n  is_positive: count > 0\n}\n");
+        let unused: Vec<_> =
+            ds.iter().filter(|d| d.code == Some("allium.field.unused")).collect();
+        assert!(
+            !unused.iter().any(|d| d.message.contains("Widget.count")),
+            "count is referenced by is_positive and must not be flagged unused. Got: {:?}",
+            unused.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        // is_positive is itself unreferenced — precision guard against over-suppression.
+        assert!(
+            unused.iter().any(|d| d.message.contains("Widget.is_positive")),
+            "is_positive is unreferenced and should still warn. Got: {:?}",
+            unused.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn field_set_via_created_named_arg_not_unused() {
+        // #60: a field populated via Entity.created(field: value) is a use. Key
+        // and value are deliberately different names to isolate key-crediting.
+        let ds = analyze_src(
+            "entity Widget {\n  name: String\n}\n\nrule MakeWidget {\n  when: MakeWidget(label)\n  ensures: Widget.created(name: label)\n}\n",
+        );
+        let unused: Vec<_> =
+            ds.iter().filter(|d| d.code == Some("allium.field.unused")).collect();
+        assert!(
+            !unused.iter().any(|d| d.message.contains("Widget.name")),
+            "name is set by Widget.created(name: ...) and must not be flagged unused. Got: {:?}",
+            unused.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn field_named_like_a_rule_binding_still_unused() {
+        // Scoping guard: a rule binding sharing a field's name must NOT mark the
+        // field used. The #59 credit is scoped to entity derived-field
+        // expressions, not to bare identifiers everywhere.
+        let ds = analyze_src(
+            "entity Widget {\n  order: String\n}\n\nrule R {\n  when: Ping(order)\n  ensures: Done()\n}\n",
+        );
+        let unused: Vec<_> =
+            ds.iter().filter(|d| d.code == Some("allium.field.unused")).collect();
+        assert!(
+            unused.iter().any(|d| d.message.contains("Widget.order")),
+            "a rule binding named 'order' must not suppress the unused field 'Widget.order'. Got: {:?}",
+            unused.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 
     // -- Unused entities --

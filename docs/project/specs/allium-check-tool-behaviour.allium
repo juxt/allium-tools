@@ -232,6 +232,35 @@ rule StandaloneCheckerMatchesExtensionRuleSet {
     ensures: FindingObserved(code: "allium.rule.unreachableTrigger", severity: info)
 }
 
+-- What counts as a reference for allium.field.unused. A field is used when it
+-- is read via member access, populated by a creation, or named by a sibling
+-- derived field on the same entity. Only a field never referenced any of these
+-- ways is reported.
+
+rule FieldReferencedBySiblingDerivedFieldIsUsed {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: entity declares field
+    requires: another derived field on the same entity references field by bare name
+
+    ensures: FindingNotObserved(code: "allium.field.unused", field: field)
+}
+
+rule FieldPopulatedByCreatedNamedArgumentIsUsed {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: entity declares field
+    requires: a rule sets field via a named argument in Entity.created(field: value)
+
+    ensures: FindingNotObserved(code: "allium.field.unused", field: field)
+}
+
+rule BareIdentifierElsewhereDoesNotSuppressUnusedField {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: entity declares field never referenced on the entity
+    requires: a rule binding or trigger parameter shares the field's name
+
+    ensures: FindingObserved(code: "allium.field.unused", field: field, severity: info)
+}
+
 rule CrossModuleReferenceSuppressesUnusedWarning {
     when: CheckCommandInvokedWithInputs(inputs)
     requires: inputs resolve to multiple files
