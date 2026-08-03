@@ -130,6 +130,16 @@ rule DeadlockEdgesIncludeBlockedReasons {
     ensures: reason != null
 }
 
+-- Findings analysis descends into if/else and for bodies, so a status assigned
+-- or a transition witnessed only inside a conditional branch is credited and
+-- does not produce a false deadlock (#58).
+rule TransitionWitnessedInConditionalBranchIsAchievable {
+    when: EntityStateAnalysed(entity, state, terminal_states)
+    requires: a rule assigns an outgoing target state in an ensures clause inside an if or else branch
+
+    ensures: NoAchievablePathToTerminal(entity, state) = false
+}
+
 -- Reverse cross-module aggregation: a transition an importer witnesses on the
 -- imported entity counts toward that entity's lifecycle, so the edge is
 -- achievable and no deadlock is reported. Requires a real use import edge.

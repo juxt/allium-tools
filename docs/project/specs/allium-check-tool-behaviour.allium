@@ -261,6 +261,25 @@ rule BareIdentifierElsewhereDoesNotSuppressUnusedField {
     ensures: FindingObserved(code: "allium.field.unused", field: field, severity: info)
 }
 
+-- Reachability passes descend into nested block bodies (if/else and for), not
+-- just a rule's or surface's top-level clauses.
+
+rule StatusAssignedInConditionalBranchIsReachable {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: entity declares status value
+    requires: a rule assigns the status value in an ensures clause inside an if or else branch
+
+    ensures: FindingNotObserved(code: "allium.status.unreachableValue", status: value)
+}
+
+rule TriggerProvidedInsideForBlockIsReachable {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: a rule listens for trigger
+    requires: a surface provides trigger inside a for block in its provides section
+
+    ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
+}
+
 rule CrossModuleReferenceSuppressesUnusedWarning {
     when: CheckCommandInvokedWithInputs(inputs)
     requires: inputs resolve to multiple files

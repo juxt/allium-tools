@@ -785,6 +785,29 @@ impl Ctx<'_> {
 // 4. Status state machine (unreachable / noExit)
 // ---------------------------------------------------------------------------
 
+/// Visit every `keyword: value` clause in a rule body, descending into the
+/// bodies of `if`/`else` and `for` blocks so that clauses nested in a
+/// conditional or iterated branch are seen, not just top-level ones (#58).
+fn for_each_rule_clause<'a>(items: &'a [BlockItem], f: &mut impl FnMut(&'a str, &'a Expr)) {
+    for item in items {
+        match &item.kind {
+            BlockItemKind::Clause { keyword, value } => f(keyword, value),
+            BlockItemKind::IfBlock { branches, else_items } => {
+                for b in branches {
+                    for_each_rule_clause(&b.items, f);
+                }
+                if let Some(else_items) = else_items {
+                    for_each_rule_clause(else_items, f);
+                }
+            }
+            BlockItemKind::ForBlock { items, .. } => {
+                for_each_rule_clause(items, f);
+            }
+            _ => {}
+        }
+    }
+}
+
 impl Ctx<'_> {
     fn check_status_state_machine(&mut self) {
         let mut status_by_entity: HashMap<&str, (Vec<&Ident>, HashSet<&str>)> = HashMap::new();
@@ -874,12 +897,9 @@ impl Ctx<'_> {
             augment_binding_types_from_commands(rule, &command_param_types, &mut binding_types);
             let mut requires_by_binding: HashMap<&str, HashSet<&str>> = HashMap::new();
 
-            for item in &rule.items {
-                let BlockItemKind::Clause { keyword, value } = &item.kind else {
-                    continue;
-                };
+            for_each_rule_clause(&rule.items, &mut |keyword, value| {
                 if keyword != "requires" {
-                    continue;
+                    return;
                 }
                 visit_status_comparisons(
                     value,
@@ -893,14 +913,11 @@ impl Ctx<'_> {
                             .insert(status);
                     },
                 );
-            }
+            });
 
-            for item in &rule.items {
-                let BlockItemKind::Clause { keyword, value } = &item.kind else {
-                    continue;
-                };
+            for_each_rule_clause(&rule.items, &mut |keyword, value| {
                 if keyword != "ensures" {
-                    continue;
+                    return;
                 }
                 visit_status_assignments(
                     value,
@@ -937,7 +954,7 @@ impl Ctx<'_> {
                     },
                     &mut created_issues,
                 );
-            }
+            });
         }
 
         // Fold in contributions from importers: an importer's qualified
@@ -1176,12 +1193,9 @@ impl Ctx<'_> {
                 .into_iter()
                 .collect();
 
-            for item in &rule.items {
-                let BlockItemKind::Clause { keyword, value } = &item.kind else {
-                    continue;
-                };
+            for_each_rule_clause(&rule.items, &mut |keyword, value| {
                 if keyword != "requires" {
-                    continue;
+                    return;
                 }
                 collect_requires_conditions(
                     value,
@@ -1207,14 +1221,11 @@ impl Ctx<'_> {
                         }
                     },
                 );
-            }
+            });
 
-            for item in &rule.items {
-                let BlockItemKind::Clause { keyword, value } = &item.kind else {
-                    continue;
-                };
+            for_each_rule_clause(&rule.items, &mut |keyword, value| {
                 if keyword != "ensures" {
-                    continue;
+                    return;
                 }
                 collect_field_assignments(
                     value,
@@ -1239,7 +1250,7 @@ impl Ctx<'_> {
                         ensures_statuses.push((binding, target));
                     },
                 );
-            }
+            });
 
             let mut transitions = Vec::new();
             for (binding, target) in &ensures_statuses {
@@ -1275,16 +1286,13 @@ impl Ctx<'_> {
         // Track .created() status fields as assigned (and per-rule created tracking)
         let mut created_fields: HashSet<String> = HashSet::new();
         for rule in self.blocks(BlockKind::Rule) {
-            for item in &rule.items {
-                let BlockItemKind::Clause { keyword, value } = &item.kind else {
-                    continue;
-                };
+            for_each_rule_clause(&rule.items, &mut |keyword, value| {
                 if keyword != "ensures" {
-                    continue;
+                    return;
                 }
                 collect_created_field_assignments(value, &status_values, &mut assigned_fields);
                 collect_created_field_assignments(value, &status_values, &mut created_fields);
-            }
+            });
         }
 
         // Collect surface-provided fields
@@ -3563,6 +3571,11 @@ fn collect_call_names<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
             if let Some(body) = else_body {
                 collect_call_names(body, out);
             }
+        }
+        Expr::For { body, .. } => {
+            // A trigger provided inside `for item in collection:` in a surface's
+            // `provides:` is a valid provider (#61).
+            collect_call_names(body, out);
         }
         _ => {}
     }
@@ -7087,6 +7100,102 @@ mod tests {
             unused.iter().any(|d| d.message.contains("Widget.order")),
             "a rule binding named 'order' must not suppress the unused field 'Widget.order'. Got: {:?}",
             unused.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    // -- Nested-block traversal in reachability passes (Group A) --
+
+    const DECIDE_BRANCH_SPEC: &str = "entity Widget {\n  status: pending | approved | rejected\n  transitions status {\n    pending -> approved\n    pending -> rejected\n    terminal: approved, rejected\n  }\n}\n\nrule Decide {\n  when: Decide(widget, ok)\n  requires: widget.status = pending\n  if ok:\n    ensures: widget.status = approved\n  else:\n    ensures: widget.status = rejected\n}\n";
+
+    #[test]
+    fn conditional_ensures_makes_branch_statuses_reachable() {
+        // #58: a status assigned inside an if/else branch counts as assigned, so
+        // it is not reported unreachable.
+        let ds = analyze_src(DECIDE_BRANCH_SPEC);
+        let unreachable: Vec<_> = ds
+            .iter()
+            .filter(|d| d.code == Some("allium.status.unreachableValue"))
+            .collect();
+        assert!(
+            !unreachable.iter().any(|d| d.message.contains("approved")),
+            "approved is assigned in the if-branch and must be reachable. Got: {:?}",
+            unreachable.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        assert!(
+            !unreachable.iter().any(|d| d.message.contains("rejected")),
+            "rejected is assigned in the else-branch and must be reachable. Got: {:?}",
+            unreachable.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn conditional_ensures_transitions_are_witnessed_no_deadlock() {
+        // #58 on the analyse side: the guarded branch assignments witness the
+        // pending -> approved/rejected transitions, so pending is not a false
+        // deadlock.
+        let r = analyse_src(DECIDE_BRANCH_SPEC);
+        assert!(
+            !has_finding(&r, "deadlock"),
+            "branch-witnessed exits from pending must clear the deadlock. Findings: {:?}",
+            r.findings.iter().map(|f| f["summary"].clone()).collect::<Vec<_>>()
+        );
+    }
+
+    const FOR_IN_PROVIDES_SPEC: &str = r#"external entity Person { name: String }
+
+entity User {
+    person: Person
+    sessions: Session with user = this
+}
+
+entity Session {
+    user: User
+    status: active | ended
+    transitions status { active -> ended  terminal: ended }
+}
+
+rule LogOut {
+    when: UserLogsOut(session)
+    requires: session.status = active
+    ensures: session.status = ended
+}
+
+surface AccountManagement {
+    facing person: Person
+    context user: User where person = person
+    exposes:
+        for session in user.sessions:
+            session.status
+    provides:
+        for session in user.sessions:
+            UserLogsOut(session)
+}
+"#;
+
+    #[test]
+    fn trigger_provided_in_for_block_is_reachable() {
+        // #61: a trigger provided inside a `for` block in `provides:` is a valid
+        // provider, so a rule listening for it is not reported unreachable.
+        let ds = analyze_src(FOR_IN_PROVIDES_SPEC);
+        assert!(
+            !ds.iter().any(|d| d.code == Some("allium.rule.unreachableTrigger")
+                && d.message.contains("UserLogsOut")),
+            "UserLogsOut is provided inside a for-block and must be reachable. Got: {:?}",
+            ds.iter()
+                .filter(|d| d.code == Some("allium.rule.unreachableTrigger"))
+                .map(|d| &d.message)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn trigger_provided_in_for_block_no_unreachable_finding() {
+        // #61 on the analyse side: no unreachable_trigger finding either.
+        let r = analyse_src(FOR_IN_PROVIDES_SPEC);
+        assert!(
+            !has_finding(&r, "unreachable_trigger"),
+            "for-block-provided trigger must not yield an unreachable_trigger finding. Findings: {:?}",
+            r.findings.iter().map(|f| f["summary"].clone()).collect::<Vec<_>>()
         );
     }
 
