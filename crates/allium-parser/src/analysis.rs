@@ -111,6 +111,7 @@ pub fn analyze_with_cross_module(
     imported_entity_fields: &HashMap<String, HashMap<String, HashSet<String>>>,
     ambiguous_imports: &AmbiguousImports,
     reverse: &ReverseContributions,
+    imported_referenced_triggers: &HashMap<String, HashSet<String>>,
 ) -> Vec<Diagnostic> {
     let mut ctx = Ctx::new(
         module,
@@ -121,6 +122,7 @@ pub fn analyze_with_cross_module(
     );
     ctx.imported_entity_fields = Some(imported_entity_fields);
     ctx.reverse_contributions = Some(reverse);
+    ctx.imported_referenced_triggers = Some(imported_referenced_triggers);
     run_checks(ctx, source)
 }
 
@@ -145,6 +147,7 @@ fn run_checks(mut ctx: Ctx<'_>, source: &str) -> Vec<Diagnostic> {
     ctx.check_list_literal_homogeneity();
     ctx.check_qualified_default_aliases();
     ctx.check_default_field_schemas();
+    ctx.check_qualified_provides();
 
     let mut diagnostics = apply_suppressions(ctx.diagnostics, source);
     // Deterministic ordering: the analysis passes iterate `HashMap`s, whose
@@ -196,6 +199,7 @@ pub fn analyse_with_cross_module(
     imported_entity_fields: &HashMap<String, HashMap<String, HashSet<String>>>,
     ambiguous_imports: &AmbiguousImports,
     reverse: &ReverseContributions,
+    imported_referenced_triggers: &HashMap<String, HashSet<String>>,
 ) -> crate::diagnostic::AnalyseResult {
     let diagnostics = analyze_with_cross_module(
         module,
@@ -206,6 +210,7 @@ pub fn analyse_with_cross_module(
         imported_entity_fields,
         ambiguous_imports,
         reverse,
+        imported_referenced_triggers,
     );
     let findings = find_process_issues(module, Some(imported_triggers), Some(reverse));
     crate::diagnostic::AnalyseResult {
@@ -392,6 +397,12 @@ struct Ctx<'a> {
     /// be validated against the imported schema. Aliases whose targets fall
     /// outside the check set are absent. `None` in single-file mode.
     imported_entity_fields: Option<&'a HashMap<String, HashMap<String, HashSet<String>>>>,
+    /// Multi-file mode only: per `use` alias, every trigger name the aliased
+    /// module references (provides, emits or listens for). Lets a qualified
+    /// `provides: alias/Trigger` entry be validated against the imported module.
+    /// Aliases whose targets fall outside the check set are absent. `None` in
+    /// single-file mode.
+    imported_referenced_triggers: Option<&'a HashMap<String, HashSet<String>>>,
     /// Multi-file mode only: contributions importers make back to this module's
     /// entities and triggers. `None` in single-file mode (and effectively empty
     /// when no importer references this module).
@@ -415,6 +426,7 @@ impl<'a> Ctx<'a> {
             imported_triggers,
             ambiguous_imports,
             imported_entity_fields: None,
+            imported_referenced_triggers: None,
             reverse_contributions: None,
             diagnostics: Vec::new(),
             findings: Vec::new(),
@@ -4518,6 +4530,31 @@ pub fn collect_trigger_outputs(module: &Module) -> HashSet<String> {
     names.into_iter().map(str::to_string).collect()
 }
 
+/// Collect every trigger name a module references: those it provides or emits
+/// (`collect_trigger_outputs`) plus those its rules listen for in `when:`
+/// clauses. Used by multi-file checking to validate a qualified `provides:`
+/// entry against the aliased module — a trigger the module never mentions is a
+/// resolution error at the entry (#72).
+pub fn collect_referenced_trigger_names(module: &Module) -> HashSet<String> {
+    let mut names = collect_trigger_outputs(module);
+    for d in &module.declarations {
+        let Decl::Block(b) = d else { continue };
+        if b.kind != BlockKind::Rule {
+            continue;
+        }
+        for item in &b.items {
+            if let BlockItemKind::Clause { keyword, value } = &item.kind {
+                if keyword == "when" {
+                    for tref in extract_trigger_refs(value) {
+                        names.insert(tref.name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
 /// Collect the contributions `importer` makes to `imported` through the given
 /// `use` alias. Only qualified references using `alias` are considered, so an
 /// unrelated co-supplied file contributes nothing. Statuses and transitions are
@@ -4622,6 +4659,39 @@ fn collect_qualified_provides(expr: &Expr, alias: &str, out: &mut HashSet<String
             }
         }
         Expr::For { body, .. } => collect_qualified_provides(body, alias, out),
+        _ => {}
+    }
+}
+
+/// Collect every qualified provides entry `qualifier/Name` with the span to
+/// anchor a diagnostic at, for resolution checking (#72).
+fn collect_qualified_provides_refs<'a>(
+    expr: &'a Expr,
+    out: &mut Vec<(&'a str, &'a str, Span)>,
+) {
+    match expr {
+        Expr::Call { function, .. } => {
+            if let Expr::QualifiedName(q) = function.as_ref() {
+                if let Some(qualifier) = q.qualifier.as_deref() {
+                    out.push((qualifier, q.name.as_str(), q.span));
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_qualified_provides_refs(item, out);
+            }
+        }
+        Expr::WhenGuard { action, .. } => collect_qualified_provides_refs(action, out),
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_qualified_provides_refs(&b.body, out);
+            }
+            if let Some(body) = else_body {
+                collect_qualified_provides_refs(body, out);
+            }
+        }
+        Expr::For { body, .. } => collect_qualified_provides_refs(body, out),
         _ => {}
     }
 }
@@ -5431,6 +5501,62 @@ impl Ctx<'_> {
     /// A qualified type name in a `default` (`default alias/Type x = ...`) must
     /// reference a module brought into scope by `use "..." as alias`. Keeps
     /// parity with the TypeScript `findDefaultTypeReferenceIssues` alias check.
+    /// Validate qualified `provides: alias/Trigger` entries at the entry (#72).
+    /// An `alias` that matches no `use` import is an error; a trigger name the
+    /// aliased module never references is a warning, but only when that module
+    /// is in the check set (a target outside it is unknowable by design).
+    fn check_qualified_provides(&mut self) {
+        let aliases: HashSet<&str> = self
+            .module
+            .declarations
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Use(u) => u.alias.as_ref().map(|a| a.name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        let mut entries: Vec<(&str, &str, Span)> = Vec::new();
+        for surface in self.blocks(BlockKind::Surface) {
+            for item in &surface.items {
+                if let BlockItemKind::Clause { keyword, value } = &item.kind {
+                    if keyword == "provides" {
+                        collect_qualified_provides_refs(value, &mut entries);
+                    }
+                }
+            }
+        }
+
+        for (qualifier, name, span) in entries {
+            if !aliases.contains(qualifier) {
+                self.push(
+                    Diagnostic::error(
+                        span,
+                        format!(
+                            "Provides entry '{qualifier}/{name}' uses unknown import alias '{qualifier}'."
+                        ),
+                    )
+                    .with_code("allium.provides.undefinedImportedAlias"),
+                );
+            } else if let Some(triggers) = self
+                .imported_referenced_triggers
+                .and_then(|m| m.get(qualifier))
+            {
+                if !triggers.contains(name) {
+                    self.push(
+                        Diagnostic::warning(
+                            span,
+                            format!(
+                                "Provides entry '{qualifier}/{name}' names trigger '{name}', which imported module '{qualifier}' does not use."
+                            ),
+                        )
+                        .with_code("allium.provides.unknownTrigger"),
+                    );
+                }
+            }
+        }
+    }
+
     fn check_qualified_default_aliases(&mut self) {
         let mut aliases: HashSet<&str> = HashSet::new();
         for d in &self.module.declarations {
@@ -6982,6 +7108,7 @@ mod tests {
             &HashMap::new(),
             &AmbiguousImports::default(),
             &ReverseContributions::default(),
+            &HashMap::new(),
         )
     }
 
@@ -7030,6 +7157,7 @@ mod tests {
             &HashMap::new(),
             &ambiguous,
             &ReverseContributions::default(),
+            &HashMap::new(),
         )
     }
 
@@ -7612,7 +7740,7 @@ surface AccountManagement {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./core.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
         assert!(!has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -7623,7 +7751,7 @@ surface AccountManagement {
         let result = parse(&input);
         // Only "./other.allium" is resolved — "./missing.allium" is not.
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
         assert!(has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -7644,7 +7772,7 @@ surface AccountManagement {
         let src = "use \"./missing.allium\" as missing\n\nentity Handler {\n  x: String\n}\n";
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new(), &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new(), &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
         assert!(has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -7654,7 +7782,7 @@ surface AccountManagement {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
         let diag = ds.iter().find(|d| d.code == Some("allium.use.unresolvedPath")).unwrap();
         assert!(diag.message.contains("nowhere.allium"), "message should name the path: {}", diag.message);
     }
@@ -7665,7 +7793,7 @@ surface AccountManagement {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
         assert!(!has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -7675,7 +7803,7 @@ surface AccountManagement {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./found.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
         let unresolved: Vec<_> = ds.iter()
             .filter(|d| d.code == Some("allium.use.unresolvedPath"))
             .collect();

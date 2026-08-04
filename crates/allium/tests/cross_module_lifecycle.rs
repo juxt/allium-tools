@@ -825,6 +825,176 @@ fn prop_single_file_matches_split_for_transition_trigger() {
 }
 
 // ===========================================================================
+// #72 — an unresolvable qualified provides entry is diagnosed at the entry,
+// not only as a misleading downstream unreachableTrigger on the imported module.
+// ===========================================================================
+
+const TICKET_72: &str = r#"-- allium: 3
+
+entity Ticket {
+    status: open | closed
+    transitions status { open -> closed  terminal: closed }
+}
+
+rule CreateTicket {
+    when: OpenTicket()
+    ensures: Ticket.created(status: open)
+}
+
+rule CloseOpenTicket {
+    when: CloseTicket(ticket)
+    requires: ticket.status = open
+    ensures: ticket.status = closed
+}
+"#;
+
+const CONSOLE_72_BAD_ALIAS: &str = r#"-- allium: 3
+
+use "./ticket.allium" as tickets
+
+surface TicketIntake {
+    provides:
+        tickets/OpenTicket()
+        nosuch/CloseTicket(ticket)
+}
+"#;
+
+const CONSOLE_72_BAD_TRIGGER: &str = r#"-- allium: 3
+
+use "./ticket.allium" as tickets
+
+surface TicketIntake {
+    provides:
+        tickets/OpenTicket()
+        tickets/AbsentTrigger()
+}
+"#;
+
+const CONSOLE_72_OK: &str = r#"-- allium: 3
+
+use "./ticket.allium" as tickets
+
+surface TicketIntake {
+    provides:
+        tickets/OpenTicket()
+        tickets/CloseTicket(ticket)
+}
+"#;
+
+#[test]
+fn t72_unknown_provides_alias_diagnosed_at_entry() {
+    let dir = TempDir::new("72-bad-alias");
+    dir.write("ticket.allium", TICKET_72);
+    dir.write("console.allium", CONSOLE_72_BAD_ALIAS);
+
+    let (_ok, out) = run("check", &[dir.path().to_str().unwrap()]);
+    let diags = parse_diagnostics(&out);
+    assert!(
+        diags.iter().any(|d| d.message.contains("nosuch")),
+        "the unresolvable provides alias 'nosuch' must be diagnosed at the entry. Diags: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn t72_unknown_provides_trigger_diagnosed_at_entry() {
+    let dir = TempDir::new("72-bad-trigger");
+    dir.write("ticket.allium", TICKET_72);
+    dir.write("console.allium", CONSOLE_72_BAD_TRIGGER);
+
+    let (_ok, out) = run("check", &[dir.path().to_str().unwrap()]);
+    let diags = parse_diagnostics(&out);
+    assert!(
+        diags.iter().any(|d| d.message.contains("AbsentTrigger")),
+        "the unknown provides trigger 'AbsentTrigger' must be diagnosed at the entry. Diags: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn t72_well_formed_provides_draws_no_resolution_diagnostic() {
+    let dir = TempDir::new("72-ok");
+    dir.write("ticket.allium", TICKET_72);
+    dir.write("console.allium", CONSOLE_72_OK);
+
+    let (_ok, out) = run("check", &[dir.path().to_str().unwrap()]);
+    let diags = parse_diagnostics(&out);
+    assert!(
+        !diags.iter().any(|d| d.code.contains("undefinedImportedAlias")
+            || d.code.contains("unknownTrigger")),
+        "well-formed qualified provides must not draw resolution diagnostics. Diags: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+    // And it stays credited: no rule reads unreachable.
+    assert!(
+        !diags.iter().any(|d| d.code == "allium.rule.unreachableTrigger"),
+        "well-formed provides must keep the domain's rules reachable. Diags: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+}
+
+// Anchoring property: corrupting one provides entry (its alias or its trigger
+// name) draws a resolution diagnostic naming the bad token, which the
+// well-formed variant does not. Generator-driven so it covers varied names.
+
+fn gen_provides_case(seed: u64) -> (String, String, String, String, String, String) {
+    let mut r = Rng::new(seed);
+    let e = format!("E{}", r.below(10000));
+    let t1 = format!("T{}a", r.below(10000));
+    let t2 = format!("T{}b", r.below(10000));
+    let alias = format!("dom{}", r.below(1000));
+    let absent = format!("Absent{}", r.below(10000));
+
+    let domain = format!(
+        "-- allium: 3\n\nentity {e} {{\n    status: open | closed\n    transitions status {{ open -> closed  terminal: closed }}\n}}\n\nrule R1 {{\n    when: {t1}()\n    ensures: {e}.created(status: open)\n}}\n\nrule R2 {{\n    when: {t2}(x)\n    requires: x.status = open\n    ensures: x.status = closed\n}}\n"
+    );
+    let head = format!("-- allium: 3\n\nuse \"./domain.allium\" as {alias}\n\nsurface S {{\n    provides:\n");
+    let ok = format!("{head}        {alias}/{t1}()\n        {alias}/{t2}(x)\n}}\n");
+    let bad_alias = format!("{head}        {alias}/{t1}()\n        nosuch/{t2}(x)\n}}\n");
+    let bad_trigger = format!("{head}        {alias}/{t1}()\n        {alias}/{absent}()\n}}\n");
+    (domain, ok, bad_alias, bad_trigger, t2, absent)
+}
+
+#[test]
+fn prop_malformed_provides_entry_is_anchored() {
+    for seed in 0..12u64 {
+        let (domain, ok, bad_alias, bad_trigger, _t2, absent) = gen_provides_case(seed);
+
+        let run_case = |label: &str, console: &str| -> Vec<Diag> {
+            let dir = TempDir::new(&format!("anchor-{label}-{seed}"));
+            dir.write("domain.allium", &domain);
+            dir.write("console.allium", console);
+            let (_ok, out) = run("check", &[dir.path().to_str().unwrap()]);
+            parse_diagnostics(&out)
+        };
+
+        let ok_diags = run_case("ok", &ok);
+        assert!(
+            !ok_diags.iter().any(|d| d.code == "allium.provides.undefinedImportedAlias"
+                || d.code == "allium.provides.unknownTrigger"),
+            "seed {seed}: well-formed provides drew a resolution diagnostic.\n{:?}",
+            ok_diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+        );
+
+        let alias_diags = run_case("badalias", &bad_alias);
+        assert!(
+            alias_diags.iter().any(|d| d.code == "allium.provides.undefinedImportedAlias"
+                && d.message.contains("nosuch")),
+            "seed {seed}: a bad provides alias must be anchored.\n{:?}",
+            alias_diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+        );
+
+        let trigger_diags = run_case("badtrigger", &bad_trigger);
+        assert!(
+            trigger_diags.iter().any(|d| d.code == "allium.provides.unknownTrigger"
+                && d.message.contains(&absent)),
+            "seed {seed}: a bad provides trigger must be anchored.\n{:?}",
+            trigger_diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+        );
+    }
+}
+
+// ===========================================================================
 // Gate: crediting requires a real import edge, not arbitrary co-supply
 // ===========================================================================
 
