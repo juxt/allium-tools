@@ -651,6 +651,102 @@ fn t65_deadlock_when_ticket_analysed_alone() {
 }
 
 // ===========================================================================
+// #70 — split-invariance: a spec as one file produces the same reports as the
+// same spec split across a `use` edge. The transition-trigger start state must
+// be credited locally, not only across the module boundary. This is the #66
+// oracle I asserted in prose but never tested, which is how the regression got
+// in.
+// ===========================================================================
+
+const T70_SINGLE: &str = r#"-- allium: 3
+
+entity Ticket {
+    status: closed | archived
+    transitions status { closed -> archived  terminal: archived }
+}
+
+rule CreateTicket {
+    when: CreateTicketRequested()
+    ensures: Ticket.created(status: closed)
+}
+
+rule ArchiveClosedTicket {
+    when: t: Ticket.status becomes closed
+    ensures: t.status = archived
+}
+
+surface TicketDesk {
+    provides:
+        CreateTicketRequested()
+}
+"#;
+
+const T70_DOMAIN: &str = r#"-- allium: 3
+
+entity Ticket {
+    status: closed | archived
+    transitions status { closed -> archived  terminal: archived }
+}
+
+rule CreateTicket {
+    when: CreateTicketRequested()
+    ensures: Ticket.created(status: closed)
+}
+
+surface TicketDesk {
+    provides:
+        CreateTicketRequested()
+}
+"#;
+
+const T70_CONSOLE: &str = r#"-- allium: 3
+
+use "./ticket.allium" as tickets
+
+rule ArchiveClosedTicket {
+    when: t: tickets/Ticket.status becomes closed
+    ensures: t.status = archived
+}
+"#;
+
+/// A comparable report set (code + message for diagnostics, kind + summary for
+/// findings), independent of which file a report lands in.
+fn report_set(stdout: &str) -> Vec<String> {
+    let mut rows: Vec<String> = parse_diagnostics(stdout)
+        .into_iter()
+        .map(|d| format!("D {} {}", d.code, d.message))
+        .collect();
+    rows.extend(
+        parse_findings(stdout)
+            .into_iter()
+            .map(|f| format!("F {} {}", f.kind, f.summary)),
+    );
+    rows.sort();
+    rows
+}
+
+#[test]
+fn t70_single_file_matches_split_for_becomes_trigger() {
+    let single = TempDir::new("70-single");
+    single.write("ticket.allium", T70_SINGLE);
+    let split = TempDir::new("70-split");
+    split.write("ticket.allium", T70_DOMAIN);
+    split.write("operator-console.allium", T70_CONSOLE);
+
+    for cmd in ["check", "analyse"] {
+        let (_o1, single_out) = run(cmd, &[&single.file("ticket.allium")]);
+        let (_o2, split_out) = run(cmd, &[split.path().to_str().unwrap()]);
+        assert_eq!(
+            report_set(&single_out),
+            report_set(&split_out),
+            "{cmd}: the one-file spec and its split must produce the same reports.\nsingle: {:?}\nsplit: {:?}",
+            report_set(&single_out),
+            report_set(&split_out)
+        );
+    }
+}
+
+// ===========================================================================
 // Gate: crediting requires a real import edge, not arbitrary co-supply
 // ===========================================================================
 

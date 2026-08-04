@@ -130,6 +130,101 @@ fn prop_findings_are_sorted() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// #70 — a transition-trigger rule establishes its start state.
+//
+// A rule triggered by `becomes S` / `transitions_to S` fires with the entity in
+// S, so its status assignment performs a transition out of S, exactly as a
+// `requires: b.status = S` guard would. The metamorphic property: adding that
+// redundant guard must not change any report.
+// ---------------------------------------------------------------------------
+
+/// A spec whose only exit from the start state is performed by a
+/// transition-trigger rule. With `redundant_guard`, the rule also carries a
+/// `requires:` that merely restates what the trigger already establishes.
+fn gen_transition_trigger_spec(rng: &mut Rng, redundant_guard: bool) -> String {
+    let name = format!("Ent{}", rng.below(1000));
+    let s0 = format!("s{}start", rng.below(100));
+    let s1 = format!("s{}end", rng.below(100));
+    let trigger = if rng.below(2) == 0 { "becomes" } else { "transitions_to" };
+    let guard = if redundant_guard {
+        format!("    requires: t.status = {s0}\n")
+    } else {
+        String::new()
+    };
+    format!(
+        "-- allium: 3\n\
+         entity {name} {{\n\
+         \x20   status: {s0} | {s1}\n\
+         \x20   transitions status {{ {s0} -> {s1}  terminal: {s1} }}\n\
+         }}\n\
+         rule Create{name} {{\n\
+         \x20   when: Create{name}Requested()\n\
+         \x20   ensures: {name}.created(status: {s0})\n\
+         }}\n\
+         rule Advance{name} {{\n\
+         \x20   when: t: {name}.status {trigger} {s0}\n\
+         {guard}\
+         \x20   ensures: t.status = {s1}\n\
+         }}\n\
+         surface {name}Desk {{\n\
+         \x20   provides:\n\
+         \x20       Create{name}Requested()\n\
+         }}\n",
+    )
+}
+
+/// A canonical, comparable representation of everything a spec reports.
+fn report_set(src: &str) -> Vec<String> {
+    let parsed = parse(src);
+    let mut out: Vec<String> = analyze(&parsed.module, src)
+        .iter()
+        .map(|d| format!("D {} {}", d.code.unwrap_or(""), d.message))
+        .collect();
+    for f in analyse(&parsed.module, src).findings.iter() {
+        out.push(format!(
+            "F {} {}",
+            f["type"].as_str().unwrap_or(""),
+            f["summary"].as_str().unwrap_or("")
+        ));
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn prop_redundant_trigger_guard_is_invariant() {
+    for seed in 0..100u64 {
+        // Same seed for both variants, so only the guard differs.
+        let without = gen_transition_trigger_spec(&mut Rng::new(seed), false);
+        let with = gen_transition_trigger_spec(&mut Rng::new(seed), true);
+        let a = report_set(&without);
+        let b = report_set(&with);
+        assert_eq!(
+            a, b,
+            "seed {seed}: a redundant requires that restates the trigger's start state changed the reports.\n\
+             WITHOUT guard:\n{without}\n-> {a:?}\n\nWITH guard:\n{with}\n-> {b:?}"
+        );
+    }
+}
+
+#[test]
+fn becomes_triggered_transition_has_no_false_noexit() {
+    // #70 subject, single file: the exit from `closed` is witnessed by the
+    // becomes-triggered rule, so no noExit.
+    let src = "-- allium: 3\n\
+        entity Ticket {\n    status: closed | archived\n    transitions status { closed -> archived  terminal: archived }\n}\n\
+        rule Create {\n    when: CreateRequested()\n    ensures: Ticket.created(status: closed)\n}\n\
+        rule Archive {\n    when: t: Ticket.status becomes closed\n    ensures: t.status = archived\n}\n\
+        surface Desk {\n    provides:\n        CreateRequested()\n}\n";
+    let ds = diagnostics_of(src);
+    assert!(
+        !ds.iter().any(|d| d.code == Some("allium.status.noExit")),
+        "a becomes-triggered exit must clear noExit on closed. Got: {:?}",
+        ds.iter().map(|d| (d.code, &d.message)).collect::<Vec<_>>()
+    );
+}
+
 // A fixed six-entity example, so a failure is inspectable without a seed.
 #[test]
 fn six_entity_spec_emits_sorted_reports() {

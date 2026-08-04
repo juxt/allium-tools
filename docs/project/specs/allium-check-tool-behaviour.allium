@@ -290,6 +290,20 @@ rule TriggerProvidedInsideForBlockIsReachable {
     ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
 }
 
+-- A becomes/transitions_to trigger fires with the entity already in its target
+-- state, so that state is the start state of the transition the rule performs,
+-- the same start state a requires guard would establish. Credited in the
+-- entity's own module, not only across a use edge (#70). Splitting a spec into
+-- modules therefore never yields fewer reports than the equivalent single file.
+rule TransitionTriggerEstablishesStartStateLocally {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: a rule is triggered by a becomes or transitions_to trigger on a status value
+    requires: the same rule assigns a different declared status value in its ensures
+
+    ensures: the transition from the trigger's state to the assigned state is observed
+    ensures: FindingNotObserved(code: "allium.status.noExit", status: the trigger's state)
+}
+
 rule CrossModuleReferenceSuppressesUnusedWarning {
     when: CheckCommandInvokedWithInputs(inputs)
     requires: inputs resolve to multiple files

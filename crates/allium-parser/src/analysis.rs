@@ -938,6 +938,24 @@ impl Ctx<'_> {
                 );
             });
 
+            // A `becomes`/`transitions_to` trigger fires with the entity already
+            // in its target state, so that state is the start state of the
+            // transition the rule then performs — exactly the start state a
+            // `requires` guard would establish (#70).
+            for_each_rule_clause(&rule.items, &mut |keyword, value| {
+                if keyword != "when" {
+                    return;
+                }
+                if let Some((binding, entity, source)) = local_transition_trigger_source(value) {
+                    if status_by_entity
+                        .get(entity)
+                        .is_some_and(|(_, values)| values.contains(source))
+                    {
+                        requires_by_binding.entry(binding).or_default().insert(source);
+                    }
+                }
+            });
+
             for_each_rule_clause(&rule.items, &mut |keyword, value| {
                 if keyword != "ensures" {
                     return;
@@ -4928,6 +4946,29 @@ fn qualified_transition_trigger<'a>(
         return None;
     }
     Some((*entity, source))
+}
+
+/// From a local `when: b: Entity.status becomes state` (or `transitions_to`)
+/// trigger, return the binding, the entity, and the state the entity is in when
+/// the rule fires — the start state of the transition the rule then performs
+/// (#70). `None` for a `when` that is not a bound transition trigger. The caller
+/// validates the state against the entity's declared status values.
+fn local_transition_trigger_source(expr: &Expr) -> Option<(&str, &str, &str)> {
+    let Expr::Binding { name, value, .. } = expr else {
+        return None;
+    };
+    let (subject, new_state) = match value.as_ref() {
+        Expr::Becomes { subject, new_state, .. }
+        | Expr::TransitionsTo { subject, new_state, .. } => (subject.as_ref(), new_state.as_ref()),
+        _ => return None,
+    };
+    let Expr::MemberAccess { object, field, .. } = subject else {
+        return None;
+    };
+    if field.name != "status" {
+        return None;
+    }
+    Some((name.name.as_str(), expr_as_ident(object)?, expr_as_ident(new_state)?))
 }
 
 /// Invoke `cb(binding, status)` for each `binding.status = status` equality,
