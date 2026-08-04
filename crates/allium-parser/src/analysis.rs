@@ -146,20 +146,7 @@ fn run_checks(mut ctx: Ctx<'_>, source: &str) -> Vec<Diagnostic> {
     ctx.check_qualified_default_aliases();
     ctx.check_default_field_schemas();
 
-    let mut diagnostics = apply_suppressions(ctx.diagnostics, source);
-    // Deterministic ordering: the analysis passes iterate `HashMap`s, whose
-    // iteration order the Rust std library randomises per process. Sort by
-    // source position, then code, then message so identical input yields
-    // identical output on every run (#71).
-    diagnostics.sort_by(|a, b| {
-        (a.span.start, a.span.end, a.code.unwrap_or(""), a.message.as_str()).cmp(&(
-            b.span.start,
-            b.span.end,
-            b.code.unwrap_or(""),
-            b.message.as_str(),
-        ))
-    });
-    diagnostics
+    apply_suppressions(ctx.diagnostics, source)
 }
 
 /// Run structural checks plus process-level analysis (`allium analyse`).
@@ -303,17 +290,7 @@ fn find_process_issues(
     ctx.collect_process_findings(&info);
     ctx.collect_conflict_findings(&info);
     ctx.collect_invariant_findings(&info);
-    let mut findings = std::mem::take(&mut ctx.findings);
-    // Deterministic ordering (#71): findings carry no source span, so order by
-    // type, then summary, then the full serialised object as a total tiebreak.
-    findings.sort_by_cached_key(|f| {
-        (
-            f["type"].as_str().unwrap_or("").to_string(),
-            f["summary"].as_str().unwrap_or("").to_string(),
-            f.to_string(),
-        )
-    });
-    findings
+    std::mem::take(&mut ctx.findings)
 }
 
 // ---------------------------------------------------------------------------

@@ -232,16 +232,6 @@ rule StandaloneCheckerMatchesExtensionRuleSet {
     ensures: FindingObserved(code: "allium.rule.unreachableTrigger", severity: info)
 }
 
--- Output ordering is a deterministic function of the input, independent of
--- process-level HashMap iteration order (#71). Diagnostics are ordered by
--- source position, then code.
-rule DiagnosticsAreDeterministicallyOrdered {
-    when: CheckCommandInvokedWithInputs(inputs)
-
-    ensures: diagnostics are ordered by source position then code
-    ensures: the diagnostics array is identical across repeated runs on identical input
-}
-
 -- What counts as a reference for allium.field.unused. A field is used when it
 -- is read via member access, populated by a creation, or named by a sibling
 -- derived field on the same entity. Only a field never referenced any of these

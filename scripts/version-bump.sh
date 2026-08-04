@@ -84,23 +84,6 @@ update_cargo_version() {
   fi
 }
 
-# Keep the workspace crate versions in Cargo.lock in step with Cargo.toml, so a
-# release commit (`git add -A`) captures a synced lockfile and `--locked` builds
-# keep working. `--workspace` touches only the workspace members; `--offline`
-# keeps it a pure version sync with no index refresh or external-dep drift.
-sync_cargo_lockfile() {
-  if [[ ! -f "$ROOT/Cargo.lock" ]]; then
-    echo "  SKIP  Cargo.lock (not found)"
-    return
-  fi
-  if $DRY_RUN; then
-    echo "  WOULD Cargo.lock: sync workspace crate versions to $VERSION"
-  else
-    cargo update --workspace --offline --manifest-path "$ROOT/Cargo.toml" >/dev/null
-    echo "  SET   Cargo.lock: workspace crate versions synced to $VERSION"
-  fi
-}
-
 echo "Version bump -> $VERSION"
 if $DRY_RUN; then
   echo "(dry run — no files will be modified)"
@@ -109,7 +92,6 @@ echo ""
 
 # Cargo workspace
 update_cargo_version "Cargo.toml"
-sync_cargo_lockfile
 
 # npm packages
 update_json_version "package.json"
