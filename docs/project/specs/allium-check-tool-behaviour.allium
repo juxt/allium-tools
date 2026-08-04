@@ -385,6 +385,36 @@ rule QualifiedProvidesCreditsImportedTriggerReachability {
     ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
 }
 
+-- A qualified provides entry's spelling is load-bearing (it gates crediting),
+-- so both halves of the reference are resolution-checked at the entry, rather
+-- than surfacing only as a misleading downstream unreachableTrigger on the
+-- imported module (#72).
+
+rule UnknownProvidesAliasIsDiagnosedAtEntry {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: a surface provides a trigger qualified by an alias that no use declaration binds
+
+    ensures: FindingObserved(code: "allium.provides.undefinedImportedAlias", severity: error)
+    ensures: FindingMessage anchored at the provides entry names the unknown alias
+}
+
+rule UnknownProvidesTriggerIsDiagnosedAtEntry {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: inputs resolve to multiple files
+    requires: a surface provides alias/Trigger where alias's target is in the check set
+    requires: the aliased module never references trigger
+
+    ensures: FindingObserved(code: "allium.provides.unknownTrigger", severity: warning)
+    ensures: FindingMessage anchored at the provides entry names the unknown trigger
+}
+
+rule ProvidesTriggerOutsideCheckSetNotFlagged {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: a surface provides alias/Trigger where alias's target is outside the check set
+
+    ensures: FindingNotObserved(code: "allium.provides.unknownTrigger", trigger: trigger)
+}
+
 rule WitnessedTransitionCreditsImportedLifecycle {
     when: CheckCommandInvokedWithInputs(inputs)
     requires: inputs resolve to multiple files
