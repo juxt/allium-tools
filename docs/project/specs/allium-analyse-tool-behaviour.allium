@@ -39,6 +39,16 @@ rule FindingsAreFlatJsonObjects {
     ensures: FlatJsonStructure(finding)
 }
 
+-- Output ordering is a deterministic function of the input, independent of
+-- process-level HashMap iteration order (#71). Findings carry no source
+-- location, so they are ordered by type, then summary.
+rule FindingsAreDeterministicallyOrdered {
+    when: AnalyseCommandCompleted(file, diagnostics, findings)
+
+    ensures: findings are ordered by type then summary
+    ensures: the findings array is identical across repeated runs on identical input
+}
+
 -- Exit codes
 
 rule NoFindingsExitsCleanly {
