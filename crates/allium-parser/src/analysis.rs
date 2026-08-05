@@ -4738,13 +4738,11 @@ fn collect_emitted_event_param_types<'a>(
         if binding_types.is_empty() {
             continue;
         }
-        for item in &rule.items {
-            if let BlockItemKind::Clause { keyword, value } = &item.kind {
-                if keyword == "ensures" {
-                    collect_emission_param_types(value, &binding_types, out);
-                }
+        for_each_rule_clause(&rule.items, &mut |keyword, value| {
+            if keyword == "ensures" {
+                collect_emission_param_types(value, &binding_types, out);
             }
-        }
+        });
     }
 }
 
@@ -6029,52 +6027,13 @@ impl Ctx<'_> {
                 collect_bound_names(value, &mut bound);
             }
 
-            // Collect let bindings
-            for item in &rule.items {
-                if let BlockItemKind::Let { name, .. } = &item.kind {
-                    bound.insert(&name.name);
-                }
-            }
-
-            // Check requires/ensures for unbound references
-            for item in &rule.items {
-                let BlockItemKind::Clause { keyword, value } = &item.kind else {
-                    continue;
-                };
-                if keyword != "requires" && keyword != "ensures" {
-                    continue;
-                }
-                check_unbound_roots(value, &bound, rule_name, &mut self.diagnostics);
-            }
-
-            // Check for-block and if-block items
-            for item in &rule.items {
-                match &item.kind {
-                    BlockItemKind::ForBlock {
-                        binding,
-                        items,
-                        ..
-                    } => {
-                        let mut inner_bound = bound.clone();
-                        match binding {
-                            ForBinding::Single(id) => { inner_bound.insert(&id.name); }
-                            ForBinding::Destructured(ids, _) => {
-                                for id in ids {
-                                    inner_bound.insert(&id.name);
-                                }
-                            }
-                        }
-                        for sub_item in items {
-                            if let BlockItemKind::Clause { keyword, value } = &sub_item.kind {
-                                if keyword == "ensures" || keyword == "requires" {
-                                    check_unbound_roots(value, &inner_bound, rule_name, &mut self.diagnostics);
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            // Check requires/ensures for unbound references, descending into
+            // `if`/`else` and `for` bodies. Let-bindings are collected per block
+            // level (so a branch-local let scopes only within that branch and a
+            // sibling branch can't see it), and each `for` body adds its loop
+            // binding. Previously only top-level and one level of `for` were
+            // checked, so a branch-nested unbound reference went unflagged.
+            check_unbound_in_items(&rule.items, &bound, rule_name, &mut self.diagnostics);
 
             // Rules with bare entity bindings (e.g. `when: state: ClerkEventState`)
             // have an invalid trigger form. The binding name is syntactically present
@@ -6108,6 +6067,57 @@ impl Ctx<'_> {
                 }
                 if found { break; }
             }
+        }
+    }
+}
+
+/// Check `requires`/`ensures` clauses for references to unbound names, recursing
+/// through `if`/`else` and `for` bodies. Each block level first collects its own
+/// `let` names (so references resolve regardless of order and a branch-local let
+/// is invisible to sibling branches and the parent), and each `for` body adds its
+/// loop binding to the in-scope set.
+fn check_unbound_in_items<'a>(
+    items: &'a [BlockItem],
+    parent_bound: &HashSet<&'a str>,
+    rule_name: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut bound: HashSet<&'a str> = parent_bound.clone();
+    for item in items {
+        if let BlockItemKind::Let { name, .. } = &item.kind {
+            bound.insert(&name.name);
+        }
+    }
+    for item in items {
+        match &item.kind {
+            BlockItemKind::Clause { keyword, value } => {
+                if keyword == "requires" || keyword == "ensures" {
+                    check_unbound_roots(value, &bound, rule_name, diagnostics);
+                }
+            }
+            BlockItemKind::IfBlock { branches, else_items } => {
+                for b in branches {
+                    check_unbound_in_items(&b.items, &bound, rule_name, diagnostics);
+                }
+                if let Some(else_items) = else_items {
+                    check_unbound_in_items(else_items, &bound, rule_name, diagnostics);
+                }
+            }
+            BlockItemKind::ForBlock { binding, items: for_items, .. } => {
+                let mut inner = bound.clone();
+                match binding {
+                    ForBinding::Single(id) => {
+                        inner.insert(&id.name);
+                    }
+                    ForBinding::Destructured(ids, _) => {
+                        for id in ids {
+                            inner.insert(&id.name);
+                        }
+                    }
+                }
+                check_unbound_in_items(for_items, &inner, rule_name, diagnostics);
+            }
+            _ => {}
         }
     }
 }
