@@ -258,6 +258,30 @@ fn branch_local_let_is_not_a_false_positive() {
 }
 
 #[test]
+fn undeclared_type_flagged_inside_if_branch() {
+    // A type reference to an undeclared entity must be flagged the same whether
+    // it sits at the top level of a rule or inside an `if`/`else` body. The
+    // type-reference pass used to walk only top-level clauses.
+    let base = "-- allium: 3\n\nentity Job {\n    status: pending | done\n    transitions status { pending -> done  terminal: done }\n}\n\nsurface S {\n    provides:\n        Go(flag)\n}\n";
+    let top = format!(
+        "{base}\nrule R {{\n    when: Go(flag)\n    ensures: Ghost.created(status: pending)\n}}\n"
+    );
+    let branched = format!(
+        "{base}\nrule R {{\n    when: Go(flag)\n    if flag:\n        ensures: Ghost.created(status: pending)\n    else:\n        ensures: Job.created(status: pending)\n}}\n"
+    );
+    let has_undeclared = |src: &str| {
+        diagnostics_of(src)
+            .iter()
+            .any(|d| d.message.contains("Type reference 'Ghost' is not declared"))
+    };
+    assert!(has_undeclared(&top), "control: a top-level undeclared type should be flagged");
+    assert!(
+        has_undeclared(&branched),
+        "an undeclared type nested in an if-branch was not flagged like the top-level form"
+    );
+}
+
+#[test]
 fn becomes_triggered_transition_has_no_false_noexit() {
     // #70 subject, single file: the exit from `closed` is witnessed by the
     // becomes-triggered rule, so no noExit.

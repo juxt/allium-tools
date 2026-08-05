@@ -3274,15 +3274,19 @@ impl Ctx<'_> {
             }
         }
 
-        // Check rule type references (when clauses, ensures entity references)
-        for rule in self.blocks(BlockKind::Rule) {
-            for item in &rule.items {
-                let BlockItemKind::Clause { keyword, value } = &item.kind else {
-                    continue;
-                };
+        // Check rule type references (when clauses, ensures entity references).
+        // Descend into `if`/`else` and `for` bodies so a type reference nested in
+        // a branch is checked, not just top-level clauses.
+        let rules: Vec<_> = self.blocks(BlockKind::Rule).collect();
+        for rule in rules {
+            let mut refs = Vec::new();
+            for_each_rule_clause(&rule.items, &mut |keyword, value| {
                 if keyword == "when" || keyword == "ensures" || keyword == "requires" {
-                    self.check_type_refs_in_rule_expr(value, &known);
+                    refs.push(value);
                 }
+            });
+            for value in refs {
+                self.check_type_refs_in_rule_expr(value, &known);
             }
         }
     }
