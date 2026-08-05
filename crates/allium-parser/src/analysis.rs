@@ -4739,7 +4739,15 @@ fn qualified_context_binding<'a>(
 ) {
     match expr {
         Expr::Binding { name, value, .. } => {
-            if let Expr::QualifiedName(q) = value.as_ref() {
+            // A `where` clause wraps the type in `Expr::Where { source, .. }`;
+            // the qualified name is the source. Unwrap it so `context b: alias/E
+            // where …` types the binding exactly as `context b: alias/E` does
+            // (#76).
+            let type_expr = match value.as_ref() {
+                Expr::Where { source, .. } => source.as_ref(),
+                other => other,
+            };
+            if let Expr::QualifiedName(q) = type_expr {
                 if q.qualifier.as_deref() == Some(alias) {
                     if let Some((entity, _)) = status_by_entity.get_key_value(q.name.as_str()) {
                         out.insert(&name.name, entity);
