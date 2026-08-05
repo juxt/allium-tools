@@ -213,6 +213,30 @@ fn scenarios() -> Vec<Scenario> {
             "surface WDesk {\n    provides:\n        Ready(b: Job)\n            when b.status = pending\n}\n\nrule Witness {\n    when: Ready(z)\n    requires: z.status = pending\n    ensures: z.status = done\n}\n",
         ),
         (
+            "importer_inline_where",
+            "",
+            "surface WDesk {\n    provides:\n        Ready(b: dom/Job where status = pending)\n            when b.status = pending\n}\n\nrule Witness {\n    when: Ready(z)\n    requires: z.status = pending\n    ensures: z.status = done\n}\n",
+            "surface WDesk {\n    provides:\n        Ready(b: Job where status = pending)\n            when b.status = pending\n}\n\nrule Witness {\n    when: Ready(z)\n    requires: z.status = pending\n    ensures: z.status = done\n}\n",
+        ),
+        (
+            "importer_inline_with",
+            "",
+            "surface WDesk {\n    provides:\n        Ready(b: dom/Job with status = pending)\n            when b.status = pending\n}\n\nrule Witness {\n    when: Ready(z)\n    requires: z.status = pending\n    ensures: z.status = done\n}\n",
+            "surface WDesk {\n    provides:\n        Ready(b: Job with status = pending)\n            when b.status = pending\n}\n\nrule Witness {\n    when: Ready(z)\n    requires: z.status = pending\n    ensures: z.status = done\n}\n",
+        ),
+        (
+            "importer_context_with",
+            "",
+            "surface WDesk {\n    context b: dom/Job with status = pending\n    provides:\n        Ready(b)\n            when b.status = pending\n}\n\nrule Witness {\n    when: Ready(z)\n    requires: z.status = pending\n    ensures: z.status = done\n}\n",
+            "surface WDesk {\n    context b: Job with status = pending\n    provides:\n        Ready(b)\n            when b.status = pending\n}\n\nrule Witness {\n    when: Ready(z)\n    requires: z.status = pending\n    ensures: z.status = done\n}\n",
+        ),
+        (
+            "importer_facing_with",
+            "",
+            "surface WDesk {\n    facing b: dom/Job with status = pending\n    provides:\n        Ready(b)\n            when b.status = pending\n}\n\nrule Witness {\n    when: Ready(z)\n    requires: z.status = pending\n    ensures: z.status = done\n}\n",
+            "surface WDesk {\n    facing b: Job with status = pending\n    provides:\n        Ready(b)\n            when b.status = pending\n}\n\nrule Witness {\n    when: Ready(z)\n    requires: z.status = pending\n    ensures: z.status = done\n}\n",
+        ),
+        (
             "rule_emission",
             "rule Announce {\n    when: j: Job.status becomes pending\n    ensures: Ready(job: j)\n}\n",
             "rule Witness {\n    when: dom/Ready(b)\n    requires: b.status = pending\n    ensures: b.status = done\n}\n",

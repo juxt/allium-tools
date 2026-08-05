@@ -2646,7 +2646,7 @@ fn collect_command_param_types<'a, V>(
                 let params: Vec<Option<&str>> = args
                     .iter()
                     .map(|arg| match arg {
-                        CallArg::Named(named) => match &named.value {
+                        CallArg::Named(named) => match unwrap_type_refinement(&named.value) {
                             Expr::Ident(val)
                                 if status_by_entity.contains_key(val.name.as_str()) =>
                             {
@@ -4792,6 +4792,24 @@ fn collect_emission_param_types<'a>(
 
 /// Record a surface `context`/`facing` binding typed to a qualified imported
 /// entity: `name: alias/Entity` maps `name` to the imported entity.
+/// Peel transparent type-refinement wrappers so a resolver sees the underlying
+/// type expression. A binding's declared type may be refined with `where`
+/// (`Expr::Where`) or `with` (`Expr::With`), or marked optional (`Expr::TypeOptional`);
+/// none of these change which entity the binding refers to. Any resolver that
+/// matches `QualifiedName`/`Ident` to type a binding must unwrap first, or a
+/// refined type silently fails to resolve (the #76 family). One helper so the
+/// unwrap can't be applied at one site and forgotten at its siblings.
+fn unwrap_type_refinement(expr: &Expr) -> &Expr {
+    let mut cur = expr;
+    loop {
+        cur = match cur {
+            Expr::Where { source, .. } | Expr::With { source, .. } => source,
+            Expr::TypeOptional { inner, .. } => inner,
+            other => return other,
+        };
+    }
+}
+
 fn qualified_context_binding<'a>(
     expr: &'a Expr,
     alias: &str,
@@ -4800,14 +4818,9 @@ fn qualified_context_binding<'a>(
 ) {
     match expr {
         Expr::Binding { name, value, .. } => {
-            // A `where` clause wraps the type in `Expr::Where { source, .. }`;
-            // the qualified name is the source. Unwrap it so `context b: alias/E
-            // where …` types the binding exactly as `context b: alias/E` does
-            // (#76).
-            let type_expr = match value.as_ref() {
-                Expr::Where { source, .. } => source.as_ref(),
-                other => other,
-            };
+            // `context b: alias/E where …` (and `with …`, and `alias/E?`) must
+            // type `b` exactly as the bare `context b: alias/E` does (#76 family).
+            let type_expr = unwrap_type_refinement(value.as_ref());
             if let Expr::QualifiedName(q) = type_expr {
                 if q.qualifier.as_deref() == Some(alias) {
                     if let Some((entity, _)) = status_by_entity.get_key_value(q.name.as_str()) {
@@ -4843,7 +4856,7 @@ fn collect_provides_param_types<'a>(
                         CallArg::Positional(Expr::Ident(id)) => {
                             context_types.get(id.name.as_str()).copied()
                         }
-                        CallArg::Named(n) => match &n.value {
+                        CallArg::Named(n) => match unwrap_type_refinement(&n.value) {
                             Expr::QualifiedName(q) if q.qualifier.as_deref() == Some(alias) => {
                                 status_by_entity.get_key_value(q.name.as_str()).map(|(k, _)| *k)
                             }
