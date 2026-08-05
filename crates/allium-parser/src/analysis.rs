@@ -6044,7 +6044,14 @@ impl Ctx<'_> {
                 if !matches!(trigger_value.as_ref(), Expr::Ident(id) if starts_uppercase(&id.name)) {
                     continue;
                 }
-                // Find the first requires/ensures clause that references this binding
+                // Find the first requires/ensures clause that references this binding.
+                // NOTE: this only scans top-level clauses, so if the binding is
+                // referenced *only* inside an `if`/`for` branch the secondary
+                // `undefinedBinding` anchor is not emitted. This is benign today
+                // because the malformed trigger still raises `invalidTrigger`
+                // regardless, so the rule is never silently accepted. Making it
+                // branch-aware needs a span-carrying traversal (the diagnostic
+                // anchors on `check_item.span`, which `for_each_rule_clause` drops).
                 let mut found = false;
                 for check_item in &rule.items {
                     let BlockItemKind::Clause { keyword: kw, value: v } = &check_item.kind else { continue };
