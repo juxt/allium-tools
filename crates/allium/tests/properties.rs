@@ -208,6 +208,55 @@ fn prop_redundant_trigger_guard_is_invariant() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Branch-nesting invariance for undefined-binding detection.
+//
+// A reference to an unbound name must be flagged the same whether it sits at the
+// top level of a rule or inside an `if`/`else` body. The undefined-binding pass
+// used to walk only the top level (plus one level of `for`), so a branch-nested
+// reference went silently unflagged.
+// ---------------------------------------------------------------------------
+
+fn undefined_binding_codes(src: &str) -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = diagnostics_of(src)
+        .iter()
+        .filter_map(|d| d.code)
+        .filter(|c| *c == "allium.rule.undefinedBinding")
+        .collect();
+    v.sort_unstable();
+    v
+}
+
+#[test]
+fn undefined_binding_flagged_inside_if_branch() {
+    let base = "-- allium: 3\n\nentity Job {\n    status: pending | done\n    transitions status { pending -> done  terminal: done }\n}\n\nsurface S {\n    provides:\n        Go(flag)\n}\n";
+    let top = format!(
+        "{base}\nrule R {{\n    when: Go(flag)\n    requires: ghost.status = pending\n    ensures: Job.created(status: pending)\n}}\n"
+    );
+    let branched = format!(
+        "{base}\nrule R {{\n    when: Go(flag)\n    if flag:\n        requires: ghost.status = pending\n        ensures: Job.created(status: pending)\n    else:\n        ensures: Job.created(status: pending)\n}}\n"
+    );
+    let t = undefined_binding_codes(&top);
+    let b = undefined_binding_codes(&branched);
+    assert!(!t.is_empty(), "control: a top-level undefined binding should be flagged, got {t:?}");
+    assert_eq!(
+        t, b,
+        "an undefined binding nested in an if-branch was not flagged like the top-level form"
+    );
+}
+
+#[test]
+fn branch_local_let_is_not_a_false_positive() {
+    // A `let` declared inside a branch scopes that branch, so referencing it
+    // there must not trip undefinedBinding.
+    let src = "-- allium: 3\n\nentity Job {\n    status: pending | done\n    transitions status { pending -> done  terminal: done }\n}\n\nsurface S {\n    provides:\n        Go(flag)\n}\n\nrule R {\n    when: Go(flag)\n    if flag:\n        let j = Job\n        ensures: j.status = done\n    else:\n        ensures: Job.created(status: pending)\n}\n";
+    assert!(
+        undefined_binding_codes(src).is_empty(),
+        "a branch-local let was wrongly flagged as undefined: {:?}",
+        undefined_binding_codes(src)
+    );
+}
+
 #[test]
 fn becomes_triggered_transition_has_no_false_noexit() {
     // #70 subject, single file: the exit from `closed` is witnessed by the
