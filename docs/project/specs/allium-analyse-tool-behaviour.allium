@@ -240,6 +240,25 @@ rule ConflictDetected {
     )
 }
 
+-- Reverse cross-module aggregation: a conflict between two importer rules acting
+-- on an imported entity is detected the same as when the entity is local. The
+-- importer's conflict pass is given the imported entity's status vocabulary, so
+-- it can attribute both rules to the entity by the statuses they read and write.
+-- An actor's choice (rules on different call triggers) is still not a conflict.
+
+rule ConflictDetectedOnImportedEntity {
+    when: RulePairAnalysed(rule_a, rule_b, entity, state)
+    requires: entity is imported by the analysed file via a use alias
+    requires: RulesShareOverlappingRequiresState(rule_a, rule_b, entity, state) = true
+    requires: RulesSetConflictingEnsuresValues(rule_a, rule_b, entity) = true
+    requires: NotBothCallTriggered(rule_a, rule_b) = true
+
+    ensures: AnalyseFinding.created(
+        type: conflict,
+        summary: "Rules can both fire in the same state, setting conflicting values"
+    )
+}
+
 -- Invariant risk finding
 
 rule InvariantRiskDetected {
