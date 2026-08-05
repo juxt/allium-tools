@@ -304,6 +304,68 @@ fn branch_wrapping_is_report_invariant() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Declaration-order invariance. Reordering a spec's top-level declarations must
+// not change the reports: the analysis is a function of the spec, not its text
+// order. This targets order-dependent bugs — HashMap iteration order, or a
+// first-writer-wins aggregation across entities — that the split-invariance
+// properties never disturb. Some entities are generated without an advancing
+// rule so they produce lifecycle findings, making the invariant non-trivial.
+// ---------------------------------------------------------------------------
+
+fn gen_blocks(rng: &mut Rng) -> Vec<String> {
+    let n = 3 + rng.below(4); // 3..=6 entities
+    let mut blocks = Vec::new();
+    for i in 0..n {
+        let name = format!("Ent{i}");
+        let s0 = format!("s{i}a");
+        let s1 = format!("s{i}b");
+        blocks.push(format!(
+            "entity {name} {{\n    status: {s0} | {s1}\n    transitions status {{ {s0} -> {s1}  terminal: {s1} }}\n}}\n"
+        ));
+        blocks.push(format!(
+            "rule Create{name} {{\n    when: {name}Req()\n    ensures: {name}.created(status: {s0})\n}}\n"
+        ));
+        // Omit the advancing rule on some entities, so they draw lifecycle
+        // findings and the report set is non-empty.
+        if rng.below(2) == 0 {
+            blocks.push(format!(
+                "rule Advance{name} {{\n    when: b: {name}.status becomes {s0}\n    ensures: b.status = {s1}\n}}\n"
+            ));
+        }
+        blocks.push(format!(
+            "surface {name}Desk {{\n    provides:\n        {name}Req()\n}}\n"
+        ));
+    }
+    blocks
+}
+
+fn shuffle(rng: &mut Rng, v: &mut [String]) {
+    for i in (1..v.len()).rev() {
+        let j = rng.below(i + 1);
+        v.swap(i, j);
+    }
+}
+
+#[test]
+fn declaration_order_is_report_invariant() {
+    for seed in 0..250u64 {
+        let mut rng = Rng::new(seed);
+        let blocks = gen_blocks(&mut rng);
+        let base = format!("-- allium: 3\n\n{}", blocks.join("\n"));
+        let mut shuffled = blocks.clone();
+        shuffle(&mut rng, &mut shuffled);
+        let variant = format!("-- allium: 3\n\n{}", shuffled.join("\n"));
+        let a = report_set(&base);
+        let b = report_set(&variant);
+        assert_eq!(
+            a, b,
+            "seed {seed}: reordering top-level declarations changed the reports.\n\
+             BASE -> {a:?}\nSHUFFLED -> {b:?}\n\n{variant}"
+        );
+    }
+}
+
 #[test]
 fn undefined_binding_flagged_inside_if_branch() {
     let base = "-- allium: 3\n\nentity Job {\n    status: pending | done\n    transitions status { pending -> done  terminal: done }\n}\n\nsurface S {\n    provides:\n        Go(flag)\n}\n";
