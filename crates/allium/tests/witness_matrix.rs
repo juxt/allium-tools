@@ -737,3 +737,98 @@ fn generative_multi_importer_merge() {
         anomalies.join("\n\n")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Combined fuzzer. Every valid dimension at once: a multi-hop lifecycle whose
+// transitions each pick a trigger form (becomes / transitions_to / temporal),
+// are optionally wrapped in an identical if/else, and are spread across one or
+// two consumer modules. The property is unchanged (a valid witness is clean, and
+// the split equals the single file); the point is to hit interactions the
+// single-dimension generators miss.
+// ---------------------------------------------------------------------------
+
+fn gen_combined(seed: u64) -> (String, Vec<(String, String)>) {
+    let mut rng = Rng::new(seed);
+    let n = (3 + rng.below(3)) as usize; // 3..=5 states
+    let k = (1 + rng.below(2)) as usize; // 1..=2 consumers
+    let e = format!("Job{}", rng.below(100));
+    let states: Vec<String> = (0..n).map(|i| format!("s{i}v{}", rng.below(100))).collect();
+
+    // Decide per-transition form and wrapping up front.
+    let forms: Vec<u64> = (0..n - 1).map(|_| rng.below(3)).collect();
+    let wraps: Vec<bool> = (0..n - 1).map(|_| rng.below(2) == 0).collect();
+    let temporal_used = forms.iter().any(|f| *f == 2);
+
+    let mut trans = String::new();
+    for i in 0..n - 1 {
+        trans.push_str(&format!("{} -> {}  ", states[i], states[i + 1]));
+    }
+    let field = if temporal_used { "    due_at: Timestamp\n" } else { "" };
+    let entity = format!(
+        "entity {e} {{\n    status: {}\n{field}    transitions status {{ {trans}terminal: {} }}\n}}\n",
+        states.join(" | "),
+        states[n - 1]
+    );
+    let domain_body = format!(
+        "{entity}\nrule Create{e} {{\n    when: {e}Req()\n    ensures: {e}.created(status: {})\n}}\n\nsurface {e}Intake {{\n    provides:\n        {e}Req()\n}}\n",
+        states[0]
+    );
+
+    let witness = |i: usize, q: &str| -> String {
+        let (from, to) = (&states[i], &states[i + 1]);
+        let (trigger, clauses) = match forms[i] {
+            0 => (format!("b: {q}{e}.status becomes {from}"), format!("ensures: b.status = {to}")),
+            1 => (format!("b: {q}{e}.status transitions_to {from}"), format!("ensures: b.status = {to}")),
+            _ => (
+                format!("m: {q}{e}.due_at <= now"),
+                format!("requires: m.status = {from}\nensures: m.status = {to}"),
+            ),
+        };
+        let body = if wraps[i] {
+            format!("if true:\n{clauses}\nelse:\n{clauses}")
+        } else {
+            clauses
+        };
+        format!("rule W{i} {{\n    when: {trigger}\n{body}\n}}\n\n")
+    };
+
+    let mut single_witness = String::new();
+    let mut consumer_bodies: Vec<String> = vec![String::new(); k];
+    for i in 0..n - 1 {
+        single_witness.push_str(&witness(i, ""));
+        consumer_bodies[i % k].push_str(&witness(i, "dom/"));
+    }
+    let single = format!("-- allium: 3\n\n{domain_body}\n{single_witness}");
+    let mut files = vec![("domain.allium".to_string(), format!("-- allium: 3\n\n{domain_body}"))];
+    for (c, body) in consumer_bodies.iter().enumerate() {
+        if !body.is_empty() {
+            files.push((format!("c{c}.allium"), format!("-- allium: 3\n\nuse \"./domain.allium\" as dom\n\n{body}")));
+        }
+    }
+    (single, files)
+}
+
+#[test]
+fn generative_combined_fuzzer() {
+    let mut anomalies: Vec<String> = Vec::new();
+    for seed in 0..150u64 {
+        let (single_src, files) = gen_combined(seed);
+        let single = reports_of_file(&single_src);
+        let split = reports_of_set(&files);
+        if !single.is_empty() {
+            anomalies.push(format!("[seed {seed}] combined single not clean: {single:?}\n{single_src}"));
+        } else if single != split {
+            anomalies.push(format!(
+                "[seed {seed}] SPLIT != SINGLE\n  single: {single:?}\n  split:  {split:?}\n--- files ---\n{}",
+                files.iter().map(|(n, c)| format!("== {n} ==\n{c}")).collect::<Vec<_>>().join("\n")
+            ));
+        }
+    }
+    assert!(
+        anomalies.is_empty(),
+        "\n==== COMBINED FUZZER: {} anomalies (of 150 seeds) ====\n\n{}\n",
+        anomalies.len(),
+        // Cap the dump so a broad failure stays readable.
+        anomalies.iter().take(6).cloned().collect::<Vec<_>>().join("\n\n")
+    );
+}
