@@ -757,7 +757,7 @@ fn gen_combined(seed: u64) -> (String, Vec<(String, String)>) {
     // Decide per-transition form and wrapping up front.
     let forms: Vec<u64> = (0..n - 1).map(|_| rng.below(3)).collect();
     let wraps: Vec<bool> = (0..n - 1).map(|_| rng.below(2) == 0).collect();
-    let temporal_used = forms.iter().any(|f| *f == 2);
+    let temporal_used = forms.contains(&2);
 
     let mut trans = String::new();
     for i in 0..n - 1 {
