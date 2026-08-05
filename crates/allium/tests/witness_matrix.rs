@@ -832,3 +832,88 @@ fn generative_combined_fuzzer() {
         anomalies.iter().take(6).cloned().collect::<Vec<_>>().join("\n\n")
     );
 }
+
+// ---------------------------------------------------------------------------
+// True-positive cross-module detection. Everything above checks that a *valid*
+// witness stays clean; this checks the opposite failure mode — that a genuine
+// fault is not silently dropped across a split. A multi-hop lifecycle has some of
+// its witnessing rules omitted at random (leaving stuck / unreachable states) and
+// the surviving witnesses spread across consumer modules. The single-file form is
+// the oracle: it reports the real faults. The split must report exactly the same
+// set. A split that reports *fewer* faults is over-crediting (hiding a real
+// deadlock); one that reports *more* is the false-positive class fixed earlier.
+// Only witnesses are omitted (never conflicting effects added), so every finding
+// here is a lifecycle fault, which is genuinely cross-module-detectable.
+// ---------------------------------------------------------------------------
+
+fn gen_faulty_lifecycle(seed: u64) -> (String, Vec<(String, String)>) {
+    let mut rng = Rng::new(seed);
+    let n = (3 + rng.below(3)) as usize; // 3..=5 states
+    let k = (1 + rng.below(2)) as usize; // 1..=2 consumers
+    let e = format!("Job{}", rng.below(100));
+    let states: Vec<String> = (0..n).map(|i| format!("s{i}v{}", rng.below(100))).collect();
+    // Which transitions are actually witnessed. Omitting one strands its source
+    // state (and everything past it).
+    let present: Vec<bool> = (0..n - 1).map(|_| rng.below(5) != 0).collect(); // ~80% present
+
+    let mut trans = String::new();
+    for i in 0..n - 1 {
+        trans.push_str(&format!("{} -> {}  ", states[i], states[i + 1]));
+    }
+    let entity = format!(
+        "entity {e} {{\n    status: {}\n    transitions status {{ {trans}terminal: {} }}\n}}\n",
+        states.join(" | "),
+        states[n - 1]
+    );
+    let domain_body = format!(
+        "{entity}\nrule Create{e} {{\n    when: {e}Req()\n    ensures: {e}.created(status: {})\n}}\n\nsurface {e}Intake {{\n    provides:\n        {e}Req()\n}}\n",
+        states[0]
+    );
+
+    let mut single_witness = String::new();
+    let mut consumer_bodies: Vec<String> = vec![String::new(); k];
+    for i in 0..n - 1 {
+        if !present[i] {
+            continue;
+        }
+        let (from, to) = (&states[i], &states[i + 1]);
+        single_witness.push_str(&format!(
+            "rule W{i} {{\n    when: b: {e}.status becomes {from}\n    ensures: b.status = {to}\n}}\n\n"
+        ));
+        consumer_bodies[i % k].push_str(&format!(
+            "rule W{i} {{\n    when: b: dom/{e}.status becomes {from}\n    ensures: b.status = {to}\n}}\n\n"
+        ));
+    }
+    let single = format!("-- allium: 3\n\n{domain_body}\n{single_witness}");
+    let mut files = vec![("domain.allium".to_string(), format!("-- allium: 3\n\n{domain_body}"))];
+    for (c, body) in consumer_bodies.iter().enumerate() {
+        if !body.is_empty() {
+            files.push((format!("c{c}.allium"), format!("-- allium: 3\n\nuse \"./domain.allium\" as dom\n\n{body}")));
+        }
+    }
+    (single, files)
+}
+
+#[test]
+fn generative_faults_survive_the_split() {
+    let mut anomalies: Vec<String> = Vec::new();
+    for seed in 0..200u64 {
+        let (single_src, files) = gen_faulty_lifecycle(seed);
+        let single = reports_of_file(&single_src);
+        let split = reports_of_set(&files);
+        if single != split {
+            let missing: Vec<_> = single.iter().filter(|r| !split.contains(r)).cloned().collect();
+            let extra: Vec<_> = split.iter().filter(|r| !single.contains(r)).cloned().collect();
+            anomalies.push(format!(
+                "[seed {seed}] SPLIT != SINGLE\n  dropped by split (false negative): {missing:?}\n  extra in split (false positive): {extra:?}\n--- files ---\n{}",
+                files.iter().map(|(n, c)| format!("== {n} ==\n{c}")).collect::<Vec<_>>().join("\n")
+            ));
+        }
+    }
+    assert!(
+        anomalies.is_empty(),
+        "\n==== FAULT SURVIVAL: {} anomalies (of 200 seeds) ====\n\n{}\n",
+        anomalies.len(),
+        anomalies.iter().take(6).cloned().collect::<Vec<_>>().join("\n\n")
+    );
+}
