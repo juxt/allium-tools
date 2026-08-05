@@ -241,7 +241,18 @@ fn undefined_binding_codes(src: &str) -> Vec<&'static str> {
 // multiset.
 // ---------------------------------------------------------------------------
 
-fn gen_branch_case(rng: &mut Rng, wrapped: bool) -> String {
+/// Wrap a clause block in `depth` levels of identical `if flag: … else: …`. Both
+/// branches are the same, so it is a semantic no-op at any depth. A pass that
+/// descends only one level of nesting would miss a clause wrapped deeper.
+fn wrap_ifelse(inner: &str, depth: u32) -> String {
+    if depth == 0 {
+        return inner.to_string();
+    }
+    let deeper = wrap_ifelse(inner, depth - 1);
+    format!("if flag:\n{deeper}\nelse:\n{deeper}\n")
+}
+
+fn gen_branch_case(rng: &mut Rng, depth: u32) -> String {
     let name = format!("Ent{}", rng.below(1000));
     let s0 = format!("s{}start", rng.below(100));
     let s1 = format!("s{}end", rng.below(100));
@@ -259,16 +270,12 @@ fn gen_branch_case(rng: &mut Rng, wrapped: bool) -> String {
             format!("ensures: t.status = {s1}"),
         ),
     };
-    let body = if wrapped {
-        format!("    if flag:\n        {req}\n        {ens}\n    else:\n        {req}\n        {ens}\n")
-    } else {
-        format!("    {req}\n    {ens}\n")
-    };
+    let body = wrap_ifelse(&format!("{req}\n{ens}"), depth);
     format!(
         "-- allium: 3\n\
          entity {name} {{\n    status: {s0} | {s1}\n    transitions status {{ {s0} -> {s1}  terminal: {s1} }}\n}}\n\
          rule Create{name} {{\n    when: Create{name}Requested()\n    ensures: {name}.created(status: {s0})\n}}\n\
-         rule Advance{name} {{\n    when: Advance{name}(t, flag)\n{body}}}\n\
+         rule Advance{name} {{\n    when: Advance{name}(t, flag)\n{body}\n}}\n\
          surface {name}Desk {{\n    provides:\n        Create{name}Requested()\n        Advance{name}(t: {name}, flag)\n}}\n",
     )
 }
@@ -282,14 +289,17 @@ fn report_kinds(src: &str) -> Vec<String> {
 #[test]
 fn branch_wrapping_is_report_invariant() {
     for seed in 0..400u64 {
-        let flat = gen_branch_case(&mut Rng::new(seed), false);
-        let wrapped = gen_branch_case(&mut Rng::new(seed), true);
+        // Compare the flat form against 1..=3 levels of identical if/else nesting;
+        // the depth cycles with the seed so every depth is exercised.
+        let depth = 1 + (seed % 3) as u32;
+        let flat = gen_branch_case(&mut Rng::new(seed), 0);
+        let nested = gen_branch_case(&mut Rng::new(seed), depth);
         let a = report_kinds(&flat);
-        let b = report_kinds(&wrapped);
+        let b = report_kinds(&nested);
         assert_eq!(
             a, b,
-            "seed {seed}: wrapping requires/ensures in identical if/else branches changed the reports.\n\
-             FLAT:\n{flat}\n-> {a:?}\n\nWRAPPED:\n{wrapped}\n-> {b:?}"
+            "seed {seed}: wrapping requires/ensures in {depth} level(s) of identical if/else changed the reports.\n\
+             FLAT:\n{flat}\n-> {a:?}\n\nNESTED:\n{nested}\n-> {b:?}"
         );
     }
 }

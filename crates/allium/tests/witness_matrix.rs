@@ -650,3 +650,90 @@ fn generative_multi_entity_split_invariance() {
         anomalies.join("\n\n")
     );
 }
+
+fn reports_of_set(files: &[(String, String)]) -> Vec<String> {
+    let dir = TempDir::new("set");
+    for (name, content) in files {
+        dir.write(name, content);
+    }
+    let mut all = report_set(&run("check", &[dir.path().to_str().unwrap()]));
+    all.extend(report_set(&run("analyse", &[dir.path().to_str().unwrap()])));
+    all.sort();
+    all.dedup();
+    all
+}
+
+// ---------------------------------------------------------------------------
+// Multi-importer merge. A multi-hop lifecycle is witnessed one transition at a
+// time, and the transitions are spread across several consumer modules. Only by
+// merging every importer's contributions does the domain see a complete
+// lifecycle, so a merge that drops one importer's witness leaves a state with no
+// exit — a split report the single-file form never has.
+// ---------------------------------------------------------------------------
+
+fn gen_distributed_lifecycle(seed: u64) -> (String, Vec<(String, String)>) {
+    let mut rng = Rng::new(seed);
+    let n = (3 + rng.below(3)) as usize; // 3..=5 states
+    let k = (2 + rng.below(2)) as usize; // 2..=3 consumers
+    let e = format!("Job{}", rng.below(100));
+    let states: Vec<String> = (0..n).map(|i| format!("s{i}v{}", rng.below(100))).collect();
+    let mut trans = String::new();
+    for i in 0..n - 1 {
+        trans.push_str(&format!("{} -> {}  ", states[i], states[i + 1]));
+    }
+    let entity = format!(
+        "entity {e} {{\n    status: {}\n    transitions status {{ {trans}terminal: {} }}\n}}\n",
+        states.join(" | "),
+        states[n - 1]
+    );
+    let create = format!(
+        "rule Create{e} {{\n    when: {e}Req()\n    ensures: {e}.created(status: {})\n}}\n",
+        states[0]
+    );
+    let intake = format!("surface {e}Intake {{\n    provides:\n        {e}Req()\n}}\n");
+    let domain_body = format!("{entity}\n{create}\n{intake}");
+
+    let mut single_witness = String::new();
+    let mut consumer_bodies: Vec<String> = vec![String::new(); k];
+    for i in 0..n - 1 {
+        let (from, to) = (&states[i], &states[i + 1]);
+        single_witness.push_str(&format!(
+            "rule W{i} {{\n    when: b: {e}.status becomes {from}\n    ensures: b.status = {to}\n}}\n\n"
+        ));
+        consumer_bodies[i % k].push_str(&format!(
+            "rule W{i} {{\n    when: b: dom/{e}.status becomes {from}\n    ensures: b.status = {to}\n}}\n\n"
+        ));
+    }
+    let single = format!("-- allium: 3\n\n{domain_body}\n{single_witness}");
+    let mut files = vec![("domain.allium".to_string(), format!("-- allium: 3\n\n{domain_body}"))];
+    for (c, body) in consumer_bodies.iter().enumerate() {
+        if !body.is_empty() {
+            files.push((format!("c{c}.allium"), format!("-- allium: 3\n\nuse \"./domain.allium\" as dom\n\n{body}")));
+        }
+    }
+    (single, files)
+}
+
+#[test]
+fn generative_multi_importer_merge() {
+    let mut anomalies: Vec<String> = Vec::new();
+    for seed in 0..60u64 {
+        let (single_src, files) = gen_distributed_lifecycle(seed);
+        let single = reports_of_file(&single_src);
+        let split = reports_of_set(&files);
+        if !single.is_empty() {
+            anomalies.push(format!("[seed {seed}] multi-hop single not clean: {single:?}\n{single_src}"));
+        } else if single != split {
+            anomalies.push(format!(
+                "[seed {seed}] MERGE != SINGLE\n  single: {single:?}\n  split:  {split:?}\n--- files ---\n{}",
+                files.iter().map(|(n, c)| format!("== {n} ==\n{c}")).collect::<Vec<_>>().join("\n")
+            ));
+        }
+    }
+    assert!(
+        anomalies.is_empty(),
+        "\n==== MULTI-IMPORTER MERGE: {} anomalies ====\n\n{}\n",
+        anomalies.len(),
+        anomalies.join("\n\n")
+    );
+}
