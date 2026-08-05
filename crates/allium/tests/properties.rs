@@ -227,6 +227,73 @@ fn undefined_binding_codes(src: &str) -> Vec<&'static str> {
     v
 }
 
+// ---------------------------------------------------------------------------
+// Branch-nesting invariance (generative). Wrapping a rule's `requires`/`ensures`
+// in an identical `if flag: ... else: ...` is semantically a no-op, so the set of
+// reports must be unchanged — across every analysis pass. A pass that still walks
+// only the top level of a rule body breaks this. A fault (an undefined binding, an
+// undeclared type) is injected on some seeds so the property also asserts a
+// diagnostic is raised whether its clause is flat or nested.
+//
+// Wrapping duplicates the clause, so a per-clause diagnostic fires twice in the
+// wrapped form; the invariant is therefore set-equality of report *kinds* (a
+// branch gap makes a report vanish, which this still catches) rather than a
+// multiset.
+// ---------------------------------------------------------------------------
+
+fn gen_branch_case(rng: &mut Rng, wrapped: bool) -> String {
+    let name = format!("Ent{}", rng.below(1000));
+    let s0 = format!("s{}start", rng.below(100));
+    let s1 = format!("s{}end", rng.below(100));
+    let (req, ens) = match rng.below(3) {
+        1 => (
+            format!("requires: ghost.status = {s0}"),
+            format!("ensures: t.status = {s1}"),
+        ),
+        2 => (
+            format!("requires: t.status = {s0}"),
+            format!("ensures: Ghost{name}.created(status: {s0})"),
+        ),
+        _ => (
+            format!("requires: t.status = {s0}"),
+            format!("ensures: t.status = {s1}"),
+        ),
+    };
+    let body = if wrapped {
+        format!("    if flag:\n        {req}\n        {ens}\n    else:\n        {req}\n        {ens}\n")
+    } else {
+        format!("    {req}\n    {ens}\n")
+    };
+    format!(
+        "-- allium: 3\n\
+         entity {name} {{\n    status: {s0} | {s1}\n    transitions status {{ {s0} -> {s1}  terminal: {s1} }}\n}}\n\
+         rule Create{name} {{\n    when: Create{name}Requested()\n    ensures: {name}.created(status: {s0})\n}}\n\
+         rule Advance{name} {{\n    when: Advance{name}(t, flag)\n{body}}}\n\
+         surface {name}Desk {{\n    provides:\n        Create{name}Requested()\n        Advance{name}(t: {name}, flag)\n}}\n",
+    )
+}
+
+fn report_kinds(src: &str) -> Vec<String> {
+    let mut v = report_set(src);
+    v.dedup();
+    v
+}
+
+#[test]
+fn branch_wrapping_is_report_invariant() {
+    for seed in 0..400u64 {
+        let flat = gen_branch_case(&mut Rng::new(seed), false);
+        let wrapped = gen_branch_case(&mut Rng::new(seed), true);
+        let a = report_kinds(&flat);
+        let b = report_kinds(&wrapped);
+        assert_eq!(
+            a, b,
+            "seed {seed}: wrapping requires/ensures in identical if/else branches changed the reports.\n\
+             FLAT:\n{flat}\n-> {a:?}\n\nWRAPPED:\n{wrapped}\n-> {b:?}"
+        );
+    }
+}
+
 #[test]
 fn undefined_binding_flagged_inside_if_branch() {
     let base = "-- allium: 3\n\nentity Job {\n    status: pending | done\n    transitions status { pending -> done  terminal: done }\n}\n\nsurface S {\n    provides:\n        Go(flag)\n}\n";

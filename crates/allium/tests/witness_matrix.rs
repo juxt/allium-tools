@@ -19,17 +19,25 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn allium() -> Command {
     Command::new(env!("CARGO_BIN_EXE_allium"))
 }
+
+// Unique per TempDir, so tests running in parallel never share a path. Keying on
+// the process id alone let concurrent tests clobber each other's `single`/`pair`
+// directories, which showed up as flaky split-invariance failures in the full run.
+static TEMPDIR_SEQ: AtomicU64 = AtomicU64::new(0);
 
 struct TempDir {
     path: std::path::PathBuf,
 }
 impl TempDir {
     fn new(name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("allium-wm-{name}-{}", std::process::id()));
+        let seq = TEMPDIR_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir()
+            .join(format!("allium-wm-{name}-{}-{seq}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         Self { path }
@@ -480,4 +488,165 @@ fn name_existence_sweep() {
             uncaught.join("\n\n")
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Generative split-invariance. The hand-written scenarios above enumerate the
+// binding-type sources at fixed names; this generates random entity/state names
+// and picks a witnessing form each seed, so the property (a valid witness is
+// clean single-file, and the split reports exactly the same) is exercised over a
+// far wider surface than the fixed cells. A false lifecycle report that only
+// shows up for some name or form combination surfaces here.
+// ---------------------------------------------------------------------------
+
+struct Rng(u64);
+impl Rng {
+    fn new(seed: u64) -> Self {
+        Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1))
+    }
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+struct SplitCase {
+    single: String,
+    domain: String,
+    consumer: String,
+    form: &'static str,
+}
+
+fn gen_split_case(seed: u64) -> SplitCase {
+    let mut rng = Rng::new(seed);
+    let e = format!("Ent{}", rng.below(1000));
+    let s0 = format!("s{}a", rng.below(100));
+    let s1 = format!("s{}b", rng.below(100));
+    let form = rng.below(6);
+    let temporal = form == 5;
+    let field = if temporal { "    due_at: Timestamp\n" } else { "" };
+    let entity = format!(
+        "entity {e} {{\n    status: {s0} | {s1}\n{field}    transitions status {{ {s0} -> {s1}  terminal: {s1} }}\n}}\n"
+    );
+    let create = format!("rule Create{e} {{\n    when: {e}Req()\n    ensures: {e}.created(status: {s0})\n}}\n");
+    let intake = format!("surface {e}Intake {{\n    provides:\n        {e}Req()\n}}\n");
+    let domain_body = format!("{entity}\n{create}\n{intake}");
+
+    // A type refinement is a no-op on which entity a binding refers to, so the
+    // context/facing/inline forms carry a random one to also exercise refinement
+    // unwrapping (the #76 family) generatively.
+    let refine = match rng.below(3) {
+        1 => format!(" where status = {s0}"),
+        2 => format!(" with status = {s0}"),
+        _ => String::new(),
+    };
+    let witness = |q: &str| -> String {
+        match form {
+            0 => format!("rule W {{\n    when: b: {q}{e}.status becomes {s0}\n    ensures: b.status = {s1}\n}}\n"),
+            1 => format!("rule W {{\n    when: b: {q}{e}.status transitions_to {s0}\n    ensures: b.status = {s1}\n}}\n"),
+            2 => format!("surface WDesk {{\n    context b: {q}{e}{refine}\n    provides:\n        Ready(b)\n            when b.status = {s0}\n}}\n\nrule W {{\n    when: Ready(z)\n    requires: z.status = {s0}\n    ensures: z.status = {s1}\n}}\n"),
+            3 => format!("surface WDesk {{\n    facing b: {q}{e}{refine}\n    provides:\n        Ready(b)\n            when b.status = {s0}\n}}\n\nrule W {{\n    when: Ready(z)\n    requires: z.status = {s0}\n    ensures: z.status = {s1}\n}}\n"),
+            4 => format!("surface WDesk {{\n    provides:\n        Ready(b: {q}{e}{refine})\n            when b.status = {s0}\n}}\n\nrule W {{\n    when: Ready(z)\n    requires: z.status = {s0}\n    ensures: z.status = {s1}\n}}\n"),
+            _ => format!("rule W {{\n    when: m: {q}{e}.due_at <= now\n    requires: m.status = {s0}\n    ensures: m.status = {s1}\n}}\n"),
+        }
+    };
+    let form_name = ["becomes", "transitions_to", "context", "facing", "inline", "temporal"][form as usize];
+
+    SplitCase {
+        single: format!("-- allium: 3\n\n{domain_body}\n{}", witness("")),
+        domain: format!("-- allium: 3\n\n{domain_body}"),
+        consumer: format!("-- allium: 3\n\nuse \"./domain.allium\" as dom\n\n{}", witness("dom/")),
+        form: form_name,
+    }
+}
+
+#[test]
+fn generative_split_invariance() {
+    let mut anomalies: Vec<String> = Vec::new();
+    for seed in 0..90u64 {
+        let c = gen_split_case(seed);
+        let single = reports_of_file(&c.single);
+        let split = reports_of_pair(&c.domain, &c.consumer);
+        if !single.is_empty() {
+            anomalies.push(format!(
+                "[seed {seed} form={}] generated single-file witness is not clean: {single:?}\n{}",
+                c.form, c.single
+            ));
+        } else if single != split {
+            anomalies.push(format!(
+                "[seed {seed} form={}] SPLIT != SINGLE\n  single: {single:?}\n  split:  {split:?}\n--- consumer ---\n{}",
+                c.form, c.consumer
+            ));
+        }
+    }
+    assert!(
+        anomalies.is_empty(),
+        "\n==== GENERATIVE SPLIT-INVARIANCE: {} anomalies ====\n\n{}\n",
+        anomalies.len(),
+        anomalies.join("\n\n")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-entity split-invariance. Several entities, each created in the domain and
+// advanced by a witnessing rule in the consumer, exercise the reverse channel
+// aggregating contributions for more than one entity at once. A per-entity key
+// mix-up (crediting entity A's transition to entity B, say) shows up as a
+// spurious lifecycle report on the split that the single file does not have.
+// ---------------------------------------------------------------------------
+
+fn gen_multi_split_case(seed: u64) -> (String, String, String) {
+    let mut rng = Rng::new(seed);
+    let n = 2 + rng.below(3); // 2..=4 entities
+    let mut domain_body = String::new();
+    let mut single_witness = String::new();
+    let mut consumer_witness = String::new();
+    for i in 0..n {
+        let e = format!("Ent{i}x{}", rng.below(100));
+        let s0 = format!("s{}a", rng.below(100));
+        let s1 = format!("s{}b", rng.below(100));
+        let trig = if rng.below(2) == 0 { "becomes" } else { "transitions_to" };
+        domain_body.push_str(&format!(
+            "entity {e} {{\n    status: {s0} | {s1}\n    transitions status {{ {s0} -> {s1}  terminal: {s1} }}\n}}\n\nrule Create{e} {{\n    when: {e}Req()\n    ensures: {e}.created(status: {s0})\n}}\n\nsurface {e}Intake {{\n    provides:\n        {e}Req()\n}}\n\n"
+        ));
+        single_witness.push_str(&format!(
+            "rule W{i} {{\n    when: b: {e}.status {trig} {s0}\n    ensures: b.status = {s1}\n}}\n\n"
+        ));
+        consumer_witness.push_str(&format!(
+            "rule W{i} {{\n    when: b: dom/{e}.status {trig} {s0}\n    ensures: b.status = {s1}\n}}\n\n"
+        ));
+    }
+    let single = format!("-- allium: 3\n\n{domain_body}{single_witness}");
+    let domain = format!("-- allium: 3\n\n{domain_body}");
+    let consumer = format!("-- allium: 3\n\nuse \"./domain.allium\" as dom\n\n{consumer_witness}");
+    (single, domain, consumer)
+}
+
+#[test]
+fn generative_multi_entity_split_invariance() {
+    let mut anomalies: Vec<String> = Vec::new();
+    for seed in 0..70u64 {
+        let (single_src, domain, consumer) = gen_multi_split_case(seed);
+        let single = reports_of_file(&single_src);
+        let split = reports_of_pair(&domain, &consumer);
+        if !single.is_empty() {
+            anomalies.push(format!("[seed {seed}] multi-entity single-file not clean: {single:?}\n{single_src}"));
+        } else if single != split {
+            anomalies.push(format!(
+                "[seed {seed}] SPLIT != SINGLE\n  single: {single:?}\n  split:  {split:?}\n--- consumer ---\n{consumer}"
+            ));
+        }
+    }
+    assert!(
+        anomalies.is_empty(),
+        "\n==== MULTI-ENTITY SPLIT-INVARIANCE: {} anomalies ====\n\n{}\n",
+        anomalies.len(),
+        anomalies.join("\n\n")
+    );
 }
