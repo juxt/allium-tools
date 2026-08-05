@@ -1664,7 +1664,7 @@ impl Ctx<'_> {
             };
             // Conflict detection resolves entities by name matching against
             // status_by_entity, not through binding types from when clauses.
-            let binding_types = collect_rule_binding_types(rule, &HashMap::new());
+            let binding_types = collect_rule_binding_types(rule, &HashMap::<&str, ()>::new());
 
             let mut trigger_kind = ConflictTriggerKind::Unknown;
             let mut requires_statuses: HashMap<String, HashSet<String>> = HashMap::new();
@@ -2589,9 +2589,9 @@ fn collect_created_field_assignments<'a>(
     }
 }
 
-fn collect_rule_binding_types<'a>(
+fn collect_rule_binding_types<'a, V>(
     rule: &'a BlockDecl,
-    status_by_entity: &HashMap<&str, (Vec<&Ident>, HashSet<&str>)>,
+    status_by_entity: &HashMap<&str, V>,
 ) -> HashMap<&'a str, &'a str> {
     let mut types = HashMap::new();
     for item in &rule.items {
@@ -2606,9 +2606,9 @@ fn collect_rule_binding_types<'a>(
     types
 }
 
-fn collect_binding_types_from_expr<'a>(
+fn collect_binding_types_from_expr<'a, V>(
     expr: &'a Expr,
-    status_by_entity: &HashMap<&str, (Vec<&Ident>, HashSet<&str>)>,
+    status_by_entity: &HashMap<&str, V>,
     out: &mut HashMap<&'a str, &'a str>,
 ) {
     match expr {
@@ -4570,12 +4570,14 @@ pub fn collect_reverse_contributions<'a>(
     let imported_info = EntityInfo::from_module(imported);
     let status_by_entity = imported_info.status_by_entity();
 
-    // Command → positional parameter entity types. Two sources contribute a
+    // Command → positional parameter entity types. Three sources contribute a
     // parameter typed to a status-bearing imported entity:
     //   - the imported module's surface `provides:` (`Trigger(b: Entity)`),
-    //     typing a binding the importer subscribes to across the boundary; and
+    //     typing a binding the importer subscribes to across the boundary;
     //   - the importer's OWN surface `provides:`, where a parameter is typed to
-    //     a qualified imported entity inline or via a `context` binding (#65).
+    //     a qualified imported entity inline or via a `context` binding (#65); and
+    //   - the imported module's rule emissions (`ensures: Event(p: b)`), where
+    //     the emitting rule's own trigger types `b` (#77).
     let mut command_param_types: HashMap<&str, Vec<Option<&str>>> = HashMap::new();
     for b in module_blocks(imported, BlockKind::Surface) {
         for item in &b.items {
@@ -4589,6 +4591,7 @@ pub fn collect_reverse_contributions<'a>(
     collect_importer_command_param_types(
         importer, alias, &status_by_entity, &mut command_param_types,
     );
+    collect_emitted_event_param_types(imported, &status_by_entity, &mut command_param_types);
 
     // 1. Provided triggers: `provides: alias/Trigger(...)` in importer surfaces.
     for b in module_blocks(importer, BlockKind::Surface) {
@@ -4726,6 +4729,76 @@ fn collect_importer_command_param_types<'a>(
                 }
             }
         }
+    }
+}
+
+/// Add rule-emitted events as a binding-type source (#77). For an imported rule
+/// `ensures: Event(param: b)`, the event's parameter takes the type the emitting
+/// rule's own trigger gives `b`, mapped positionally so a positional subscriber
+/// binding resolves. This lets a consumer subscribing to a rule-emitted event
+/// across a module boundary type its binding.
+fn collect_emitted_event_param_types<'a>(
+    imported: &'a Module,
+    status_by_entity: &HashMap<&'a str, HashSet<&'a str>>,
+    out: &mut HashMap<&'a str, Vec<Option<&'a str>>>,
+) {
+    for rule in module_blocks(imported, BlockKind::Rule) {
+        let binding_types = collect_rule_binding_types(rule, status_by_entity);
+        if binding_types.is_empty() {
+            continue;
+        }
+        for item in &rule.items {
+            if let BlockItemKind::Clause { keyword, value } = &item.kind {
+                if keyword == "ensures" {
+                    collect_emission_param_types(value, &binding_types, out);
+                }
+            }
+        }
+    }
+}
+
+/// From an `ensures:` value, record each leading `Event(args)` emission's
+/// positional parameter types, resolved from the emitting rule's binding types.
+fn collect_emission_param_types<'a>(
+    expr: &'a Expr,
+    binding_types: &HashMap<&'a str, &'a str>,
+    out: &mut HashMap<&'a str, Vec<Option<&'a str>>>,
+) {
+    match expr {
+        Expr::Call { function, args, .. } => {
+            if let Expr::Ident(event) = function.as_ref() {
+                let params: Vec<Option<&str>> = args
+                    .iter()
+                    .map(|arg| {
+                        let val = match arg {
+                            CallArg::Named(n) => &n.value,
+                            CallArg::Positional(e) => e,
+                        };
+                        match val {
+                            Expr::Ident(v) => binding_types.get(v.name.as_str()).copied(),
+                            _ => None,
+                        }
+                    })
+                    .collect();
+                if params.iter().any(Option::is_some) {
+                    out.entry(&event.name).or_insert(params);
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_emission_param_types(item, binding_types, out);
+            }
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_emission_param_types(&b.body, binding_types, out);
+            }
+            if let Some(body) = else_body {
+                collect_emission_param_types(body, binding_types, out);
+            }
+        }
+        _ => {}
     }
 }
 
