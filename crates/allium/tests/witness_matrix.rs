@@ -212,9 +212,21 @@ fn scenarios() -> Vec<Scenario> {
             "rule Witness {\n    when: dom/Ready(b)\n    requires: b.status = pending\n    ensures: b.status = done\n}\n",
             "rule Witness {\n    when: Ready(b)\n    requires: b.status = pending\n    ensures: b.status = done\n}\n",
         ),
+        (
+            "rule_emission_transitions_to",
+            "rule Announce {\n    when: j: Job.status transitions_to pending\n    ensures: Ready(job: j)\n}\n",
+            "rule Witness {\n    when: dom/Ready(b)\n    requires: b.status = pending\n    ensures: b.status = done\n}\n",
+            "rule Witness {\n    when: Ready(b)\n    requires: b.status = pending\n    ensures: b.status = done\n}\n",
+        ),
+        (
+            "branch_target",
+            "surface JobDesk {\n    provides:\n        Ready(x: Job, flag)\n            when x.status = pending\n}\n",
+            "rule Witness {\n    when: dom/Ready(b, ok)\n    requires: b.status = pending\n    if ok:\n        ensures: b.status = done\n    else:\n        ensures: b.status = done\n}\n",
+            "rule Witness {\n    when: Ready(b, ok)\n    requires: b.status = pending\n    if ok:\n        ensures: b.status = done\n    else:\n        ensures: b.status = done\n}\n",
+        ),
     ];
 
-    cases
+    let mut out: Vec<Scenario> = cases
         .into_iter()
         .map(|(name, domain_extra, consumer_qual, consumer_local)| {
             let single = format!("-- allium: 3\n\n{DOMAIN_BASE}\n{domain_extra}\n{consumer_local}");
@@ -223,7 +235,22 @@ fn scenarios() -> Vec<Scenario> {
                 format!("-- allium: 3\n\nuse \"./domain.allium\" as dom\n\n{consumer_qual}");
             Scenario { name, single, domain, consumer }
         })
-        .collect()
+        .collect();
+
+    // Multi-hop lifecycle (pending -> active -> done) witnessed across a module,
+    // one becomes-triggered rule per hop. Needs its own 3-state entity, so it
+    // does not use DOMAIN_BASE.
+    let mh_entity = "entity Job {\n    status: pending | active | done\n    transitions status { pending -> active  active -> done  terminal: done }\n}\n\nrule CreateJob {\n    when: JobRequested()\n    ensures: Job.created(status: pending)\n}\n\nsurface JobIntake {\n    provides:\n        JobRequested()\n}\n";
+    out.push(Scenario {
+        name: "multi_hop",
+        single: format!(
+            "-- allium: 3\n\n{mh_entity}\nrule W1 {{\n    when: a: Job.status becomes pending\n    ensures: a.status = active\n}}\n\nrule W2 {{\n    when: c: Job.status becomes active\n    ensures: c.status = done\n}}\n"
+        ),
+        domain: format!("-- allium: 3\n\n{mh_entity}"),
+        consumer: "-- allium: 3\n\nuse \"./domain.allium\" as dom\n\nrule W1 {\n    when: a: dom/Job.status becomes pending\n    ensures: a.status = active\n}\n\nrule W2 {\n    when: c: dom/Job.status becomes active\n    ensures: c.status = done\n}\n".to_string(),
+    });
+
+    out
 }
 
 #[test]
@@ -303,6 +330,11 @@ fn alias_anchoring_sweep() {
         ("field_type", format!("{head}entity Wrapper {{\n    j: nosuch/Job\n}}\n")),
         ("ensures_created", format!("{head}rule R {{\n    when: Go()\n    ensures: nosuch/Job.created(status: pending)\n}}\n")),
         ("default_type", format!("{head}default nosuch/Config c = {{ enabled: true }}\n")),
+        ("requires_entity", format!("{head}rule R {{\n    when: Go()\n    requires: nosuch/Job.status = pending\n    ensures: Done()\n}}\n")),
+        ("ensures_status", format!("{head}rule R {{\n    when: Go()\n    ensures: nosuch/Job.status = done\n}}\n")),
+        ("invariant_ref", format!("{head}invariant I {{\n    nosuch/Job.status = done\n}}\n")),
+        ("contract_fulfils", format!("{head}surface S {{\n    facing u: User\n    contracts:\n        fulfils nosuch/MyContract\n}}\n")),
+        ("field_type_in_value", format!("{head}value Wrapper {{\n    j: nosuch/Job\n}}\n")),
     ];
 
     let mut uncaught: Vec<String> = Vec::new();

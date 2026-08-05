@@ -5030,19 +5030,19 @@ fn collect_witnessed_transition(
     for (binding, source) in &trigger_source {
         froms.entry(binding).or_default().insert(source);
     }
-    for item in &rule.items {
-        let BlockItemKind::Clause { keyword, value } = &item.kind else {
-            continue;
-        };
-        let target = match keyword.as_str() {
+    // Descend into `if`/`else` and `for` bodies so a guard or assignment nested
+    // in a branch is seen, not just top-level clauses (the #58 traversal fix,
+    // applied here in the reverse channel).
+    for_each_rule_clause(&rule.items, &mut |keyword, value| {
+        let target = match keyword {
             "requires" => &mut froms,
             "ensures" => &mut tos,
-            _ => continue,
+            _ => return,
         };
         collect_binding_status_eq(value, &mut |binding, status| {
             target.entry(binding).or_default().insert(status);
         });
-    }
+    });
 
     for (binding, entity) in &binding_entity {
         let Some(valid) = status_by_entity.get(*entity) else {
