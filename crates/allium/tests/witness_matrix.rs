@@ -1005,3 +1005,41 @@ fn generative_graph_chaos_survives_the_split() {
         anomalies.iter().take(4).cloned().collect::<Vec<_>>().join("\n\n")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Known gap: cross-module conflict detection. The single-file oracle detects that
+// two rules can both fire in `pending` and set conflicting statuses; the split
+// does not, because the importer's conflict pass builds `EntityInfo` from the
+// local module only and never learns the imported entity's status vocabulary, so
+// it cannot attribute either rule to `Job`. This is a false negative (a missed
+// finding), not a false positive. Ignored until the conflict pass takes imported
+// entity statuses; the fault-survival properties above prove every *other* fault
+// class already survives the split, so this is the one remaining detection gap.
+// ---------------------------------------------------------------------------
+
+const CONFLICT_SINGLE: &str = "-- allium: 3\n\nentity Job {\n    status: pending | expired | extended\n    deadline: Timestamp\n    transitions status { pending -> expired  pending -> extended  terminal: expired, extended }\n}\n\nrule Create {\n    when: JobReq()\n    ensures: Job.created(status: pending)\n}\n\nrule AutoExpire {\n    when: t: Job.deadline <= now\n    requires: t.status = pending\n    ensures: t.status = expired\n}\n\nrule ManualExtend {\n    when: Extend(j)\n    requires: j.status = pending\n    ensures: j.status = extended\n}\n\nsurface Desk {\n    provides:\n        JobReq()\n        Extend(j: Job)\n}\n";
+
+const CONFLICT_DOMAIN: &str = "-- allium: 3\n\nentity Job {\n    status: pending | expired | extended\n    deadline: Timestamp\n    transitions status { pending -> expired  pending -> extended  terminal: expired, extended }\n}\n\nrule Create {\n    when: JobReq()\n    ensures: Job.created(status: pending)\n}\n\nsurface JobIntake {\n    provides:\n        JobReq()\n}\n";
+
+const CONFLICT_CONSUMER: &str = "-- allium: 3\n\nuse \"./domain.allium\" as dom\n\nrule AutoExpire {\n    when: t: dom/Job.deadline <= now\n    requires: t.status = pending\n    ensures: t.status = expired\n}\n\nrule ManualExtend {\n    when: Extend(j)\n    requires: j.status = pending\n    ensures: j.status = extended\n}\n\nsurface Ops {\n    provides:\n        Extend(j: dom/Job)\n}\n";
+
+#[test]
+fn cross_module_conflict_is_detected_single_file() {
+    // The oracle: single-file, the conflict is detected. This half is not ignored,
+    // so the oracle itself stays honest.
+    let single = reports_of_file(CONFLICT_SINGLE);
+    assert!(
+        single.iter().any(|r| r.starts_with("F conflict")),
+        "single-file oracle must detect the conflict, got {single:?}"
+    );
+}
+
+#[test]
+#[ignore = "cross-module conflict detection not yet implemented: the importer's conflict pass \
+    resolves only local entities, so it cannot attribute two importer rules to an imported \
+    entity. Un-ignore when the conflict pass takes imported entity status vocabularies."]
+fn cross_module_conflict_survives_the_split() {
+    let single = reports_of_file(CONFLICT_SINGLE);
+    let split = reports_of_pair(CONFLICT_DOMAIN, CONFLICT_CONSUMER);
+    assert_eq!(single, split, "the split should report the same conflict as the single file");
+}
