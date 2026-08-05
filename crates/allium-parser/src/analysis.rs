@@ -1669,33 +1669,31 @@ impl Ctx<'_> {
             let mut requires_statuses: HashMap<String, HashSet<String>> = HashMap::new();
             let mut ensures_statuses: HashMap<String, String> = HashMap::new();
 
-            for item in &rule.items {
-                let BlockItemKind::Clause { keyword, value } = &item.kind else {
-                    continue;
-                };
-                match keyword.as_str() {
-                    "when" => {
-                        trigger_kind = classify_trigger(value);
-                    }
-                    "requires" => {
-                        collect_requires_statuses_for_conflict(
-                            value,
-                            &binding_types,
-                            &status_by_entity,
-                            &mut requires_statuses,
-                        );
-                    }
-                    "ensures" => {
-                        collect_ensures_statuses_for_conflict(
-                            value,
-                            &binding_types,
-                            &status_by_entity,
-                            &mut ensures_statuses,
-                        );
-                    }
-                    _ => {}
+            // Descend into `if`/`else` and `for` bodies so a conditional effect
+            // nested in a branch still counts toward conflict detection; a
+            // top-level-only walk let a branch-nested `ensures` hide a conflict.
+            for_each_rule_clause(&rule.items, &mut |keyword, value| match keyword {
+                "when" => {
+                    trigger_kind = classify_trigger(value);
                 }
-            }
+                "requires" => {
+                    collect_requires_statuses_for_conflict(
+                        value,
+                        &binding_types,
+                        &status_by_entity,
+                        &mut requires_statuses,
+                    );
+                }
+                "ensures" => {
+                    collect_ensures_statuses_for_conflict(
+                        value,
+                        &binding_types,
+                        &status_by_entity,
+                        &mut ensures_statuses,
+                    );
+                }
+                _ => {}
+            });
 
             conflict_rules.push(ConflictRule {
                 name: rule_name,
@@ -1799,46 +1797,43 @@ impl Ctx<'_> {
             let mut field_sets = HashSet::new();
             let mut requires = Vec::new();
 
-            for item in &rule.items {
-                let BlockItemKind::Clause { keyword, value } = &item.kind else {
-                    continue;
-                };
-                match keyword.as_str() {
-                    "ensures" => {
-                        collect_rule_effects(
-                            value,
-                            &binding_types,
-                            &status_by_entity,
-                            &field_types,
-                            &mut status_sets,
-                            &mut field_sets,
-                        );
-                    }
-                    "requires" => {
-                        collect_requires_conditions(
-                            value,
-                            &binding_types,
-                            &binding_map,
-                            &mut |binding, field, val| {
-                                let entity = resolve_binding_entity(
-                                    binding,
-                                    None,
-                                    &binding_types,
-                                    &binding_map_for_types,
-                                );
-                                if let Some(e) = entity {
-                                    requires.push((
-                                        e.to_string(),
-                                        field.to_string(),
-                                        val.to_string(),
-                                    ));
-                                }
-                            },
-                        );
-                    }
-                    _ => {}
+            // Descend into `if`/`else` and `for` bodies so branch-nested effects
+            // and guards count toward the rule's effect set.
+            for_each_rule_clause(&rule.items, &mut |keyword, value| match keyword {
+                "ensures" => {
+                    collect_rule_effects(
+                        value,
+                        &binding_types,
+                        &status_by_entity,
+                        &field_types,
+                        &mut status_sets,
+                        &mut field_sets,
+                    );
                 }
-            }
+                "requires" => {
+                    collect_requires_conditions(
+                        value,
+                        &binding_types,
+                        &binding_map,
+                        &mut |binding, field, val| {
+                            let entity = resolve_binding_entity(
+                                binding,
+                                None,
+                                &binding_types,
+                                &binding_map_for_types,
+                            );
+                            if let Some(e) = entity {
+                                requires.push((
+                                    e.to_string(),
+                                    field.to_string(),
+                                    val.to_string(),
+                                ));
+                            }
+                        },
+                    );
+                }
+                _ => {}
+            });
 
             rule_effects.push(RuleEffect {
                 name: rule_name,
@@ -7063,6 +7058,26 @@ mod tests {
              requires: m.status = active\n  ensures: m.status = expired\n}\n\n\
              rule ManualExtend {\n  when: AdminExtends(admin, membership)\n  \
              requires: membership.status = active\n  ensures: membership.status = extended\n}\n",
+        );
+        assert!(has_finding(&r, "conflict"));
+    }
+
+    #[test]
+    fn conflict_detected_when_effect_nested_in_branch() {
+        // The conflicting `ensures` sits inside an `if`/`else`, so a
+        // top-level-only walk of the rule body would miss it. The conflict must
+        // still be found (branch-nesting invariance for conflict detection).
+        let r = analyse_src(
+            "entity Membership {\n  status: active | expired | extended\n  \
+             expires_at: Timestamp\n  \
+             transitions status {\n    active -> expired\n    active -> extended\n    \
+             terminal: expired, extended\n  }\n}\n\n\
+             rule AutoExpire {\n  when: m: Membership.expires_at <= now\n  \
+             requires: m.status = active\n  ensures: m.status = expired\n}\n\n\
+             rule ManualExtend {\n  when: AdminExtends(admin, membership, flag)\n  \
+             requires: membership.status = active\n  \
+             if flag:\n    ensures: membership.status = extended\n  \
+             else:\n    ensures: membership.status = extended\n}\n",
         );
         assert!(has_finding(&r, "conflict"));
     }
