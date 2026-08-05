@@ -4720,8 +4720,23 @@ fn collect_emitted_event_param_types<'a>(
     status_by_entity: &HashMap<&'a str, HashSet<&'a str>>,
     out: &mut HashMap<&'a str, Vec<Option<&'a str>>>,
 ) {
+    // The emitting rule's binding may be typed by the imported module's own
+    // surface `provides:` parameters, not only by a transition trigger — so type
+    // it the same way the local pass does, from those parameters (else the
+    // emission carries no type across the split).
+    let mut surface_params: HashMap<&str, Vec<Option<&str>>> = HashMap::new();
+    for surface in module_blocks(imported, BlockKind::Surface) {
+        for item in &surface.items {
+            if let BlockItemKind::Clause { keyword, value } = &item.kind {
+                if keyword == "provides" {
+                    collect_command_param_types(value, status_by_entity, &mut surface_params);
+                }
+            }
+        }
+    }
     for rule in module_blocks(imported, BlockKind::Rule) {
-        let binding_types = collect_rule_binding_types(rule, status_by_entity);
+        let mut binding_types = collect_rule_binding_types(rule, status_by_entity);
+        augment_binding_types_from_commands(rule, &surface_params, &mut binding_types);
         if binding_types.is_empty() {
             continue;
         }
