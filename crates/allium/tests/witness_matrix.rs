@@ -1035,11 +1035,31 @@ fn cross_module_conflict_is_detected_single_file() {
 }
 
 #[test]
-#[ignore = "cross-module conflict detection not yet implemented: the importer's conflict pass \
-    resolves only local entities, so it cannot attribute two importer rules to an imported \
-    entity. Un-ignore when the conflict pass takes imported entity status vocabularies."]
 fn cross_module_conflict_survives_the_split() {
     let single = reports_of_file(CONFLICT_SINGLE);
     let split = reports_of_pair(CONFLICT_DOMAIN, CONFLICT_CONSUMER);
     assert_eq!(single, split, "the split should report the same conflict as the single file");
+}
+
+// Guard the other direction of cross-module conflict detection: two importer
+// rules that act on the same imported entity but fire on different external
+// triggers are an actor's choice, not a race, so no conflict must be invented.
+const ACTOR_DOMAIN: &str = "-- allium: 3\n\nentity LeaveRequest {\n    status: pending | approved | denied\n    transitions status { pending -> approved  pending -> denied  terminal: approved, denied }\n}\n\nrule Create {\n    when: LeaveReq()\n    ensures: LeaveRequest.created(status: pending)\n}\n\nsurface Intake {\n    provides:\n        LeaveReq()\n}\n";
+
+const ACTOR_CONSUMER: &str = "-- allium: 3\n\nuse \"./domain.allium\" as dom\n\nrule Approve {\n    when: ManagerApproves(m, r)\n    requires: r.status = pending\n    ensures: r.status = approved\n}\n\nrule Deny {\n    when: ManagerDenies(m, r)\n    requires: r.status = pending\n    ensures: r.status = denied\n}\n\nsurface Ops {\n    provides:\n        ManagerApproves(m, r: dom/LeaveRequest)\n        ManagerDenies(m, r: dom/LeaveRequest)\n}\n";
+
+#[test]
+fn cross_module_actor_choice_is_not_a_conflict() {
+    let split = reports_of_pair(ACTOR_DOMAIN, ACTOR_CONSUMER);
+    assert!(
+        !split.iter().any(|r| r.starts_with("F conflict")),
+        "actor-choice across a module must not be reported as a conflict: {split:?}"
+    );
+    // The single file agrees (no conflict), so this is genuinely split-invariant.
+    let single = reports_of_file(&format!(
+        "{}\n{}",
+        ACTOR_DOMAIN,
+        ACTOR_CONSUMER.replace("-- allium: 3\n\nuse \"./domain.allium\" as dom\n\n", "").replace("dom/", "")
+    ));
+    assert_eq!(single, split, "actor-choice split should match the single file");
 }

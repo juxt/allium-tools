@@ -186,7 +186,7 @@ pub fn analyse_with_external_refs(
     external_refs: &HashSet<String>,
 ) -> crate::diagnostic::AnalyseResult {
     let diagnostics = analyze_with_external_refs(module, source, external_refs);
-    let findings = find_process_issues(module, None, None);
+    let findings = find_process_issues(module, None, None, None);
     crate::diagnostic::AnalyseResult {
         diagnostics,
         findings,
@@ -206,6 +206,7 @@ pub fn analyse_with_cross_module(
     ambiguous_imports: &AmbiguousImports,
     reverse: &ReverseContributions,
     imported_referenced_triggers: &HashMap<String, HashSet<String>>,
+    imported_entity_statuses: &HashMap<String, HashSet<String>>,
 ) -> crate::diagnostic::AnalyseResult {
     let diagnostics = analyze_with_cross_module(
         module,
@@ -218,7 +219,12 @@ pub fn analyse_with_cross_module(
         reverse,
         imported_referenced_triggers,
     );
-    let findings = find_process_issues(module, Some(imported_triggers), Some(reverse));
+    let findings = find_process_issues(
+        module,
+        Some(imported_triggers),
+        Some(reverse),
+        Some(imported_entity_statuses),
+    );
     crate::diagnostic::AnalyseResult {
         diagnostics,
         findings,
@@ -306,13 +312,15 @@ fn find_process_issues(
     module: &Module,
     imported_triggers: Option<&HashMap<String, HashSet<String>>>,
     reverse: Option<&ReverseContributions>,
+    imported_statuses: Option<&HashMap<String, HashSet<String>>>,
 ) -> Vec<crate::diagnostic::Finding> {
     let empty = HashSet::new();
+    let no_statuses = HashMap::new();
     let mut ctx = Ctx::new(module, &empty, None, imported_triggers, None);
     ctx.reverse_contributions = reverse;
     let info = EntityInfo::from_module(module);
     ctx.collect_process_findings(&info);
-    ctx.collect_conflict_findings(&info);
+    ctx.collect_conflict_findings(&info, imported_statuses.unwrap_or(&no_statuses));
     ctx.collect_invariant_findings(&info);
     let mut findings = std::mem::take(&mut ctx.findings);
     // Deterministic ordering (#71): findings carry no source span, so order by
@@ -1647,8 +1655,27 @@ impl Ctx<'_> {
         }
     }
 
-    fn collect_conflict_findings(&mut self, info: &EntityInfo<'_>) {
-        let status_by_entity = info.status_by_entity();
+    fn collect_conflict_findings(
+        &mut self,
+        info: &EntityInfo<'_>,
+        imported_statuses: &HashMap<String, HashSet<String>>,
+    ) {
+        // Conflict attribution resolves a rule's entity from the status values it
+        // reads and writes, so an importer rule acting on an imported entity needs
+        // that entity's status vocabulary in scope. Merge the imported statuses in
+        // for *this* pass only — the lifecycle checks stay local, so imported
+        // entities are not re-analysed in the importer. A local declaration wins on
+        // a name clash.
+        let local = info.status_by_entity();
+        let mut status_by_entity: HashMap<&str, HashSet<&str>> = HashMap::new();
+        for (k, v) in &local {
+            status_by_entity.insert(*k, v.iter().copied().collect());
+        }
+        for (ent, statuses) in imported_statuses {
+            status_by_entity
+                .entry(ent.as_str())
+                .or_insert_with(|| statuses.iter().map(String::as_str).collect());
+        }
 
         if status_by_entity.is_empty() {
             return;
@@ -5387,6 +5414,23 @@ pub fn collect_entity_field_schemas(module: &Module) -> HashMap<String, HashSet<
         );
     }
     out
+}
+
+/// Entity name → its declared status values. The cross-module counterpart of
+/// [`collect_entity_field_schemas`]: it gives an importer's conflict pass the
+/// status vocabulary of the entities it imports, so two importer rules acting on
+/// an imported entity can be attributed to it and compared for conflict.
+pub fn collect_entity_status_schemas(module: &Module) -> HashMap<String, HashSet<String>> {
+    EntityInfo::from_module(module)
+        .status_by_entity()
+        .into_iter()
+        .map(|(name, statuses)| {
+            (
+                name.to_string(),
+                statuses.into_iter().map(|s| s.to_string()).collect(),
+            )
+        })
+        .collect()
 }
 
 /// A qualified reference `qualifier/name` (or the `alias.Type` dot form) with
