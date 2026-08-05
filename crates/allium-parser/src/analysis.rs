@@ -67,6 +67,11 @@ pub struct ReverseContributions {
     /// witnesses by guarding on `from` and assigning `to` on a binding typed to
     /// that entity by the imported module's surface `provides:` (#64).
     pub witnessed_transitions: HashMap<String, HashSet<(String, String)>>,
+    /// Field names of imported entities that an importer references via a
+    /// qualified access (`alias/Entity.field`). Such a field is used even though
+    /// its only reference lives in another module, so the imported module must
+    /// not report it as unused.
+    pub referenced_fields: HashSet<String>,
 }
 
 impl ReverseContributions {
@@ -75,6 +80,7 @@ impl ReverseContributions {
         self.provided_triggers.is_empty()
             && self.assigned_statuses.is_empty()
             && self.witnessed_transitions.is_empty()
+            && self.referenced_fields.is_empty()
     }
 
     /// Fold another importer's contributions into this aggregate.
@@ -86,6 +92,7 @@ impl ReverseContributions {
         for (entity, edges) in other.witnessed_transitions {
             self.witnessed_transitions.entry(entity).or_default().extend(edges);
         }
+        self.referenced_fields.extend(other.referenced_fields);
     }
 }
 
@@ -3684,7 +3691,12 @@ fn extract_trigger_refs(expr: &Expr) -> Vec<TriggerRef<'_>> {
 
 impl Ctx<'_> {
     fn check_unused_fields(&mut self) {
-        let accessed = self.collect_all_accessed_field_names();
+        let mut accessed = self.collect_all_accessed_field_names();
+        // A field referenced only by an importer (`alias/Entity.field`) is used,
+        // even though the reference lives in another module.
+        if let Some(rev) = self.reverse_contributions {
+            accessed.extend(rev.referenced_fields.iter().map(String::as_str));
+        }
 
         for d in &self.module.declarations {
             let block = match d {
@@ -3886,6 +3898,139 @@ fn collect_idents_from_expr<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
             for f in fields {
                 if let Some(v) = &f.value {
                     collect_idents_from_expr(v, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect field names an expression references through a qualified access
+/// `alias/Entity.field`. Alias-aware, unlike `collect_accessed_fields_from_expr`,
+/// so a reference through a different alias contributes nothing (contributions
+/// must stay alias-scoped for cross-module aggregation to be sound). Recurses
+/// through the same expression shapes as the module-local collector.
+fn collect_qualified_field_refs<'a>(expr: &'a Expr, alias: &str, out: &mut HashSet<&'a str>) {
+    match expr {
+        Expr::MemberAccess { object, field, .. } | Expr::OptionalAccess { object, field, .. } => {
+            if let Expr::QualifiedName(q) = object.as_ref() {
+                if q.qualifier.as_deref() == Some(alias) {
+                    out.insert(&field.name);
+                }
+            }
+            collect_qualified_field_refs(object, alias, out);
+        }
+        Expr::Call { function, args, .. } => {
+            collect_qualified_field_refs(function, alias, out);
+            for a in args {
+                match a {
+                    CallArg::Positional(e) => collect_qualified_field_refs(e, alias, out),
+                    CallArg::Named(n) => collect_qualified_field_refs(&n.value, alias, out),
+                }
+            }
+        }
+        Expr::BinaryOp { left, right, .. }
+        | Expr::Comparison { left, right, .. }
+        | Expr::LogicalOp { left, right, .. }
+        | Expr::Pipe { left, right, .. }
+        | Expr::NullCoalesce { left, right, .. }
+        | Expr::In { element: left, collection: right, .. }
+        | Expr::NotIn { element: left, collection: right, .. } => {
+            collect_qualified_field_refs(left, alias, out);
+            collect_qualified_field_refs(right, alias, out);
+        }
+        Expr::Not { operand, .. }
+        | Expr::Exists { operand, .. }
+        | Expr::NotExists { operand, .. }
+        | Expr::TypeOptional { inner: operand, .. } => {
+            collect_qualified_field_refs(operand, alias, out);
+        }
+        Expr::Where { source, condition, .. }
+        | Expr::With { source, predicate: condition, .. } => {
+            collect_qualified_field_refs(source, alias, out);
+            collect_qualified_field_refs(condition, alias, out);
+        }
+        Expr::WhenGuard { action, condition, .. } => {
+            collect_qualified_field_refs(action, alias, out);
+            collect_qualified_field_refs(condition, alias, out);
+        }
+        Expr::Binding { value, .. } | Expr::LetExpr { value, .. } | Expr::Lambda { body: value, .. } => {
+            collect_qualified_field_refs(value, alias, out);
+        }
+        Expr::TransitionsTo { subject, new_state, .. }
+        | Expr::Becomes { subject, new_state, .. } => {
+            collect_qualified_field_refs(subject, alias, out);
+            collect_qualified_field_refs(new_state, alias, out);
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_qualified_field_refs(&b.condition, alias, out);
+                collect_qualified_field_refs(&b.body, alias, out);
+            }
+            if let Some(body) = else_body {
+                collect_qualified_field_refs(body, alias, out);
+            }
+        }
+        Expr::For { collection, filter, body, .. } => {
+            collect_qualified_field_refs(collection, alias, out);
+            if let Some(f) = filter {
+                collect_qualified_field_refs(f, alias, out);
+            }
+            collect_qualified_field_refs(body, alias, out);
+        }
+        Expr::SetLiteral { elements, .. } | Expr::ListLiteral { elements, .. } => {
+            for e in elements {
+                collect_qualified_field_refs(e, alias, out);
+            }
+        }
+        Expr::ObjectLiteral { fields, .. } => {
+            for f in fields {
+                collect_qualified_field_refs(&f.value, alias, out);
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_qualified_field_refs(item, alias, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_qualified_field_refs_from_item<'a>(
+    kind: &'a BlockItemKind,
+    alias: &str,
+    out: &mut HashSet<&'a str>,
+) {
+    match kind {
+        BlockItemKind::Clause { value, .. }
+        | BlockItemKind::Assignment { value, .. }
+        | BlockItemKind::ParamAssignment { value, .. }
+        | BlockItemKind::Let { value, .. }
+        | BlockItemKind::PathAssignment { value, .. }
+        | BlockItemKind::InvariantBlock { body: value, .. }
+        | BlockItemKind::FieldWithWhen { value, .. } => {
+            collect_qualified_field_refs(value, alias, out);
+        }
+        BlockItemKind::ForBlock { collection, filter, items, .. } => {
+            collect_qualified_field_refs(collection, alias, out);
+            if let Some(f) = filter {
+                collect_qualified_field_refs(f, alias, out);
+            }
+            for item in items {
+                collect_qualified_field_refs_from_item(&item.kind, alias, out);
+            }
+        }
+        BlockItemKind::IfBlock { branches, else_items } => {
+            for b in branches {
+                collect_qualified_field_refs(&b.condition, alias, out);
+                for item in &b.items {
+                    collect_qualified_field_refs_from_item(&item.kind, alias, out);
+                }
+            }
+            if let Some(items) = else_items {
+                for item in items {
+                    collect_qualified_field_refs_from_item(&item.kind, alias, out);
                 }
             }
         }
@@ -4627,6 +4772,38 @@ pub fn collect_reverse_contributions<'a>(
         );
     }
 
+    // Fields the importer references through this alias (`alias/Entity.field`),
+    // restricted to real imported-entity fields. Credited so the imported module
+    // does not report a field as unused when its only reference lives across the
+    // boundary.
+    let mut imported_field_names: HashSet<&str> = HashSet::new();
+    for entity in module_blocks(imported, BlockKind::Entity)
+        .chain(module_blocks(imported, BlockKind::ExternalEntity))
+    {
+        for item in &entity.items {
+            if let BlockItemKind::Assignment { name, .. }
+            | BlockItemKind::FieldWithWhen { name, .. } = &item.kind
+            {
+                imported_field_names.insert(&name.name);
+            }
+        }
+    }
+    if !imported_field_names.is_empty() {
+        let mut qualified_refs: HashSet<&str> = HashSet::new();
+        for block in &importer.declarations {
+            if let Decl::Block(b) = block {
+                for item in &b.items {
+                    collect_qualified_field_refs_from_item(&item.kind, alias, &mut qualified_refs);
+                }
+            }
+        }
+        for f in qualified_refs {
+            if imported_field_names.contains(f) {
+                out.referenced_fields.insert(f.to_string());
+            }
+        }
+    }
+
     out
 }
 
@@ -5006,6 +5183,12 @@ fn collect_witnessed_transition(
                 {
                     binding_entity.insert(name.name.as_str(), entity);
                     trigger_source.insert(name.name.as_str(), source);
+                } else if let Some(entity) =
+                    qualified_temporal_trigger_entity(inner, alias, status_by_entity)
+                {
+                    // Temporal/relational trigger: type the binding, but let the
+                    // `requires` clause supply the `from` (no implicit source).
+                    binding_entity.insert(name.name.as_str(), entity);
                 }
             }
             _ => {}
@@ -5098,6 +5281,41 @@ fn qualified_transition_trigger<'a>(
         return None;
     }
     Some((*entity, source))
+}
+
+/// Resolve the imported entity that a temporal or relational trigger observes,
+/// e.g. `m: alias/E.expires_at <= now`. Unlike `becomes`/`transitions_to`, such a
+/// trigger carries no implicit `from` state, so the binding is typed but no source
+/// status is contributed; the rule's `requires` clause supplies the `from`. Without
+/// this, a temporal-triggered transition over an imported entity is never credited
+/// back across the split, so the imported entity looks stuck (false `deadlock`,
+/// `noExit`, `unreachableValue`).
+fn qualified_temporal_trigger_entity<'a>(
+    expr: &'a Expr,
+    alias: &str,
+    status_by_entity: &HashMap<&'a str, HashSet<&'a str>>,
+) -> Option<&'a str> {
+    fn member_entity<'a>(
+        e: &'a Expr,
+        alias: &str,
+        status_by_entity: &HashMap<&'a str, HashSet<&'a str>>,
+    ) -> Option<&'a str> {
+        let Expr::MemberAccess { object, .. } = e else {
+            return None;
+        };
+        let Expr::QualifiedName(q) = object.as_ref() else {
+            return None;
+        };
+        if q.qualifier.as_deref() != Some(alias) {
+            return None;
+        }
+        status_by_entity.get_key_value(q.name.as_str()).map(|(k, _)| *k)
+    }
+    match expr {
+        Expr::Comparison { left, right, .. } => member_entity(left, alias, status_by_entity)
+            .or_else(|| member_entity(right, alias, status_by_entity)),
+        _ => None,
+    }
 }
 
 /// From a local `when: b: Entity.status becomes state` (or `transitions_to`)
@@ -8327,6 +8545,21 @@ surface AccountManagement {
         // Asked for a different alias — nothing should be credited.
         let rc = collect_reverse_contributions(&importer, "other", &imported);
         assert!(rc.is_empty());
+    }
+
+    #[test]
+    fn reverse_contributions_credit_qualified_field_reference() {
+        let imported =
+            module_of("entity Ticket {\n  status: open | closed\n  due_at: Timestamp\n}\n");
+        let importer = module_of(
+            "use \"./t.allium\" as tickets\nrule Sweep {\n  when: t: tickets/Ticket.due_at <= now\n  requires: t.status = open\n  ensures: t.status = closed\n}\n",
+        );
+        // `due_at` is referenced only across the boundary, so it must be credited
+        // for the matching alias and left alone for a different one.
+        let rc = collect_reverse_contributions(&importer, "tickets", &imported);
+        assert!(rc.referenced_fields.contains("due_at"));
+        let other = collect_reverse_contributions(&importer, "other", &imported);
+        assert!(!other.referenced_fields.contains("due_at"));
     }
 
     #[test]

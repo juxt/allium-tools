@@ -305,6 +305,19 @@ fn scenarios() -> Vec<Scenario> {
         consumer: "-- allium: 3\n\nuse \"./domain.allium\" as dom\n\nrule Make {\n    when: Go(flag)\n    if flag:\n        ensures: dom/Job.created(status: pending)\n    else:\n        ensures: dom/Job.created(status: pending)\n}\n\nsurface Intake {\n    provides:\n        Go(flag)\n}\n".to_string(),
     });
 
+    // Temporal trigger (`m: E.due_at <= now`) as the witnessing form. It needs a
+    // Timestamp field, so it doesn't fit DOMAIN_BASE. The imported entity's
+    // transition is witnessed by a time-based, not event-based, trigger.
+    let tt_domain = "entity Job {\n    status: pending | done\n    due_at: Timestamp\n    transitions status { pending -> done  terminal: done }\n}\n\nrule CreateJob {\n    when: JobRequested()\n    ensures: Job.created(status: pending)\n}\n\nsurface JobIntake {\n    provides:\n        JobRequested()\n}\n";
+    out.push(Scenario {
+        name: "temporal_trigger",
+        single: format!(
+            "-- allium: 3\n\n{tt_domain}\nrule Witness {{\n    when: m: Job.due_at <= now\n    requires: m.status = pending\n    ensures: m.status = done\n}}\n"
+        ),
+        domain: format!("-- allium: 3\n\n{tt_domain}"),
+        consumer: "-- allium: 3\n\nuse \"./domain.allium\" as dom\n\nrule Witness {\n    when: m: dom/Job.due_at <= now\n    requires: m.status = pending\n    ensures: m.status = done\n}\n".to_string(),
+    });
+
     out
 }
 
