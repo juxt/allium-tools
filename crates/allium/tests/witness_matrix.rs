@@ -917,3 +917,91 @@ fn generative_faults_survive_the_split() {
         anomalies.iter().take(6).cloned().collect::<Vec<_>>().join("\n\n")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Transition-graph chaos. Witnesses assign a *random valid* target status (often
+// an edge not in the declared graph), so the single file reports a tangle of
+// undeclaredTransition / noExit / unreachable / deadlock findings. The split must
+// report exactly that tangle — the analysis is a function of the spec, not the
+// module layout, for faulty specs as much as clean ones. Targets are always
+// declared status values (never undefined), so the faults are transition-graph
+// faults, not undefined-reference noise, and no conflicting effects are added so
+// the known cross-module conflict gap is not in play.
+// ---------------------------------------------------------------------------
+
+fn gen_graph_chaos(seed: u64) -> (String, Vec<(String, String)>) {
+    let mut rng = Rng::new(seed);
+    let n = (3 + rng.below(3)) as usize; // 3..=5 states
+    let k = (1 + rng.below(2)) as usize; // 1..=2 consumers
+    let e = format!("Job{}", rng.below(100));
+    let states: Vec<String> = (0..n).map(|i| format!("s{i}v{}", rng.below(100))).collect();
+
+    let mut trans = String::new();
+    for i in 0..n - 1 {
+        trans.push_str(&format!("{} -> {}  ", states[i], states[i + 1]));
+    }
+    let entity = format!(
+        "entity {e} {{\n    status: {}\n    transitions status {{ {trans}terminal: {} }}\n}}\n",
+        states.join(" | "),
+        states[n - 1]
+    );
+    let domain_body = format!(
+        "{entity}\nrule Create{e} {{\n    when: {e}Req()\n    ensures: {e}.created(status: {})\n}}\n\nsurface {e}Intake {{\n    provides:\n        {e}Req()\n}}\n",
+        states[0]
+    );
+
+    // For each source state, maybe witness a transition to a random (declared)
+    // target — frequently a non-adjacent, undeclared edge.
+    let mut single_witness = String::new();
+    let mut consumer_bodies: Vec<String> = vec![String::new(); k];
+    let mut w = 0;
+    for i in 0..n {
+        if rng.below(4) == 0 {
+            continue; // no witness from this state
+        }
+        let from = &states[i];
+        let to = &states[rng.below(n as u64) as usize];
+        if from == to {
+            continue; // skip trivial self-assignment
+        }
+        single_witness.push_str(&format!(
+            "rule W{w} {{\n    when: b: {e}.status becomes {from}\n    ensures: b.status = {to}\n}}\n\n"
+        ));
+        consumer_bodies[w % k].push_str(&format!(
+            "rule W{w} {{\n    when: b: dom/{e}.status becomes {from}\n    ensures: b.status = {to}\n}}\n\n"
+        ));
+        w += 1;
+    }
+    let single = format!("-- allium: 3\n\n{domain_body}\n{single_witness}");
+    let mut files = vec![("domain.allium".to_string(), format!("-- allium: 3\n\n{domain_body}"))];
+    for (c, body) in consumer_bodies.iter().enumerate() {
+        if !body.is_empty() {
+            files.push((format!("c{c}.allium"), format!("-- allium: 3\n\nuse \"./domain.allium\" as dom\n\n{body}")));
+        }
+    }
+    (single, files)
+}
+
+#[test]
+fn generative_graph_chaos_survives_the_split() {
+    let mut anomalies: Vec<String> = Vec::new();
+    for seed in 0..250u64 {
+        let (single_src, files) = gen_graph_chaos(seed);
+        let single = reports_of_file(&single_src);
+        let split = reports_of_set(&files);
+        if single != split {
+            let missing: Vec<_> = single.iter().filter(|r| !split.contains(r)).cloned().collect();
+            let extra: Vec<_> = split.iter().filter(|r| !single.contains(r)).cloned().collect();
+            anomalies.push(format!(
+                "[seed {seed}] SPLIT != SINGLE\n  dropped by split (false negative): {missing:?}\n  extra in split (false positive): {extra:?}\n--- single ---\n{single_src}\n--- files ---\n{}",
+                files.iter().map(|(n, c)| format!("== {n} ==\n{c}")).collect::<Vec<_>>().join("\n")
+            ));
+        }
+    }
+    assert!(
+        anomalies.is_empty(),
+        "\n==== GRAPH CHAOS: {} anomalies (of 250 seeds) ====\n\n{}\n",
+        anomalies.len(),
+        anomalies.iter().take(4).cloned().collect::<Vec<_>>().join("\n\n")
+    );
+}
