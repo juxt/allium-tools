@@ -401,21 +401,27 @@ rule UndeclaredImportAliasIsDiagnosedAtEveryReferenceSite {
     ensures: FindingMessage anchored at the reference names the unknown alias
 }
 
-rule UnknownProvidesTriggerIsDiagnosedAtEntry {
+-- Beyond the alias, the name itself must resolve: with a valid alias whose
+-- target is in the check set, a qualified reference alias/Name where the aliased
+-- module offers no such name (a declared type or a referenced trigger) is
+-- diagnosed at the reference. Same unified pass, every site (#72 and the
+-- name-existence audit). A target outside the check set is unknowable.
+
+rule UnknownImportedNameIsDiagnosedAtEveryReferenceSite {
     when: CheckCommandInvokedWithInputs(inputs)
     requires: inputs resolve to multiple files
-    requires: a surface provides alias/Trigger where alias's target is in the check set
-    requires: the aliased module never references trigger
+    requires: a qualified reference alias/Name where a use declaration binds alias to a file in the check set
+    requires: the aliased module offers no declared type or referenced trigger named Name
 
-    ensures: FindingObserved(code: "allium.provides.unknownTrigger", severity: warning)
-    ensures: FindingMessage anchored at the provides entry names the unknown trigger
+    ensures: FindingObserved(code: "allium.reference.unknownName", severity: warning)
+    ensures: FindingMessage anchored at the reference names the unknown name
 }
 
-rule ProvidesTriggerOutsideCheckSetNotFlagged {
+rule QualifiedNameOutsideCheckSetNotFlagged {
     when: CheckCommandInvokedWithInputs(inputs)
-    requires: a surface provides alias/Trigger where alias's target is outside the check set
+    requires: a qualified reference alias/Name where alias's target is outside the check set
 
-    ensures: FindingNotObserved(code: "allium.provides.unknownTrigger", trigger: trigger)
+    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
 }
 
 rule WitnessedTransitionCreditsImportedLifecycle {

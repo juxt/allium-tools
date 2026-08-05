@@ -353,3 +353,63 @@ fn alias_anchoring_sweep() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Name-existence sweep: with a valid alias, a qualified reference to a name the
+// aliased module does not declare (`dom/Ghost`) should be diagnosed. #72 does
+// this for provides triggers and #47 for default fields; every other qualified
+// entity/type reference site is the audit's next layer. Needs the domain in the
+// check set, so it runs as pairs.
+// ---------------------------------------------------------------------------
+
+const NE_DOMAIN: &str = "-- allium: 3\n\nentity Job {\n    status: pending | done\n    transitions status { pending -> done  terminal: done }\n}\n\nrule CreateJob {\n    when: JobRequested()\n    ensures: Job.created(status: pending)\n}\n\nsurface JobIntake {\n    provides:\n        JobRequested()\n}\n";
+
+fn pair_diagnostics_mentioning(consumer: &str, needle: &str) -> Vec<String> {
+    let dir = TempDir::new("nameexist");
+    dir.write("domain.allium", NE_DOMAIN);
+    dir.write("consumer.allium", consumer);
+    let out = run("check", &[dir.path().to_str().unwrap()]);
+    let mut hits = Vec::new();
+    for doc in split_json_docs(&out) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&doc) else {
+            continue;
+        };
+        if let Some(arr) = v["diagnostics"].as_array() {
+            for d in arr {
+                let msg = d["message"].as_str().unwrap_or("");
+                if msg.contains(needle) {
+                    hits.push(format!("{} :: {msg}", d["code"].as_str().unwrap_or("")));
+                }
+            }
+        }
+    }
+    hits
+}
+
+#[test]
+fn name_existence_sweep() {
+    // `dom` is valid; `Ghost` is not an entity/type the domain declares.
+    let head = "-- allium: 3\n\nuse \"./domain.allium\" as dom\n\n";
+    let sites: Vec<(&str, String)> = vec![
+        ("surface_context", format!("{head}surface S {{\n    context t: dom/Ghost\n    provides:\n        Ev(t)\n}}\n")),
+        ("field_type", format!("{head}entity W {{\n    j: dom/Ghost\n}}\n")),
+        ("ensures_created", format!("{head}rule R {{\n    when: Go()\n    ensures: dom/Ghost.created(status: pending)\n}}\n")),
+        ("transition_subject", format!("{head}rule R {{\n    when: t: dom/Ghost.status becomes pending\n    ensures: t.status = done\n}}\n")),
+        ("inline_provides_param", format!("{head}surface S {{\n    provides:\n        Ev(b: dom/Ghost)\n}}\n")),
+    ];
+
+    let mut uncaught: Vec<String> = Vec::new();
+    for (site, snippet) in sites {
+        if pair_diagnostics_mentioning(&snippet, "Ghost").is_empty() {
+            uncaught.push(format!("[{site}] NO diagnostic names the nonexistent 'dom/Ghost'\n--- consumer ---\n{snippet}"));
+        }
+    }
+
+    if !uncaught.is_empty() {
+        panic!(
+            "\n==== NAME EXISTENCE: {} sites do not diagnose a nonexistent qualified name ====\n\n{}\n",
+            uncaught.len(),
+            uncaught.join("\n\n")
+        );
+    }
+}

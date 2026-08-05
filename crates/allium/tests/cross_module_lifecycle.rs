@@ -971,7 +971,7 @@ fn prop_malformed_provides_entry_is_anchored() {
         let ok_diags = run_case("ok", &ok);
         assert!(
             !ok_diags.iter().any(|d| d.code == "allium.reference.undefinedImportedAlias"
-                || d.code == "allium.provides.unknownTrigger"),
+                || d.code == "allium.reference.unknownName"),
             "seed {seed}: well-formed provides drew a resolution diagnostic.\n{:?}",
             ok_diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
         );
@@ -986,7 +986,7 @@ fn prop_malformed_provides_entry_is_anchored() {
 
         let trigger_diags = run_case("badtrigger", &bad_trigger);
         assert!(
-            trigger_diags.iter().any(|d| d.code == "allium.provides.unknownTrigger"
+            trigger_diags.iter().any(|d| d.code == "allium.reference.unknownName"
                 && d.message.contains(&absent)),
             "seed {seed}: a bad provides trigger must be anchored.\n{:?}",
             trigger_diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()

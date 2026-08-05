@@ -147,7 +147,6 @@ fn run_checks(mut ctx: Ctx<'_>, source: &str) -> Vec<Diagnostic> {
     ctx.check_list_literal_homogeneity();
     ctx.check_undefined_import_aliases();
     ctx.check_default_field_schemas();
-    ctx.check_qualified_provides();
 
     let mut diagnostics = apply_suppressions(ctx.diagnostics, source);
     // Deterministic ordering: the analysis passes iterate `HashMap`s, whose
@@ -4539,13 +4538,15 @@ pub fn collect_trigger_outputs(module: &Module) -> HashSet<String> {
     names.into_iter().map(str::to_string).collect()
 }
 
-/// Collect every trigger name a module references: those it provides or emits
-/// (`collect_trigger_outputs`) plus those its rules listen for in `when:`
-/// clauses. Used by multi-file checking to validate a qualified `provides:`
-/// entry against the aliased module — a trigger the module never mentions is a
-/// resolution error at the entry (#72).
+/// Collect every name a module *offers* to importers: declared type names
+/// (`collect_declared_names`), plus every trigger name it references — provided,
+/// emitted (`collect_trigger_outputs`), or listened for in `when:` clauses.
+/// Used by multi-file checking to validate a qualified reference `alias/Name`
+/// against the aliased module — a name it never mentions is a resolution error
+/// at the reference (#72, and the name-existence audit).
 pub fn collect_referenced_trigger_names(module: &Module) -> HashSet<String> {
     let mut names = collect_trigger_outputs(module);
+    names.extend(collect_declared_names(module));
     for d in &module.declarations {
         let Decl::Block(b) = d else { continue };
         if b.kind != BlockKind::Rule {
@@ -4675,38 +4676,6 @@ fn collect_qualified_provides(expr: &Expr, alias: &str, out: &mut HashSet<String
     }
 }
 
-/// Collect every qualified provides entry `qualifier/Name` with the span to
-/// anchor a diagnostic at, for resolution checking (#72).
-fn collect_qualified_provides_refs<'a>(
-    expr: &'a Expr,
-    out: &mut Vec<(&'a str, &'a str, Span)>,
-) {
-    match expr {
-        Expr::Call { function, .. } => {
-            if let Expr::QualifiedName(q) = function.as_ref() {
-                if let Some(qualifier) = q.qualifier.as_deref() {
-                    out.push((qualifier, q.name.as_str(), q.span));
-                }
-            }
-        }
-        Expr::Block { items, .. } => {
-            for item in items {
-                collect_qualified_provides_refs(item, out);
-            }
-        }
-        Expr::WhenGuard { action, .. } => collect_qualified_provides_refs(action, out),
-        Expr::Conditional { branches, else_body, .. } => {
-            for b in branches {
-                collect_qualified_provides_refs(&b.body, out);
-            }
-            if let Some(body) = else_body {
-                collect_qualified_provides_refs(body, out);
-            }
-        }
-        Expr::For { body, .. } => collect_qualified_provides_refs(body, out),
-        _ => {}
-    }
-}
 
 /// Augment `out` with the importer's own surface `provides:` parameter types,
 /// where a parameter is typed to a status-bearing imported entity — inline
@@ -5596,42 +5565,6 @@ impl Ctx<'_> {
 }
 
 impl Ctx<'_> {
-    /// Validate qualified `provides: alias/Trigger` entries against the aliased
-    /// module: a trigger name it never references is a warning, but only when
-    /// that module is in the check set (a target outside it is unknowable). An
-    /// undeclared alias is diagnosed once, for all sites, by
-    /// `check_undefined_import_aliases`.
-    fn check_qualified_provides(&mut self) {
-        let mut entries: Vec<(&str, &str, Span)> = Vec::new();
-        for surface in self.blocks(BlockKind::Surface) {
-            for item in &surface.items {
-                if let BlockItemKind::Clause { keyword, value } = &item.kind {
-                    if keyword == "provides" {
-                        collect_qualified_provides_refs(value, &mut entries);
-                    }
-                }
-            }
-        }
-
-        for (qualifier, name, span) in entries {
-            if let Some(triggers) = self
-                .imported_referenced_triggers
-                .and_then(|m| m.get(qualifier))
-            {
-                if !triggers.contains(name) {
-                    self.push(
-                        Diagnostic::warning(
-                            span,
-                            format!(
-                                "Provides entry '{qualifier}/{name}' names trigger '{name}', which imported module '{qualifier}' does not use."
-                            ),
-                        )
-                        .with_code("allium.provides.unknownTrigger"),
-                    );
-                }
-            }
-        }
-    }
 
     /// A qualified reference `alias/Name` at any site — a `when:` trigger or
     /// entity subject, a `provides:` entry, a surface `context`, an inline
@@ -5679,6 +5612,25 @@ impl Ctx<'_> {
                     )
                     .with_code("allium.reference.undefinedImportedAlias"),
                 );
+            } else if let Some(offered) = self
+                .imported_referenced_triggers
+                .and_then(|m| m.get(r.qualifier))
+            {
+                // The alias resolves into the check set: the name must be one the
+                // aliased module offers (a declared type or a referenced trigger).
+                // A target outside the check set is unknowable and left alone.
+                if !offered.contains(r.name) {
+                    self.push(
+                        Diagnostic::warning(
+                            r.span,
+                            format!(
+                                "Reference '{}/{}' names '{}', which imported module '{}' does not define.",
+                                r.qualifier, r.name, r.name, r.qualifier
+                            ),
+                        )
+                        .with_code("allium.reference.unknownName"),
+                    );
+                }
             }
         }
     }
