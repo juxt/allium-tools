@@ -970,7 +970,7 @@ fn prop_malformed_provides_entry_is_anchored() {
 
         let ok_diags = run_case("ok", &ok);
         assert!(
-            !ok_diags.iter().any(|d| d.code == "allium.provides.undefinedImportedAlias"
+            !ok_diags.iter().any(|d| d.code == "allium.reference.undefinedImportedAlias"
                 || d.code == "allium.provides.unknownTrigger"),
             "seed {seed}: well-formed provides drew a resolution diagnostic.\n{:?}",
             ok_diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
@@ -978,7 +978,7 @@ fn prop_malformed_provides_entry_is_anchored() {
 
         let alias_diags = run_case("badalias", &bad_alias);
         assert!(
-            alias_diags.iter().any(|d| d.code == "allium.provides.undefinedImportedAlias"
+            alias_diags.iter().any(|d| d.code == "allium.reference.undefinedImportedAlias"
                 && d.message.contains("nosuch")),
             "seed {seed}: a bad provides alias must be anchored.\n{:?}",
             alias_diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()

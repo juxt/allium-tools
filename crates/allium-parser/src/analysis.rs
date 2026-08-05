@@ -145,7 +145,7 @@ fn run_checks(mut ctx: Ctx<'_>, source: &str) -> Vec<Diagnostic> {
     ctx.check_duplicate_let_bindings();
     ctx.check_config_undefined_references();
     ctx.check_list_literal_homogeneity();
-    ctx.check_qualified_default_aliases();
+    ctx.check_undefined_import_aliases();
     ctx.check_default_field_schemas();
     ctx.check_qualified_provides();
 
@@ -4350,6 +4350,15 @@ fn collect_uppercase_idents_from_expr<'a>(expr: &'a Expr, out: &mut Vec<Referenc
 /// cross-module reference map so that shared declarations are not flagged as
 /// unused.
 pub fn collect_qualified_references(module: &Module) -> Vec<(String, String)> {
+    collect_qref_nodes(module)
+        .into_iter()
+        .map(|r| (r.qualifier.to_string(), r.name.to_string()))
+        .collect()
+}
+
+/// Every qualified reference in a module, with spans. Backs both the
+/// cross-module reference map and the undefined-import-alias check.
+fn collect_qref_nodes(module: &Module) -> Vec<QRef<'_>> {
     let mut refs = Vec::new();
     for d in &module.declarations {
         match d {
@@ -5170,7 +5179,15 @@ pub fn collect_entity_field_schemas(module: &Module) -> HashMap<String, HashSet<
     out
 }
 
-fn collect_qrefs_from_item(kind: &BlockItemKind, out: &mut Vec<(String, String)>) {
+/// A qualified reference `qualifier/name` (or the `alias.Type` dot form) with
+/// the span to anchor a diagnostic at.
+struct QRef<'a> {
+    qualifier: &'a str,
+    name: &'a str,
+    span: Span,
+}
+
+fn collect_qrefs_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<QRef<'a>>) {
     match kind {
         BlockItemKind::Clause { value, .. }
         | BlockItemKind::Assignment { value, .. }
@@ -5213,8 +5230,8 @@ fn collect_qrefs_from_item(kind: &BlockItemKind, out: &mut Vec<(String, String)>
         }
         BlockItemKind::ContractsClause { entries } => {
             for e in entries {
-                if let Some(ref qualifier) = e.qualifier {
-                    out.push((qualifier.clone(), e.name.name.clone()));
+                if let Some(qualifier) = &e.qualifier {
+                    out.push(QRef { qualifier, name: &e.name.name, span: e.name.span });
                 }
             }
         }
@@ -5224,11 +5241,11 @@ fn collect_qrefs_from_item(kind: &BlockItemKind, out: &mut Vec<(String, String)>
     }
 }
 
-fn collect_qrefs_from_expr(expr: &Expr, out: &mut Vec<(String, String)>) {
+fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
     match expr {
         Expr::QualifiedName(q) => {
-            if let Some(ref qualifier) = q.qualifier {
-                out.push((qualifier.clone(), q.name.clone()));
+            if let Some(qualifier) = &q.qualifier {
+                out.push(QRef { qualifier, name: &q.name, span: q.span });
             }
         }
         Expr::MemberAccess { object, field, .. }
@@ -5236,7 +5253,7 @@ fn collect_qrefs_from_expr(expr: &Expr, out: &mut Vec<(String, String)>) {
             // Detect alias.TypeName pattern (e.g. core.EntityMap in exposes)
             if let Expr::Ident(id) = object.as_ref() {
                 if starts_uppercase(&field.name) {
-                    out.push((id.name.clone(), field.name.clone()));
+                    out.push(QRef { qualifier: &id.name, name: &field.name, span: id.span.merge(field.span) });
                 }
             }
             collect_qrefs_from_expr(object, out);
@@ -5579,24 +5596,12 @@ impl Ctx<'_> {
 }
 
 impl Ctx<'_> {
-    /// A qualified type name in a `default` (`default alias/Type x = ...`) must
-    /// reference a module brought into scope by `use "..." as alias`. Keeps
-    /// parity with the TypeScript `findDefaultTypeReferenceIssues` alias check.
-    /// Validate qualified `provides: alias/Trigger` entries at the entry (#72).
-    /// An `alias` that matches no `use` import is an error; a trigger name the
-    /// aliased module never references is a warning, but only when that module
-    /// is in the check set (a target outside it is unknowable by design).
+    /// Validate qualified `provides: alias/Trigger` entries against the aliased
+    /// module: a trigger name it never references is a warning, but only when
+    /// that module is in the check set (a target outside it is unknowable). An
+    /// undeclared alias is diagnosed once, for all sites, by
+    /// `check_undefined_import_aliases`.
     fn check_qualified_provides(&mut self) {
-        let aliases: HashSet<&str> = self
-            .module
-            .declarations
-            .iter()
-            .filter_map(|d| match d {
-                Decl::Use(u) => u.alias.as_ref().map(|a| a.name.as_str()),
-                _ => None,
-            })
-            .collect();
-
         let mut entries: Vec<(&str, &str, Span)> = Vec::new();
         for surface in self.blocks(BlockKind::Surface) {
             for item in &surface.items {
@@ -5609,17 +5614,7 @@ impl Ctx<'_> {
         }
 
         for (qualifier, name, span) in entries {
-            if !aliases.contains(qualifier) {
-                self.push(
-                    Diagnostic::error(
-                        span,
-                        format!(
-                            "Provides entry '{qualifier}/{name}' uses unknown import alias '{qualifier}'."
-                        ),
-                    )
-                    .with_code("allium.provides.undefinedImportedAlias"),
-                );
-            } else if let Some(triggers) = self
+            if let Some(triggers) = self
                 .imported_referenced_triggers
                 .and_then(|m| m.get(qualifier))
             {
@@ -5638,30 +5633,51 @@ impl Ctx<'_> {
         }
     }
 
-    fn check_qualified_default_aliases(&mut self) {
-        let mut aliases: HashSet<&str> = HashSet::new();
+    /// A qualified reference `alias/Name` at any site — a `when:` trigger or
+    /// entity subject, a `provides:` entry, a surface `context`, an inline
+    /// parameter type, a field type, a `.created(...)` call, a `default`, a
+    /// contract clause — must name a module brought into scope by `use "..." as
+    /// alias`. A qualifier matching no declared alias is a locally-knowable typo
+    /// and is diagnosed at the reference, single-file and multi-file alike
+    /// (#78 and the wider sites audit). One pass over every qualified reference
+    /// rather than a separate check per site.
+    fn check_undefined_import_aliases(&mut self) {
+        let aliases: HashSet<&str> = self
+            .module
+            .declarations
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Use(u) => u.alias.as_ref().map(|a| a.name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        let mut refs = collect_qref_nodes(self.module);
+        // A `default alias/Type` reference's qualifier sits on the declaration,
+        // not inside its value expression, so add it explicitly.
         for d in &self.module.declarations {
-            if let Decl::Use(u) = d {
-                if let Some(alias) = &u.alias {
-                    aliases.insert(alias.name.as_str());
+            if let Decl::Default(def) = d {
+                if let (Some(a), Some(t)) = (&def.type_alias, &def.type_name) {
+                    refs.push(QRef {
+                        qualifier: &a.name,
+                        name: &t.name,
+                        span: a.span.merge(t.span),
+                    });
                 }
             }
         }
-        for d in &self.module.declarations {
-            let Decl::Default(def) = d else { continue };
-            let (Some(alias), Some(type_name)) = (&def.type_alias, &def.type_name) else {
-                continue;
-            };
-            if !aliases.contains(alias.name.as_str()) {
+
+        for r in refs {
+            if !aliases.contains(r.qualifier) {
                 self.push(
                     Diagnostic::error(
-                        alias.span.merge(type_name.span),
+                        r.span,
                         format!(
-                            "Type reference '{}/{}' uses unknown import alias '{}'.",
-                            alias.name, type_name.name, alias.name
+                            "Reference '{}/{}' uses unknown import alias '{}'.",
+                            r.qualifier, r.name, r.qualifier
                         ),
                     )
-                    .with_code("allium.default.undefinedImportedAlias"),
+                    .with_code("allium.reference.undefinedImportedAlias"),
                 );
             }
         }
@@ -8111,14 +8127,14 @@ surface AccountManagement {
         let ds = analyze_src(
             "use \"./p.allium\" as gp\n\ndefault gp/Policy my_policy = { id: \"x\" }",
         );
-        assert!(!has_code(&ds, "allium.default.undefinedImportedAlias"));
+        assert!(!has_code(&ds, "allium.reference.undefinedImportedAlias"));
     }
 
     #[test]
     fn qualified_default_unknown_alias_flagged() {
-        // `zz` is not imported — must be flagged, matching the TS analyzer.
+        // `zz` is not imported — must be flagged by the unified reference check.
         let ds = analyze_src("default zz/Policy my_policy = { id: \"x\" }");
-        assert!(has_code(&ds, "allium.default.undefinedImportedAlias"));
+        assert!(has_code(&ds, "allium.reference.undefinedImportedAlias"));
     }
 
     // -- Default field-schema validation (drift) + rule 14c --

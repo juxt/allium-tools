@@ -385,17 +385,20 @@ rule QualifiedProvidesCreditsImportedTriggerReachability {
     ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
 }
 
--- A qualified provides entry's spelling is load-bearing (it gates crediting),
--- so both halves of the reference are resolution-checked at the entry, rather
--- than surfacing only as a misleading downstream unreachableTrigger on the
--- imported module (#72).
+-- A qualified reference alias/Name at any site — a when trigger or entity
+-- subject, a provides entry, a surface context, an inline parameter type, a
+-- field type, a .created call, a default, a contract clause — must name a
+-- module a use declaration binds. An undeclared alias is a locally-knowable
+-- typo, diagnosed once at the reference by a single pass over every qualified
+-- reference, single-file and multi-file alike (#72, #78 and the sites audit).
 
-rule UnknownProvidesAliasIsDiagnosedAtEntry {
+rule UndeclaredImportAliasIsDiagnosedAtEveryReferenceSite {
     when: CheckCommandInvokedWithInputs(inputs)
-    requires: a surface provides a trigger qualified by an alias that no use declaration binds
+    requires: a qualified reference alias/Name appears at any site
+    requires: no use declaration in the module binds alias
 
-    ensures: FindingObserved(code: "allium.provides.undefinedImportedAlias", severity: error)
-    ensures: FindingMessage anchored at the provides entry names the unknown alias
+    ensures: FindingObserved(code: "allium.reference.undefinedImportedAlias", severity: error)
+    ensures: FindingMessage anchored at the reference names the unknown alias
 }
 
 rule UnknownProvidesTriggerIsDiagnosedAtEntry {
