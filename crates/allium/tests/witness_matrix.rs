@@ -201,6 +201,12 @@ fn scenarios() -> Vec<Scenario> {
             "surface WDesk {\n    context b: Job where status in {pending, done}\n    provides:\n        Ready(b)\n            when b.status = pending\n}\n\nrule Witness {\n    when: Ready(z)\n    requires: z.status = pending\n    ensures: z.status = done\n}\n",
         ),
         (
+            "importer_facing",
+            "",
+            "surface WDesk {\n    facing b: dom/Job\n    provides:\n        Ready(b)\n            when b.status = pending\n}\n\nrule Witness {\n    when: Ready(z)\n    requires: z.status = pending\n    ensures: z.status = done\n}\n",
+            "surface WDesk {\n    facing b: Job\n    provides:\n        Ready(b)\n            when b.status = pending\n}\n\nrule Witness {\n    when: Ready(z)\n    requires: z.status = pending\n    ensures: z.status = done\n}\n",
+        ),
+        (
             "importer_inline",
             "",
             "surface WDesk {\n    provides:\n        Ready(b: dom/Job)\n            when b.status = pending\n}\n\nrule Witness {\n    when: Ready(z)\n    requires: z.status = pending\n    ensures: z.status = done\n}\n",
@@ -254,6 +260,19 @@ fn scenarios() -> Vec<Scenario> {
         ),
         domain: format!("-- allium: 3\n\n{mh_entity}"),
         consumer: "-- allium: 3\n\nuse \"./domain.allium\" as dom\n\nrule W1 {\n    when: a: dom/Job.status becomes pending\n    ensures: a.status = active\n}\n\nrule W2 {\n    when: c: dom/Job.status becomes active\n    ensures: c.status = done\n}\n".to_string(),
+    });
+
+    // Importer creates the imported entity inside an if/else branch. The domain
+    // does not create it, so the importer's creation is the only assignment of
+    // `pending`.
+    let ci_domain = "entity Job {\n    status: pending | done\n    transitions status { pending -> done  terminal: done }\n}\n\nrule Advance {\n    when: t: Job.status becomes pending\n    ensures: t.status = done\n}\n";
+    out.push(Scenario {
+        name: "created_in_branch",
+        single: format!(
+            "-- allium: 3\n\n{ci_domain}\nrule Make {{\n    when: Go(flag)\n    if flag:\n        ensures: Job.created(status: pending)\n    else:\n        ensures: Job.created(status: pending)\n}}\n\nsurface Intake {{\n    provides:\n        Go(flag)\n}}\n"
+        ),
+        domain: format!("-- allium: 3\n\n{ci_domain}"),
+        consumer: "-- allium: 3\n\nuse \"./domain.allium\" as dom\n\nrule Make {\n    when: Go(flag)\n    if flag:\n        ensures: dom/Job.created(status: pending)\n    else:\n        ensures: dom/Job.created(status: pending)\n}\n\nsurface Intake {\n    provides:\n        Go(flag)\n}\n".to_string(),
     });
 
     out

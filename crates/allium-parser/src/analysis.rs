@@ -4615,16 +4615,14 @@ pub fn collect_reverse_contributions<'a>(
     }
 
     // 2 & 3. Qualified creation and witnessed transitions from importer rules.
+    // Descend into `if`/`else` and `for` bodies so a creation nested in a branch
+    // is seen, not just top-level ensures (the #58 traversal fix).
     for rule in module_blocks(importer, BlockKind::Rule) {
-        for item in &rule.items {
-            if let BlockItemKind::Clause { keyword, value } = &item.kind {
-                if keyword == "ensures" {
-                    collect_qualified_created(
-                        value, alias, &status_by_entity, &mut out.assigned_statuses,
-                    );
-                }
+        for_each_rule_clause(&rule.items, &mut |keyword, value| {
+            if keyword == "ensures" {
+                collect_qualified_created(value, alias, &status_by_entity, &mut out.assigned_statuses);
             }
-        }
+        });
         collect_witnessed_transition(
             rule, alias, &command_param_types, &status_by_entity, &mut out,
         );
