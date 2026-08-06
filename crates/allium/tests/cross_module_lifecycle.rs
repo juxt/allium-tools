@@ -1018,3 +1018,95 @@ fn gate_no_import_edge_means_no_credit() {
         "without a `use` edge, a co-supplied file's creation must not credit the domain.\n{stdout}"
     );
 }
+
+// ===========================================================================
+// #82: a qualified entity-collection reference (`alias/Tickets`, the plural of
+// an imported entity) must not draw `allium.reference.unknownName`. The offered
+// set holds declared singular names, never the pluralised collection form, and
+// the checker has no pluralisation model, so the name-membership test can
+// neither confirm nor refute a collection reference. It leaves them alone. The
+// same commit's alias check and its genuine trigger/type checks are unaffected.
+// ===========================================================================
+
+const TICKETS_82: &str = "-- allium: 3\n-- tickets.allium\n\n\
+    entity Ticket {\n    reference: String\n    escalated: Boolean\n}\n\n\
+    rule RaiseTicket {\n    when: TicketRaised()\n    ensures: Ticket.created(reference: \"\", escalated: false)\n}\n\n\
+    surface TicketDesk {\n    provides:\n        TicketRaised()\n}\n";
+
+#[test]
+fn qualified_collection_reference_is_not_diagnosed_at_any_site() {
+    // The three homes of an entity collection, per the language reference and
+    // the report: a top-level invariant, a rule-level `for`, a surface `let`.
+    let sites: [(&str, &str); 3] = [
+        (
+            "invariant",
+            "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
+             invariant EveryTicketEscalatable {\n    for t in tickets/Tickets:\n        t.escalated = false or t.escalated = true\n}\n",
+        ),
+        (
+            "rule-for",
+            "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
+             rule AllEscalated {\n    when: SweepRequested()\n    for t in tickets/Tickets:\n        ensures: t.escalated = true\n}\n\n\
+             surface Sweeper {\n    provides:\n        SweepRequested()\n}\n",
+        ),
+        (
+            "surface-let",
+            "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
+             surface TicketBoard {\n    let open = tickets/Tickets\n    provides:\n        BoardOpened()\n}\n",
+        ),
+    ];
+
+    for (label, console) in sites {
+        let dir = TempDir::new(&format!("i82-{label}"));
+        dir.write("tickets.allium", TICKETS_82);
+        dir.write("console.allium", console);
+        let (ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+        assert!(
+            !parse_diagnostics(&stdout)
+                .iter()
+                .any(|d| d.code == "allium.reference.unknownName"),
+            "site {label}: a qualified collection drew a false unknownName.\n{stdout}"
+        );
+        assert!(ok, "site {label}: a valid qualified collection must exit 0.\n{stdout}");
+    }
+}
+
+#[test]
+fn missing_qualified_trigger_is_still_diagnosed() {
+    // Don't overcorrect: a genuinely absent qualified trigger in `provides:` is
+    // still anchored. Only collection-position references are exempt.
+    let dir = TempDir::new("i82-guard-trigger");
+    dir.write("tickets.allium", TICKETS_82);
+    dir.write(
+        "console.allium",
+        "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
+         surface S {\n    provides:\n        tickets/NoSuchTrigger()\n}\n",
+    );
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        parse_diagnostics(&stdout)
+            .iter()
+            .any(|d| d.code == "allium.reference.unknownName" && d.message.contains("NoSuchTrigger")),
+        "a missing qualified trigger must still be diagnosed.\n{stdout}"
+    );
+}
+
+#[test]
+fn bad_alias_on_a_collection_is_still_diagnosed() {
+    // Don't overcorrect: exempting the name-membership check must not silence
+    // the alias check. A collection qualified by an unknown alias still errors.
+    let dir = TempDir::new("i82-guard-alias");
+    dir.write("tickets.allium", TICKETS_82);
+    dir.write(
+        "console.allium",
+        "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
+         invariant I {\n    for t in nosuch/Tickets:\n        t.escalated = true\n}\n",
+    );
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        parse_diagnostics(&stdout)
+            .iter()
+            .any(|d| d.code == "allium.reference.undefinedImportedAlias" && d.message.contains("nosuch")),
+        "an unknown alias on a collection must still be diagnosed.\n{stdout}"
+    );
+}

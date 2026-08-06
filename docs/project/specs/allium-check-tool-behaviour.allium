@@ -406,12 +406,21 @@ rule UndeclaredImportAliasIsDiagnosedAtEveryReferenceSite {
 -- module offers no such name (a declared type or a referenced trigger) is
 -- diagnosed at the reference. Same unified pass, every site (#72 and the
 -- name-existence audit). A target outside the check set is unknowable.
+--
+-- One reference form is exempt: a name in a collection-consuming position
+-- (a `for … in` / `in` / `where` iterable, or a `let` value) is an entity
+-- collection, the pluralised form of an entity. The offered set holds declared
+-- singular names, never the derived plural, and the checker has no
+-- pluralisation model, so the membership test can neither confirm nor refute a
+-- collection. It is left alone rather than flagged as unknown (#82). The alias
+-- check still applies: an unknown alias on a collection is still an error.
 
 rule UnknownImportedNameIsDiagnosedAtEveryReferenceSite {
     when: CheckCommandInvokedWithInputs(inputs)
     requires: inputs resolve to multiple files
     requires: a qualified reference alias/Name where a use declaration binds alias to a file in the check set
     requires: the aliased module offers no declared type or referenced trigger named Name
+    requires: the reference is not in a collection-consuming position
 
     ensures: FindingObserved(code: "allium.reference.unknownName", severity: warning)
     ensures: FindingMessage anchored at the reference names the unknown name
@@ -420,6 +429,14 @@ rule UnknownImportedNameIsDiagnosedAtEveryReferenceSite {
 rule QualifiedNameOutsideCheckSetNotFlagged {
     when: CheckCommandInvokedWithInputs(inputs)
     requires: a qualified reference alias/Name where alias's target is outside the check set
+
+    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
+}
+
+rule QualifiedCollectionReferenceNotFlagged {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: a qualified reference alias/Name in a collection-consuming position
+    requires: a use declaration binds alias to a file in the check set
 
     ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
 }

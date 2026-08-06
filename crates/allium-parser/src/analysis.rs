@@ -5439,6 +5439,14 @@ struct QRef<'a> {
     qualifier: &'a str,
     name: &'a str,
     span: Span,
+    /// True when this reference sits in a collection-consuming position (the
+    /// iterable of a `for … in` / `in` / `where`, or a `let` value): the head
+    /// names an entity collection, i.e. the pluralised form of an entity. The
+    /// checker has no pluralisation model, so an imported module's offered set
+    /// never contains the plural, and the name-membership check cannot tell a
+    /// valid collection from a typo. The `unknownName` branch leaves these
+    /// alone rather than false-positive on every qualified collection (#82).
+    collection: bool,
 }
 
 fn collect_qrefs_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<QRef<'a>>) {
@@ -5446,11 +5454,16 @@ fn collect_qrefs_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<QRef<'a>>)
         BlockItemKind::Clause { value, .. }
         | BlockItemKind::Assignment { value, .. }
         | BlockItemKind::ParamAssignment { value, .. }
-        | BlockItemKind::Let { value, .. }
         | BlockItemKind::PathAssignment { value, .. }
         | BlockItemKind::InvariantBlock { body: value, .. }
         | BlockItemKind::FieldWithWhen { value, .. } => {
             collect_qrefs_from_expr(value, out);
+        }
+        // A `let` binds a value that is often a collection (`let ts = a/Things`).
+        // Route through the collection collector so a bare qualified head is
+        // recognised as an entity-collection reference, not a missing name.
+        BlockItemKind::Let { value, .. } => {
+            collect_qrefs_from_collection(value, out);
         }
         BlockItemKind::ForBlock {
             collection,
@@ -5458,7 +5471,7 @@ fn collect_qrefs_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<QRef<'a>>)
             items,
             ..
         } => {
-            collect_qrefs_from_expr(collection, out);
+            collect_qrefs_from_collection(collection, out);
             if let Some(f) = filter {
                 collect_qrefs_from_expr(f, out);
             }
@@ -5485,7 +5498,7 @@ fn collect_qrefs_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<QRef<'a>>)
         BlockItemKind::ContractsClause { entries } => {
             for e in entries {
                 if let Some(qualifier) = &e.qualifier {
-                    out.push(QRef { qualifier, name: &e.name.name, span: e.name.span });
+                    out.push(QRef { qualifier, name: &e.name.name, span: e.name.span, collection: false });
                 }
             }
         }
@@ -5499,7 +5512,7 @@ fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
     match expr {
         Expr::QualifiedName(q) => {
             if let Some(qualifier) = &q.qualifier {
-                out.push(QRef { qualifier, name: &q.name, span: q.span });
+                out.push(QRef { qualifier, name: &q.name, span: q.span, collection: false });
             }
         }
         Expr::MemberAccess { object, field, .. }
@@ -5507,7 +5520,7 @@ fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
             // Detect alias.TypeName pattern (e.g. core.EntityMap in exposes)
             if let Expr::Ident(id) = object.as_ref() {
                 if starts_uppercase(&field.name) {
-                    out.push(QRef { qualifier: &id.name, name: &field.name, span: id.span.merge(field.span) });
+                    out.push(QRef { qualifier: &id.name, name: &field.name, span: id.span.merge(field.span), collection: false });
                 }
             }
             collect_qrefs_from_expr(object, out);
@@ -5545,7 +5558,7 @@ fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
         }
         Expr::In { element, collection, .. } | Expr::NotIn { element, collection, .. } => {
             collect_qrefs_from_expr(element, out);
-            collect_qrefs_from_expr(collection, out);
+            collect_qrefs_from_collection(collection, out);
         }
         Expr::Where { source, condition, .. }
         | Expr::With {
@@ -5553,7 +5566,7 @@ fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
             predicate: condition,
             ..
         } => {
-            collect_qrefs_from_expr(source, out);
+            collect_qrefs_from_collection(source, out);
             collect_qrefs_from_expr(condition, out);
         }
         Expr::WhenGuard { action, condition, .. } => {
@@ -5587,7 +5600,7 @@ fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
             body,
             ..
         } => {
-            collect_qrefs_from_expr(collection, out);
+            collect_qrefs_from_collection(collection, out);
             if let Some(f) = filter {
                 collect_qrefs_from_expr(f, out);
             }
@@ -5625,6 +5638,37 @@ fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
             collect_qrefs_from_expr(source, out);
         }
         _ => {}
+    }
+}
+
+/// Collect qualified references from a collection-consuming expression (a
+/// `for … in` / `in` iterable, a `where`/`with` source, a `let` value). The
+/// head of such an expression names the collection being iterated. A qualified
+/// head `alias/Things` is an entity-collection reference — the pluralised form
+/// of an imported entity — which the offered set cannot represent (see the
+/// `QRef::collection` note). It is marked so the name-membership check skips it.
+/// Everything nested (filters, predicates) is collected normally.
+fn collect_qrefs_from_collection<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
+    match expr {
+        Expr::QualifiedName(q) => {
+            if let Some(qualifier) = &q.qualifier {
+                out.push(QRef { qualifier, name: &q.name, span: q.span, collection: true });
+            }
+        }
+        // A filtered/projected collection still has its collection at `source`;
+        // the predicate is an ordinary expression.
+        Expr::Where { source, condition, .. }
+        | Expr::With {
+            source,
+            predicate: condition,
+            ..
+        } => {
+            collect_qrefs_from_collection(source, out);
+            collect_qrefs_from_expr(condition, out);
+        }
+        // Anything else (a call returning a collection, a field access, a list
+        // literal) is not a bare entity-collection name; collect it normally.
+        other => collect_qrefs_from_expr(other, out),
     }
 }
 
@@ -5880,6 +5924,7 @@ impl Ctx<'_> {
                         qualifier: &a.name,
                         name: &t.name,
                         span: a.span.merge(t.span),
+                        collection: false,
                     });
                 }
             }
@@ -5904,7 +5949,10 @@ impl Ctx<'_> {
                 // The alias resolves into the check set: the name must be one the
                 // aliased module offers (a declared type or a referenced trigger).
                 // A target outside the check set is unknowable and left alone.
-                if !offered.contains(r.name) {
+                // Collection references (`for t in alias/Things`) name a
+                // pluralised entity form the offered set cannot hold, so the
+                // membership test can neither confirm nor refute them (#82).
+                if !r.collection && !offered.contains(r.name) {
                     self.push(
                         Diagnostic::warning(
                             r.span,
