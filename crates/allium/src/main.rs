@@ -66,7 +66,8 @@ allium parse - parse a spec file and print the AST as JSON
 Usage: allium parse <file.allium>
 
 Prints a JSON document describing the parsed module and any diagnostics
-produced during parsing.
+produced during parsing. Exits non-zero if the spec carries an
+error-severity diagnostic (e.g. it does not parse).
 ";
 
 const PLAN_HELP: &str = "\
@@ -76,6 +77,11 @@ Usage: allium plan <file.allium>
 
 Prints a JSON document describing the test plan implied by the spec,
 including invariants, rule pre- and post-conditions, and transitions.
+
+The output carries a `diagnostics` array mirroring `check`. Exits
+non-zero if the spec carries an error-severity diagnostic, so an empty
+obligation set from a spec that does not parse is not mistaken for a
+valid spec that legitimately has none.
 ";
 
 const MODEL_HELP: &str = "\
@@ -84,7 +90,9 @@ allium model - extract the domain model as structured data
 Usage: allium model <file.allium>
 
 Prints a JSON document describing entities, value types and generators
-derived from the spec.
+derived from the spec. The output carries a `diagnostics` array mirroring
+`check`, and exits non-zero if the spec carries an error-severity
+diagnostic.
 ";
 
 fn main() -> ExitCode {
@@ -613,8 +621,28 @@ fn cmd_analyse(args: &[String]) -> ExitCode {
 // Single-file commands: parse, plan, model
 // ---------------------------------------------------------------------------
 
+/// Non-zero exit when the parse carries an error-severity diagnostic.
+///
+/// The parser is error-tolerant: a spec that does not parse still yields a
+/// (partial, possibly empty) `Module` plus diagnostics rather than failing
+/// outright. Every single-file command routes its exit code through here so
+/// that "the spec did not parse" cannot be laundered into a plausible-looking
+/// empty success. See `docs/versioning.md` and issue #80.
+fn single_file_exit(diagnostics: &[allium_parser::Diagnostic]) -> ExitCode {
+    if diagnostics.iter().any(|d| d.severity == Severity::Error) {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 /// Shared handler for commands that take a single .allium file, parse it, and
 /// print a JSON-serialisable result.
+///
+/// The transformed output is an object; parse diagnostics are merged into it
+/// under a `diagnostics` key (mirroring `check`) so a consumer can tell an
+/// empty-but-valid result apart from a parse failure without a second
+/// invocation. The exit code reflects error-severity diagnostics.
 fn run_single_file(
     usage: &str,
     args: &[String],
@@ -635,15 +663,25 @@ fn run_single_file(
     };
 
     let result = allium_parser::parse(&source);
-    let output = transform(&result.module, &source);
+    let source_map = SourceMap::new(&source);
+    let diagnostics: Vec<serde_json::Value> = result
+        .diagnostics
+        .iter()
+        .map(|d| diagnostic_to_json(d, path, &source_map))
+        .collect();
+
+    let mut output = transform(&result.module, &source);
+    if let serde_json::Value::Object(map) = &mut output {
+        map.insert("diagnostics".to_string(), serde_json::Value::Array(diagnostics));
+    }
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
-    ExitCode::SUCCESS
+    single_file_exit(&result.diagnostics)
 }
 
 fn cmd_parse(args: &[String]) -> ExitCode {
-    // Parse is slightly different: it serialises the full ParseResult, not a
-    // transform of the module. Keep it inline rather than forcing it through
-    // run_single_file.
+    // Parse is slightly different: it serialises the full ParseResult, which
+    // already carries diagnostics. It still shares the single-file exit
+    // contract so a spec that does not parse exits non-zero.
     if args.len() != 1 {
         eprintln!("Usage: allium parse <file.allium>");
         return ExitCode::from(2);
@@ -660,7 +698,7 @@ fn cmd_parse(args: &[String]) -> ExitCode {
 
     let result = allium_parser::parse(&source);
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
-    ExitCode::SUCCESS
+    single_file_exit(&result.diagnostics)
 }
 
 fn cmd_plan(args: &[String]) -> ExitCode {

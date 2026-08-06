@@ -1,0 +1,61 @@
+-- allium: 3
+-- allium-single-file-tool-behaviour.allium
+-- Scope: Standalone CLI behavior for the single-file commands that parse one
+-- spec and print a JSON view of it: `plan`, `model` and `parse`.
+-- Includes:
+--   - Argument arity and input resolution
+--   - The diagnostics channel carried in the JSON output
+--   - Exit code behavior with respect to parse diagnostics
+-- Excludes:
+--   - The multi-file commands `check` and `analyse` (see their own specs)
+--   - The shape of the command-specific payload (obligations, domain model, AST)
+
+value SingleFileCommand {
+    value: plan | model | parse
+}
+
+entity SingleFileRun {
+    command: SingleFileCommand
+    input: String
+}
+
+-- The parser is error-tolerant: a spec that does not parse still yields a
+-- partial module plus diagnostics rather than failing outright. The exit
+-- code and the diagnostics channel are the only signals that distinguish a
+-- parse failure from a spec that legitimately has nothing to report.
+
+rule WrongArityIsRejected {
+    when: SingleFileCommandInvoked(argument_count)
+    requires: argument_count != 1
+
+    ensures: UsagePrinted()
+    ensures: ProcessExit(code: 2)
+}
+
+rule MissingInputFileIsReported {
+    when: SingleFileCommandInvokedWithInput(input)
+    requires: ReadFile(input).ok = false
+
+    ensures: UserInformed(message: "<path>: <io-error>")
+    ensures: ProcessExit(code: 1)
+}
+
+rule OutputCarriesDiagnostics {
+    when: SingleFileRunCompleted(run)
+
+    ensures: DiagnosticsArrayEmitted(source: run.input)
+}
+
+rule ParseErrorFailsTheRun {
+    when: SingleFileRunCompleted(run)
+    requires: run.diagnostics.any(d => d.severity = error)
+
+    ensures: ProcessExit(code: 1)
+}
+
+rule NoParseErrorSucceeds {
+    when: SingleFileRunCompleted(run)
+    requires: run.diagnostics.all(d => d.severity in [info, warning])
+
+    ensures: ProcessExit(code: 0)
+}
