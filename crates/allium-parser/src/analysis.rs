@@ -7975,6 +7975,17 @@ surface AccountManagement {
         assert!(!names.contains("ExternalHelper"));
     }
 
+    #[test]
+    fn a_deferred_declared_against_another_modules_alias_is_not_offered() {
+        // `deferred other/Foreign` records that `other` owns the construct;
+        // the declaring module offers neither the name nor the alias.
+        let input = "-- allium: 3\nuse \"./other.allium\" as other\n\ndeferred other/Foreign\n";
+        let result = parse(input);
+        let names = collect_referenced_trigger_names(&result.module);
+        assert!(!names.contains("Foreign"), "a foreign deferred is not a local offering");
+        assert!(!names.contains("other"), "the alias itself is not an offering");
+    }
+
     // -- Unused entities --
 
     #[test]
