@@ -419,7 +419,11 @@ fn build_cross_module_context(parsed: &[ParsedFile]) -> CrossModuleContext {
 
                 if check_set.contains(&target_key) {
                     resolved_for_file.insert(path_text.clone());
-                } else if !target.exists() {
+                } else if path_text.ends_with(".allium") && !target.exists() {
+                    // Only local file references (ending .allium) can be
+                    // broken. Registry coordinates (`github.com/org/spec/sha`)
+                    // are immutable remote references that are not expected on
+                    // disk; they stay out-of-set, never broken.
                     missing_for_file.insert(path_text.clone());
                 }
 

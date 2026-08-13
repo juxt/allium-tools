@@ -1057,3 +1057,28 @@ fn references_through_an_on_disk_target_outside_the_check_set_stay_unknowable() 
         diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn references_through_a_registry_coordinate_import_stay_unknowable() {
+    // Registry coordinates (immutable remote references, per the language
+    // reference's "Using other specs") are never on local disk; that does not
+    // make them broken. References through such an alias stay unchecked.
+    let dir = TempDir::new("registry-import");
+    dir.write(
+        "consumer.allium",
+        "-- allium: 3\nuse \"github.com/specs/auth/abc123\" as auth\n\n\
+         rule ConsumesRemote {\n    when: auth/Session(user)\n\n    ensures: Done(user: user)\n}\n",
+    );
+
+    let output = allium()
+        .args(["check", &dir.path().to_string_lossy()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !parse_diagnostics(&stdout)
+            .iter()
+            .any(|d| d.code == "allium.reference.unresolvedImport"),
+        "a registry coordinate is out-of-set, not broken.\nDiagnostics: {stdout}"
+    );
+}
