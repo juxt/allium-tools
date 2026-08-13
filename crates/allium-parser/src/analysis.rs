@@ -3464,9 +3464,9 @@ impl Ctx<'_> {
             }
         }
 
-        // Collect triggers emitted by rule ensures clauses.
-        // Only collect the leading call in each ensures value, matching the
-        // TS regex which captures only the first identifier after `ensures:`.
+        // Collect triggers emitted by rule ensures clauses (every emission
+        // statement in the block, not just the first) and by `otherwise:`
+        // clauses on requires guards.
         let mut emitted: HashSet<&str> = HashSet::new();
         for rule in self.blocks(BlockKind::Rule) {
             for item in &rule.items {
@@ -3565,12 +3565,18 @@ impl Ctx<'_> {
     }
 }
 
-/// Collect emitted triggers from block items, only looking at ensures clauses
-/// and recursing into for/if blocks for nested ensures.
+/// Collect emitted triggers from block items: ensures clauses, `otherwise:`
+/// emissions attached to requires guards, and for/if blocks recursed for
+/// nested ensures.
 fn collect_emitted_trigger_from_item<'a>(kind: &'a BlockItemKind, out: &mut HashSet<&'a str>) {
     match kind {
         BlockItemKind::Clause { keyword, value } if keyword == "ensures" => {
-            collect_leading_ensures_call(value, out);
+            collect_ensures_emission_calls(value, out);
+        }
+        // `requires: cond otherwise: SomeError(...)` parses as an assignment
+        // item named `otherwise`; the failing guard emits its value's trigger.
+        BlockItemKind::Assignment { name, value } if name.name == "otherwise" => {
+            collect_ensures_emission_calls(value, out);
         }
         BlockItemKind::ForBlock { items, .. } => {
             for item in items {
@@ -3593,13 +3599,15 @@ fn collect_emitted_trigger_from_item<'a>(kind: &'a BlockItemKind, out: &mut Hash
     }
 }
 
-/// Extract only the leading PascalCase call from an ensures expression,
-/// matching the TS regex which captures only the first identifier followed
-/// by `(` after `ensures:`. An `if`/`else if`/`else` conditional contributes
-/// the leading call of each branch body, and a `for` iteration the leading
-/// call of its body — a trigger emitted on any branch is an emission
-/// (issue #19); the TS branch-call lane collects the same set.
-fn collect_leading_ensures_call<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
+/// Extract every emitted PascalCase call from an ensures expression: each
+/// statement of a block whose top-level expression is a bare call is an
+/// emission — not only the first (a block emitting two triggers emits both,
+/// and an emission below an entity creation or field assignment is still an
+/// emission). An `if`/`else if`/`else` conditional contributes each branch
+/// body, and a `for` iteration its body — a trigger emitted on any branch is
+/// an emission (issue #19). Value-producing calls nested inside assignments,
+/// `let` bindings or arguments are not emissions and are not collected.
+fn collect_ensures_emission_calls<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
     match expr {
         Expr::Call { function, .. } => {
             if let Expr::Ident(id) = function.as_ref() {
@@ -3609,8 +3617,8 @@ fn collect_leading_ensures_call<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) 
             }
         }
         Expr::Block { items, .. } => {
-            if let Some(first) = items.first() {
-                collect_leading_ensures_call(first, out);
+            for item in items {
+                collect_ensures_emission_calls(item, out);
             }
         }
         Expr::Conditional {
@@ -3619,14 +3627,14 @@ fn collect_leading_ensures_call<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) 
             ..
         } => {
             for b in branches {
-                collect_leading_ensures_call(&b.body, out);
+                collect_ensures_emission_calls(&b.body, out);
             }
             if let Some(body) = else_body {
-                collect_leading_ensures_call(body, out);
+                collect_ensures_emission_calls(body, out);
             }
         }
         Expr::For { body, .. } => {
-            collect_leading_ensures_call(body, out);
+            collect_ensures_emission_calls(body, out);
         }
         _ => {}
     }
@@ -7934,6 +7942,120 @@ surface AccountManagement {
             !has_finding(&r, "unreachable_trigger"),
             "for-block-provided trigger must not yield an unreachable_trigger finding. Findings: {:?}",
             r.findings.iter().map(|f| f["summary"].clone()).collect::<Vec<_>>()
+        );
+    }
+
+    // -- Emissions after the first ensures statement --
+
+    const MULTI_EMISSION_SPEC: &str = r#"
+surface Api {
+    provides:
+        Do1(x)
+        Do2(x)
+}
+
+rule EmitsTwo {
+    when: Do1(x)
+
+    ensures:
+        FirstEmitted(value: x)
+        SecondEmitted(value: x)
+}
+
+rule EmitsAfterAssignment {
+    when: Do2(x)
+
+    ensures:
+        x.field = 1
+        AfterAssignEmitted(value: x)
+}
+
+rule ConsumesSecond {
+    when: SecondEmitted(value)
+
+    ensures: Done1(value: value)
+}
+
+rule ConsumesAfterAssign {
+    when: AfterAssignEmitted(value)
+
+    ensures: Done2(value: value)
+}
+"#;
+
+    #[test]
+    fn trigger_emitted_after_the_first_ensures_statement_is_reachable() {
+        // An ensures block emits every trigger it calls, not only its first
+        // statement. A local listener of a second-position or post-assignment
+        // emission must not be reported unreachable.
+        let ds = analyze_src(MULTI_EMISSION_SPEC);
+        let false_positives: Vec<_> = ds
+            .iter()
+            .filter(|d| {
+                d.code == Some("allium.rule.unreachableTrigger")
+                    && (d.message.contains("SecondEmitted")
+                        || d.message.contains("AfterAssignEmitted"))
+            })
+            .map(|d| &d.message)
+            .collect();
+        assert!(
+            false_positives.is_empty(),
+            "emissions after the first ensures statement are emissions. Got: {false_positives:?}"
+        );
+    }
+
+    const OTHERWISE_EMISSION_SPEC: &str = r#"
+surface Api {
+    provides:
+        Submit(form)
+}
+
+rule ValidatesForm {
+    when: Submit(form)
+
+    requires: form.name != null
+        otherwise: ValidationFailed(form, "name_required")
+
+    ensures: FormAccepted(form: form)
+}
+
+rule ShowsError {
+    when: ValidationFailed(form, reason)
+
+    ensures: ErrorShown(form: form)
+}
+"#;
+
+    #[test]
+    fn trigger_emitted_via_otherwise_is_reachable() {
+        // `requires: ... otherwise: SomeError(...)` emits the error trigger on
+        // the failing branch; a sibling rule listening for it must not be
+        // reported unreachable.
+        let ds = analyze_src(OTHERWISE_EMISSION_SPEC);
+        let false_positives: Vec<_> = ds
+            .iter()
+            .filter(|d| {
+                d.code == Some("allium.rule.unreachableTrigger")
+                    && d.message.contains("ValidationFailed")
+            })
+            .map(|d| &d.message)
+            .collect();
+        assert!(
+            false_positives.is_empty(),
+            "an otherwise: emission is an emission. Got: {false_positives:?}"
+        );
+    }
+
+    #[test]
+    fn a_trigger_no_rule_emits_is_still_unreachable() {
+        // Don't overcorrect: a listener of a trigger nothing emits or provides
+        // must still be reported.
+        let src = "rule Lonely {\n    when: NeverEmitted(x)\n\n    ensures: Done(x: x)\n}\n";
+        let ds = analyze_src(src);
+        assert!(
+            ds.iter().any(|d| d.code == Some("allium.rule.unreachableTrigger")
+                && d.message.contains("NeverEmitted")),
+            "a trigger nothing emits must stay unreachable"
         );
     }
 
