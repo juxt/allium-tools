@@ -119,6 +119,7 @@ pub fn analyze_with_cross_module(
     ambiguous_imports: &AmbiguousImports,
     reverse: &ReverseContributions,
     imported_referenced_triggers: &HashMap<String, HashSet<String>>,
+    missing_use_paths: &HashSet<String>,
 ) -> Vec<Diagnostic> {
     let mut ctx = Ctx::new(
         module,
@@ -130,6 +131,7 @@ pub fn analyze_with_cross_module(
     ctx.imported_entity_fields = Some(imported_entity_fields);
     ctx.reverse_contributions = Some(reverse);
     ctx.imported_referenced_triggers = Some(imported_referenced_triggers);
+    ctx.missing_use_paths = Some(missing_use_paths);
     run_checks(ctx, source)
 }
 
@@ -207,6 +209,7 @@ pub fn analyse_with_cross_module(
     reverse: &ReverseContributions,
     imported_referenced_triggers: &HashMap<String, HashSet<String>>,
     imported_entity_statuses: &HashMap<String, HashSet<String>>,
+    missing_use_paths: &HashSet<String>,
 ) -> crate::diagnostic::AnalyseResult {
     let diagnostics = analyze_with_cross_module(
         module,
@@ -218,6 +221,7 @@ pub fn analyse_with_cross_module(
         ambiguous_imports,
         reverse,
         imported_referenced_triggers,
+        missing_use_paths,
     );
     let findings = find_process_issues(
         module,
@@ -421,6 +425,12 @@ struct Ctx<'a> {
     /// entities and triggers. `None` in single-file mode (and effectively empty
     /// when no importer references this module).
     reverse_contributions: Option<&'a ReverseContributions>,
+    /// Multi-file mode only: `use` path strings that resolve neither to a file
+    /// in the check set nor to a file on disk — a broken import, as opposed to
+    /// an out-of-set one. References through an alias bound to such a path are
+    /// diagnosed rather than left unknowable. `None` in single-file mode and
+    /// for callers without filesystem access (they behave as before).
+    missing_use_paths: Option<&'a HashSet<String>>,
     diagnostics: Vec<Diagnostic>,
     findings: Vec<crate::diagnostic::Finding>,
 }
@@ -442,6 +452,7 @@ impl<'a> Ctx<'a> {
             imported_entity_fields: None,
             imported_referenced_triggers: None,
             reverse_contributions: None,
+            missing_use_paths: None,
             diagnostics: Vec::new(),
             findings: Vec::new(),
         }
@@ -5914,6 +5925,30 @@ impl Ctx<'_> {
             })
             .collect();
 
+        // Aliases whose use path resolves neither in the check set nor on
+        // disk: the import is broken, not merely out of set. References
+        // through such an alias resolve against nothing, so each one is
+        // diagnosed — independent of the use-line unresolvedPath warning,
+        // which a per-line allium-ignore can suppress.
+        let broken_alias_paths: HashMap<&str, &str> = match self.missing_use_paths {
+            Some(missing) => self
+                .module
+                .declarations
+                .iter()
+                .filter_map(|d| match d {
+                    Decl::Use(u) => {
+                        let path = u.path.text();
+                        let alias = u.alias.as_ref()?;
+                        missing
+                            .get(&path)
+                            .map(|p| (alias.name.as_str(), p.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            None => HashMap::new(),
+        };
+
         let mut refs = collect_qref_nodes(self.module);
         // A `default alias/Type` reference's qualifier sits on the declaration,
         // not inside its value expression, so add it explicitly.
@@ -5941,6 +5976,17 @@ impl Ctx<'_> {
                         ),
                     )
                     .with_code("allium.reference.undefinedImportedAlias"),
+                );
+            } else if let Some(path) = broken_alias_paths.get(r.qualifier) {
+                self.push(
+                    Diagnostic::warning(
+                        r.span,
+                        format!(
+                            "Reference '{}/{}' goes through use path \"{}\", which does not resolve to a file in the check set or on disk.",
+                            r.qualifier, r.name, path
+                        ),
+                    )
+                    .with_code("allium.reference.unresolvedImport"),
                 );
             } else if let Some(offered) = self
                 .imported_referenced_triggers
@@ -7530,6 +7576,7 @@ mod tests {
             &AmbiguousImports::default(),
             &ReverseContributions::default(),
             &HashMap::new(),
+            &HashSet::new(),
         )
     }
 
@@ -7579,6 +7626,7 @@ mod tests {
             &ambiguous,
             &ReverseContributions::default(),
             &HashMap::new(),
+            &HashSet::new(),
         )
     }
 
@@ -8161,7 +8209,7 @@ surface AccountManagement {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./core.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new(), &HashSet::new());
         assert!(!has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -8172,7 +8220,7 @@ surface AccountManagement {
         let result = parse(&input);
         // Only "./other.allium" is resolved — "./missing.allium" is not.
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new(), &HashSet::new());
         assert!(has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -8193,7 +8241,7 @@ surface AccountManagement {
         let src = "use \"./missing.allium\" as missing\n\nentity Handler {\n  x: String\n}\n";
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new(), &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new(), &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new(), &HashSet::new());
         assert!(has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -8203,7 +8251,7 @@ surface AccountManagement {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new(), &HashSet::new());
         let diag = ds.iter().find(|d| d.code == Some("allium.use.unresolvedPath")).unwrap();
         assert!(diag.message.contains("nowhere.allium"), "message should name the path: {}", diag.message);
     }
@@ -8214,7 +8262,7 @@ surface AccountManagement {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new(), &HashSet::new());
         assert!(!has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -8224,7 +8272,7 @@ surface AccountManagement {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./found.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new(), &HashSet::new());
         let unresolved: Vec<_> = ds.iter()
             .filter(|d| d.code == Some("allium.use.unresolvedPath"))
             .collect();
