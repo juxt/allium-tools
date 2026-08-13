@@ -1110,3 +1110,116 @@ fn bad_alias_on_a_collection_is_still_diagnosed() {
         "an unknown alias on a collection must still be diagnosed.\n{stdout}"
     );
 }
+
+// ===========================================================================
+// config parameters and deferred declarations resolve through an alias
+// ===========================================================================
+
+const CONFIG_DEFERRED_PROVIDER: &str = r#"-- allium: 3
+config {
+    page_size: Integer = 25
+}
+
+deferred ExternalHelper    -- see: elsewhere.allium
+"#;
+
+// The config-default reference is the exact form the language reference
+// documents ("Config parameter references"): a local parameter defaulting to
+// an imported module's config value.
+const CONFIG_DEFERRED_CONSUMER: &str = r#"-- allium: 3
+use "./provider.allium" as p
+
+config {
+    local_page_size: Integer = p/config.page_size
+}
+
+surface Api {
+    provides:
+        Go(size)
+}
+
+rule ReadsConfigInRule {
+    when: Go(size)
+
+    requires: size > p/config.page_size
+
+    ensures: Accepted(size: size)
+}
+
+rule UsesDeferred {
+    when: Go(size)
+
+    requires: p/ExternalHelper(size)
+
+    ensures: Delegated(size: size)
+}
+"#;
+
+#[test]
+fn imported_config_and_deferred_references_resolve() {
+    // `alias/config.param` is documented ("Config parameter references",
+    // checker rule 46) and `alias/DeferredName` names a declaration the
+    // module visibly carries; neither may warn unknownName.
+    let dir = TempDir::new("config-deferred");
+    dir.write("provider.allium", CONFIG_DEFERRED_PROVIDER);
+    dir.write("consumer.allium", CONFIG_DEFERRED_CONSUMER);
+
+    let (ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    let false_positives: Vec<_> = parse_diagnostics(&stdout)
+        .into_iter()
+        .filter(|d| d.code == "allium.reference.unknownName")
+        .collect();
+    assert!(
+        false_positives.is_empty(),
+        "config and deferred references through an alias must resolve.\nGot: {:?}",
+        false_positives.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    assert!(ok, "check on the pair should exit 0.\n{stdout}");
+}
+
+#[test]
+fn a_deferred_name_the_provider_never_declares_still_warns() {
+    // Don't overcorrect: a name that is neither declared, referenced,
+    // deferred nor `config` still fails membership.
+    let dir = TempDir::new("config-deferred-guard");
+    dir.write("provider.allium", CONFIG_DEFERRED_PROVIDER);
+    dir.write(
+        "consumer.allium",
+        "-- allium: 3\nuse \"./provider.allium\" as p\n\n\
+         surface Api {\n    provides:\n        Go(size)\n}\n\n\
+         rule UsesGhost {\n    when: Go(size)\n\n    requires: p/NoSuchDeferred(size)\n\n    ensures: Done(size: size)\n}\n",
+    );
+
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        parse_diagnostics(&stdout)
+            .iter()
+            .any(|d| d.code == "allium.reference.unknownName" && d.message.contains("NoSuchDeferred")),
+        "a name the provider never mentions must still warn.\n{stdout}"
+    );
+}
+
+#[test]
+fn config_reference_against_a_module_without_config_still_warns() {
+    // Don't overcorrect: `alias/config` resolves only when the aliased module
+    // actually declares a config block.
+    let dir = TempDir::new("config-absent-guard");
+    dir.write(
+        "provider.allium",
+        "-- allium: 3\nentity Thing {\n    id: Integer\n}\n",
+    );
+    dir.write(
+        "consumer.allium",
+        "-- allium: 3\nuse \"./provider.allium\" as p\n\n\
+         surface Api {\n    provides:\n        Go(size)\n}\n\n\
+         rule ReadsMissingConfig {\n    when: Go(size)\n\n    requires: size > p/config.page_size\n\n    ensures: Done(size: size)\n}\n",
+    );
+
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        parse_diagnostics(&stdout)
+            .iter()
+            .any(|d| d.code == "allium.reference.unknownName" && d.message.contains("config")),
+        "referencing config on a module with no config block must still warn.\n{stdout}"
+    );
+}
