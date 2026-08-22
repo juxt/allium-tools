@@ -56,6 +56,7 @@ pub struct AmbiguousImports {
 /// absent (enables cross-spec trigger reachability).
 /// `ambiguous_imports` — names and triggers more than one imported module
 /// could resolve (enables ambiguous-reference warnings).
+#[allow(clippy::too_many_arguments)]
 pub fn analyze_with_cross_module(
     module: &Module,
     source: &str,
@@ -64,6 +65,7 @@ pub fn analyze_with_cross_module(
     imported_triggers: &HashMap<String, HashSet<String>>,
     imported_entity_fields: &HashMap<String, HashMap<String, HashSet<String>>>,
     ambiguous_imports: &AmbiguousImports,
+    witnessed_transitions: &HashSet<(String, Option<String>, String)>,
 ) -> Vec<Diagnostic> {
     let mut ctx = Ctx::new(
         module,
@@ -73,6 +75,7 @@ pub fn analyze_with_cross_module(
         Some(ambiguous_imports),
     );
     ctx.imported_entity_fields = Some(imported_entity_fields);
+    ctx.witnessed_transitions = Some(witnessed_transitions);
     run_checks(ctx, source)
 }
 
@@ -116,7 +119,7 @@ pub fn analyse_with_external_refs(
     external_refs: &HashSet<String>,
 ) -> crate::diagnostic::AnalyseResult {
     let diagnostics = analyze_with_external_refs(module, source, external_refs);
-    let findings = find_process_issues(module, None);
+    let findings = find_process_issues(module, None, None);
     crate::diagnostic::AnalyseResult {
         diagnostics,
         findings,
@@ -125,6 +128,7 @@ pub fn analyse_with_external_refs(
 
 /// Run structural checks plus process-level analysis with full cross-module
 /// context.
+#[allow(clippy::too_many_arguments)]
 pub fn analyse_with_cross_module(
     module: &Module,
     source: &str,
@@ -133,6 +137,7 @@ pub fn analyse_with_cross_module(
     imported_triggers: &HashMap<String, HashSet<String>>,
     imported_entity_fields: &HashMap<String, HashMap<String, HashSet<String>>>,
     ambiguous_imports: &AmbiguousImports,
+    witnessed_transitions: &HashSet<(String, Option<String>, String)>,
 ) -> crate::diagnostic::AnalyseResult {
     let diagnostics = analyze_with_cross_module(
         module,
@@ -142,8 +147,9 @@ pub fn analyse_with_cross_module(
         imported_triggers,
         imported_entity_fields,
         ambiguous_imports,
+        witnessed_transitions,
     );
-    let findings = find_process_issues(module, Some(imported_triggers));
+    let findings = find_process_issues(module, Some(imported_triggers), Some(witnessed_transitions));
     crate::diagnostic::AnalyseResult {
         diagnostics,
         findings,
@@ -230,9 +236,11 @@ impl<'a> EntityInfo<'a> {
 fn find_process_issues(
     module: &Module,
     imported_triggers: Option<&HashMap<String, HashSet<String>>>,
+    witnessed_transitions: Option<&HashSet<(String, Option<String>, String)>>,
 ) -> Vec<crate::diagnostic::Finding> {
     let empty = HashSet::new();
     let mut ctx = Ctx::new(module, &empty, None, imported_triggers, None);
+    ctx.witnessed_transitions = witnessed_transitions;
     let info = EntityInfo::from_module(module);
     ctx.collect_process_findings(&info);
     ctx.collect_conflict_findings(&info);
@@ -316,6 +324,13 @@ struct Ctx<'a> {
     /// be validated against the imported schema. Aliases whose targets fall
     /// outside the check set are absent. `None` in single-file mode.
     imported_entity_fields: Option<&'a HashMap<String, HashMap<String, HashSet<String>>>>,
+    /// Multi-file mode only: transitions on THIS module's entities that are
+    /// witnessed by rules in other modules (e.g. a rule that handles an
+    /// imported chained trigger and ensures a new status). `(entity, from?,
+    /// to)`. Lets reachability/deadlock and the status state machine credit a
+    /// cross-module witness instead of reporting a false dead end. `None` in
+    /// single-file mode.
+    witnessed_transitions: Option<&'a HashSet<(String, Option<String>, String)>>,
     diagnostics: Vec<Diagnostic>,
     findings: Vec<crate::diagnostic::Finding>,
 }
@@ -335,6 +350,7 @@ impl<'a> Ctx<'a> {
             imported_triggers,
             ambiguous_imports,
             imported_entity_fields: None,
+            witnessed_transitions: None,
             diagnostics: Vec::new(),
             findings: Vec::new(),
         }
@@ -859,6 +875,32 @@ impl Ctx<'_> {
             }
         }
 
+        // Credit transitions witnessed by rules in other modules (multi-file
+        // mode) so a status reached or exited only via a cross-module rule is
+        // not reported as unreachable (`unreachableValue`) or a dead end
+        // (`noExit`).
+        if let Some(witnessed) = self.witnessed_transitions {
+            for (entity, from, to) in witnessed {
+                let Some((entity_key, _)) = status_by_entity.get_key_value(entity.as_str())
+                else {
+                    continue;
+                };
+                let entity_key: &str = entity_key;
+                assigned_by_entity
+                    .entry(entity_key)
+                    .or_default()
+                    .insert(to.as_str());
+                if let Some(from) = from {
+                    transitions_by_entity
+                        .entry(entity_key)
+                        .or_default()
+                        .entry(from.as_str())
+                        .or_default()
+                        .insert(to.as_str());
+                }
+            }
+        }
+
         for (entity_name, (idents, values)) in &status_by_entity {
             let assigned = assigned_by_entity.get(entity_name);
             let transitions = transitions_by_entity.get(entity_name);
@@ -1149,6 +1191,17 @@ impl Ctx<'_> {
                 }
                 collect_created_field_assignments(value, &status_values, &mut assigned_fields);
                 collect_created_field_assignments(value, &status_values, &mut created_fields);
+            }
+        }
+
+        // Credit transitions witnessed by rules in other modules (multi-file
+        // mode): the target status is achievable even though no local rule
+        // establishes it, so reachability must not report a false dead end.
+        if let Some(witnessed) = self.witnessed_transitions {
+            for (entity, _from, to) in witnessed {
+                if status_values.contains_key(entity.as_str()) {
+                    assigned_fields.insert(format!("{entity}.status.{to}"));
+                }
             }
         }
 
@@ -4165,6 +4218,225 @@ pub fn collect_trigger_outputs(module: &Module) -> HashSet<String> {
     names.into_iter().map(str::to_string).collect()
 }
 
+/// Collect each trigger's payload entity types, keyed by trigger name.
+///
+/// Derived from rule emissions (`ensures: Trigger(binding)`): each positional
+/// argument binding is resolved to its local entity type. The result lets an
+/// importing module type a binding taken from an imported chained trigger
+/// (`when: alias/Trigger(order)`), which is otherwise untyped because trigger
+/// parameters are bare names. First emission of a trigger wins.
+pub fn collect_trigger_payload_types(module: &Module) -> HashMap<String, Vec<String>> {
+    let info = EntityInfo::from_module(module);
+    let status_by_entity = status_values_for_binding(&info.status_values);
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for d in &module.declarations {
+        let Decl::Block(b) = d else { continue };
+        if b.kind != BlockKind::Rule {
+            continue;
+        }
+        let binding_types = collect_rule_binding_types(b, &status_by_entity);
+        for item in &b.items {
+            let BlockItemKind::Clause { keyword, value } = &item.kind else {
+                continue;
+            };
+            if keyword != "ensures" {
+                continue;
+            }
+            let mut calls: Vec<(&str, Vec<&str>)> = Vec::new();
+            collect_emitted_calls_with_args(value, &mut calls);
+            for (trigger, args) in calls {
+                let entities: Vec<String> = args
+                    .iter()
+                    .filter_map(|arg| {
+                        resolve_binding_entity_from_status(
+                            arg, None, &binding_types, &info.status_values,
+                        )
+                        .map(str::to_string)
+                    })
+                    .collect();
+                if !entities.is_empty() {
+                    out.entry(trigger.to_string()).or_insert(entities);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Leading emitted calls in an ensures expression, with their positional ident
+/// argument names. Mirrors `collect_leading_ensures_call` but keeps the args.
+fn collect_emitted_calls_with_args<'a>(expr: &'a Expr, out: &mut Vec<(&'a str, Vec<&'a str>)>) {
+    match expr {
+        Expr::Call { function, args, .. } => {
+            if let Expr::Ident(id) = function.as_ref() {
+                if starts_uppercase(&id.name) {
+                    let bindings: Vec<&str> = args
+                        .iter()
+                        .filter_map(|a| match a {
+                            CallArg::Positional(Expr::Ident(b)) => Some(b.name.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    out.push((id.name.as_str(), bindings));
+                }
+            }
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_emitted_calls_with_args(item, out);
+            }
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_emitted_calls_with_args(&b.body, out);
+            }
+            if let Some(body) = else_body {
+                collect_emitted_calls_with_args(body, out);
+            }
+        }
+        Expr::For { body, .. } => {
+            collect_emitted_calls_with_args(body, out);
+        }
+        _ => {}
+    }
+}
+
+/// A `when:` trigger call decomposed into optional `use`-alias qualifier,
+/// trigger name, and its positional binding names.
+fn extract_when_trigger_call(expr: &Expr) -> Option<(Option<&str>, &str, Vec<&str>)> {
+    let Expr::Call { function, args, .. } = expr else {
+        return None;
+    };
+    let (qualifier, name) = match function.as_ref() {
+        Expr::QualifiedName(q) if starts_uppercase(&q.name) => {
+            (q.qualifier.as_deref(), q.name.as_str())
+        }
+        Expr::Ident(id) if starts_uppercase(&id.name) => (None, id.name.as_str()),
+        _ => return None,
+    };
+    let bindings = args
+        .iter()
+        .filter_map(|a| match a {
+            CallArg::Positional(Expr::Ident(b)) => Some(b.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    Some((qualifier, name, bindings))
+}
+
+/// A transition a rule establishes on an entity, with the `use` alias when the
+/// entity is imported. Produced for the *importing* module and credited by the
+/// caller to the imported module that declares the entity.
+#[derive(Debug, Clone)]
+pub struct WitnessedTransition {
+    /// `Some(alias)` when the entity is imported via that `use` alias.
+    pub alias: Option<String>,
+    pub entity: String,
+    pub from: Option<String>,
+    pub to: String,
+}
+
+/// Collect the transitions this module's rules establish on entities imported
+/// from other modules via a chained trigger (`when: alias/Trigger(order)` then
+/// `requires: order.status = paid`, `ensures: order.status = shipped`).
+///
+/// `imported_trigger_payloads` maps `use` alias → (imported trigger →
+/// payload entity types), from `collect_trigger_payload_types` on the target
+/// module. Only imported (aliased) transitions are returned; the caller credits
+/// each to the module that declares the entity so its reachability analysis can
+/// see the cross-module witness.
+pub fn collect_witnessed_transitions(
+    module: &Module,
+    imported_trigger_payloads: &HashMap<String, HashMap<String, Vec<String>>>,
+) -> Vec<WitnessedTransition> {
+    let mut out = Vec::new();
+    let empty_bt: HashMap<&str, &str> = HashMap::new();
+    let empty_sv: HashMap<&str, (HashSet<&str>, Vec<&Ident>)> = HashMap::new();
+    let empty_ft: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
+
+    for d in &module.declarations {
+        let Decl::Block(b) = d else { continue };
+        if b.kind != BlockKind::Rule {
+            continue;
+        }
+
+        // binding name → (alias, imported entity), from an imported chained trigger.
+        let mut binding_entity: HashMap<&str, (String, String)> = HashMap::new();
+        for item in &b.items {
+            let BlockItemKind::Clause { keyword, value } = &item.kind else {
+                continue;
+            };
+            if keyword != "when" {
+                continue;
+            }
+            if let Some((Some(alias), trigger, bindings)) = extract_when_trigger_call(value) {
+                if let Some(payload) =
+                    imported_trigger_payloads.get(alias).and_then(|m| m.get(trigger))
+                {
+                    for (i, binding) in bindings.iter().enumerate() {
+                        if let Some(entity) = payload.get(i) {
+                            binding_entity.insert(binding, (alias.to_string(), entity.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        if binding_entity.is_empty() {
+            continue;
+        }
+
+        // Syntactic status conditions per binding (the imported entity's status
+        // set is unknown here, so match `binding.status = value` structurally).
+        let mut froms: HashMap<String, Vec<String>> = HashMap::new();
+        let mut tos: HashMap<String, Vec<String>> = HashMap::new();
+        for item in &b.items {
+            let BlockItemKind::Clause { keyword, value } = &item.kind else {
+                continue;
+            };
+            if keyword == "requires" {
+                collect_requires_conditions(
+                    value, &empty_bt, &empty_sv, &mut |binding, field, val| {
+                        if field == "status" {
+                            froms.entry(binding.to_string()).or_default().push(val.to_string());
+                        }
+                    },
+                );
+            } else if keyword == "ensures" {
+                collect_ensures_status(
+                    value, &empty_bt, &empty_sv, &empty_ft, &mut |binding, target| {
+                        tos.entry(binding.to_string()).or_default().push(target.to_string());
+                    },
+                );
+            }
+        }
+
+        for (binding, (alias, entity)) in &binding_entity {
+            let Some(targets) = tos.get(*binding) else { continue };
+            for to in targets {
+                match froms.get(*binding) {
+                    Some(sources) if !sources.is_empty() => {
+                        for from in sources {
+                            out.push(WitnessedTransition {
+                                alias: Some(alias.clone()),
+                                entity: entity.clone(),
+                                from: Some(from.clone()),
+                                to: to.clone(),
+                            });
+                        }
+                    }
+                    _ => out.push(WitnessedTransition {
+                        alias: Some(alias.clone()),
+                        entity: entity.clone(),
+                        from: None,
+                        to: to.clone(),
+                    }),
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Collect each entity/value type's declared field names, keyed by type name.
 ///
 /// Used by multi-file checking to build the per-alias schema map that lets a
@@ -6143,6 +6415,7 @@ mod tests {
             &imported,
             &HashMap::new(),
             &AmbiguousImports::default(),
+            &HashSet::new(),
         )
     }
 
@@ -6190,6 +6463,7 @@ mod tests {
             &imported,
             &HashMap::new(),
             &ambiguous,
+            &HashSet::new(),
         )
     }
 
@@ -6623,7 +6897,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./core.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &HashSet::new());
         assert!(!has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -6634,7 +6908,7 @@ mod tests {
         let result = parse(&input);
         // Only "./other.allium" is resolved — "./missing.allium" is not.
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &HashSet::new());
         assert!(has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -6655,7 +6929,7 @@ mod tests {
         let src = "use \"./missing.allium\" as missing\n\nentity Handler {\n  x: String\n}\n";
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new(), &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new(), &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &HashSet::new());
         assert!(has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -6665,7 +6939,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &HashSet::new());
         let diag = ds.iter().find(|d| d.code == Some("allium.use.unresolvedPath")).unwrap();
         assert!(diag.message.contains("nowhere.allium"), "message should name the path: {}", diag.message);
     }
@@ -6676,7 +6950,7 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &HashSet::new());
         assert!(!has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -6686,12 +6960,136 @@ mod tests {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./found.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &HashSet::new());
         let unresolved: Vec<_> = ds.iter()
             .filter(|d| d.code == Some("allium.use.unresolvedPath"))
             .collect();
         assert_eq!(unresolved.len(), 1, "only lost.allium should be unresolved");
         assert!(unresolved[0].message.contains("lost.allium"));
+    }
+
+    // -- Cross-module transition witnessing --
+
+    fn parse_module(src: &str) -> crate::ast::Module {
+        parse(&format!("-- allium: 3\n{src}")).module
+    }
+
+    const XM_CORE: &str = "\
+entity Order {
+    id: String
+    status: pending | paid | shipped
+
+    transitions status {
+        pending -> paid
+        paid -> shipped
+        terminal: shipped
+    }
+}
+
+rule MarkPaid {
+    when: PayOrder(order)
+    requires: order.status = pending
+    ensures: order.status = paid
+    ensures: OrderPaid(order)
+}
+";
+
+    const XM_SHIPPING: &str = "\
+use \"./core.allium\" as core
+
+rule ShipOnPayment {
+    when: core/OrderPaid(order)
+    requires: order.status = paid
+    ensures: order.status = shipped
+}
+";
+
+    fn core_witnessed(
+        witnessed: &HashSet<(String, Option<String>, String)>,
+    ) -> crate::diagnostic::AnalyseResult {
+        let module = parse_module(XM_CORE);
+        analyse_with_cross_module(
+            &module,
+            &format!("-- allium: 3\n{XM_CORE}"),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &AmbiguousImports::default(),
+            witnessed,
+        )
+    }
+
+    #[test]
+    fn trigger_payload_types_resolves_emission_entity() {
+        let payloads = collect_trigger_payload_types(&parse_module(XM_CORE));
+        assert_eq!(payloads.get("OrderPaid"), Some(&vec!["Order".to_string()]));
+    }
+
+    #[test]
+    fn witnessed_transitions_from_imported_chained_trigger() {
+        let imported: HashMap<String, HashMap<String, Vec<String>>> = [(
+            "core".to_string(),
+            [("OrderPaid".to_string(), vec!["Order".to_string()])]
+                .into_iter()
+                .collect(),
+        )]
+        .into_iter()
+        .collect();
+        let wts = collect_witnessed_transitions(&parse_module(XM_SHIPPING), &imported);
+        assert_eq!(wts.len(), 1);
+        assert_eq!(wts[0].alias.as_deref(), Some("core"));
+        assert_eq!(wts[0].entity, "Order");
+        assert_eq!(wts[0].from.as_deref(), Some("paid"));
+        assert_eq!(wts[0].to, "shipped");
+    }
+
+    #[test]
+    fn witnessed_transitions_none_without_imported_payload() {
+        // No imported payloads → the binding stays untyped → no transition.
+        let wts = collect_witnessed_transitions(&parse_module(XM_SHIPPING), &HashMap::new());
+        assert!(wts.is_empty());
+    }
+
+    #[test]
+    fn cross_module_witness_suppresses_deadlock_and_noexit() {
+        let witnessed: HashSet<(String, Option<String>, String)> = [(
+            "Order".to_string(),
+            Some("paid".to_string()),
+            "shipped".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let result = core_witnessed(&witnessed);
+        assert!(
+            !has_finding(&result, "deadlock"),
+            "a cross-module witness for paid->shipped should suppress the deadlock: {:?}",
+            result.findings
+        );
+        assert!(
+            !has_code(&result.diagnostics, "allium.status.noExit"),
+            "the witnessed exit means paid is no longer a dead end"
+        );
+    }
+
+    #[test]
+    fn without_cross_module_witness_deadlock_still_fires() {
+        // Multi-file mode but nothing witnesses paid->shipped: no over-suppression.
+        let result = core_witnessed(&HashSet::new());
+        assert!(
+            has_finding(&result, "deadlock"),
+            "without a witness the paid dead end must still be reported"
+        );
+    }
+
+    #[test]
+    fn single_file_analysis_unchanged_by_witnessing() {
+        let module = parse_module(XM_CORE);
+        let result = analyse(&module, &format!("-- allium: 3\n{XM_CORE}"));
+        assert!(
+            has_finding(&result, "deadlock"),
+            "single-file analysis still reports the local dead end"
+        );
     }
 
     // -- Deferred location hints --

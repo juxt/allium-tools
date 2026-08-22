@@ -144,6 +144,21 @@ rule DeadlockCycleNullWhenNoCycleExists {
     ensures: NoCycleReported(state)
 }
 
+-- Cross-module transition witnessing (multi-file mode)
+
+rule CrossModuleWitnessSuppressesDeadEnd {
+    when: EntityStateAnalysed(entity, state, terminal_states)
+    requires: state not in terminal_states
+    requires: TransitionWitnessedByOtherModule(entity, state) = true
+
+    ensures: NoDeadlockReported(entity, state)
+    -- When another module in the check set has a rule that establishes a later
+    -- status of this entity (typically by handling an imported chained trigger
+    -- and ensuring the new status), that transition is credited as a witness.
+    -- The state is then not reported as deadlock, status.noExit or
+    -- status.unreachableValue. Single-file analysis is unaffected.
+}
+
 -- Unreachable trigger finding
 
 rule UnreachableTriggerDetected {
