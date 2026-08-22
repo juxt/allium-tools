@@ -263,6 +263,12 @@ fn scenarios() -> Vec<Scenario> {
             "rule Witness {\n    when: Ready(b)\n    requires: b.status = pending\n    ensures: b.status = done\n}\n",
         ),
         (
+            "emission_status_typed",
+            "surface Kicker {\n    provides:\n        Kick(j)\n}\n\nrule Announce {\n    when: Kick(j)\n    requires: j.status = pending\n    ensures: Ready(job: j)\n}\n",
+            "rule Witness {\n    when: dom/Ready(b)\n    requires: b.status = pending\n    ensures: b.status = done\n}\n",
+            "rule Witness {\n    when: Ready(b)\n    requires: b.status = pending\n    ensures: b.status = done\n}\n",
+        ),
+        (
             "emission_in_branch",
             "surface Kicker {\n    provides:\n        Kick(j: Job, flag)\n}\n\nrule Announce {\n    when: Kick(j, flag)\n    if flag:\n        ensures: Ready(job: j)\n    else:\n        ensures: Ready(job: j)\n}\n",
             "rule Witness {\n    when: dom/Ready(b)\n    requires: b.status = pending\n    ensures: b.status = done\n}\n",

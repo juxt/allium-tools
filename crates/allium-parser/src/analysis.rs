@@ -4916,6 +4916,72 @@ fn collect_importer_command_param_types<'a>(
 /// rule's own trigger gives `b`, mapped positionally so a positional subscriber
 /// binding resolves. This lets a consumer subscribing to a rule-emitted event
 /// across a module boundary type its binding.
+/// Type an emitting rule's bindings from its `requires`/`ensures`
+/// `binding.status = value` equations, mirroring the consumer-side
+/// `resolve_binding_entity_from_status` fallbacks (case-insensitive entity match
+/// and unique status-target inference). Without this, a producer rule whose
+/// binding is typed only by status equations — not a transition trigger or a
+/// surface parameter — contributes no payload type across a module boundary, so
+/// a lifecycle whose exit it witnesses is falsely reported as a dead end.
+fn augment_binding_types_from_status<'a>(
+    rule: &'a BlockDecl,
+    status_by_entity: &HashMap<&'a str, HashSet<&'a str>>,
+    binding_types: &mut HashMap<&'a str, &'a str>,
+) {
+    let status_values: HashMap<&str, (HashSet<&str>, Vec<&Ident>)> = status_by_entity
+        .iter()
+        .map(|(k, v)| (*k, (v.clone(), Vec::new())))
+        .collect();
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    for_each_rule_clause(&rule.items, &mut |keyword, value| {
+        if keyword == "requires" || keyword == "ensures" {
+            collect_status_equations(value, &mut pairs);
+        }
+    });
+    for (binding, target) in pairs {
+        if binding_types.contains_key(binding) {
+            continue;
+        }
+        if let Some(entity) =
+            resolve_binding_entity_from_status(binding, Some(target), binding_types, &status_values)
+        {
+            binding_types.insert(binding, entity);
+        }
+    }
+}
+
+/// Collect `binding.status = value` equations from an expression as
+/// (binding, value) pairs, recursing through blocks and conditionals.
+fn collect_status_equations<'a>(expr: &'a Expr, out: &mut Vec<(&'a str, &'a str)>) {
+    match expr {
+        Expr::Comparison { left, op: ComparisonOp::Eq, right, .. } => {
+            if let (Some((binding, "status")), Some(target)) =
+                (expr_as_member_access(left), expr_as_ident(right))
+            {
+                out.push((binding, target));
+            }
+        }
+        Expr::LogicalOp { left, right, .. } => {
+            collect_status_equations(left, out);
+            collect_status_equations(right, out);
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_status_equations(item, out);
+            }
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_status_equations(&b.body, out);
+            }
+            if let Some(body) = else_body {
+                collect_status_equations(body, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_emitted_event_param_types<'a>(
     imported: &'a Module,
     status_by_entity: &HashMap<&'a str, HashSet<&'a str>>,
@@ -4938,6 +5004,7 @@ fn collect_emitted_event_param_types<'a>(
     for rule in module_blocks(imported, BlockKind::Rule) {
         let mut binding_types = collect_rule_binding_types(rule, status_by_entity);
         augment_binding_types_from_commands(rule, &surface_params, &mut binding_types);
+        augment_binding_types_from_status(rule, status_by_entity, &mut binding_types);
         if binding_types.is_empty() {
             continue;
         }
