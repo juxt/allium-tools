@@ -176,6 +176,22 @@ rule ImporterOwnedTriggerWitnessCountsAsAchievable {
     ensures: NoAchievablePathToTerminal(entity, state) = false
 }
 
+-- The imported module contributes an emitted event's payload entity type across
+-- the boundary however the emitting rule's binding is typed: by a transition
+-- trigger, a surface parameter, or the rule's own requires/ensures
+-- binding.status = value equations. So an importer subscribing to that event
+-- witnesses the imported entity's transition even when the emitter typed its
+-- binding only by a status guard, not a transition trigger or a surface param.
+rule EmittedEventPayloadTypedByStatusEquation {
+    when: EntityStateAnalysed(entity, state, terminal_states)
+    requires: entity is imported by another file in the analysis set via use alias
+    requires: imported module rule emits an event whose payload binding is typed by a status equation on the entity
+    requires: importer rule subscribes to that event, guards on state, and assigns target
+    requires: entity declares a transition edge from state to target
+
+    ensures: NoAchievablePathToTerminal(entity, state) = false
+}
+
 rule DeadlockCycleDetectedViaDFS {
     when: DeadlockReported(entity, state, achievable_edges)
     requires: CycleExistsInAchievableEdges(state, achievable_edges) = true
