@@ -4065,6 +4065,68 @@ fn collect_qualified_field_refs_from_item<'a>(
     }
 }
 
+/// Fields read as `bound.field`, for names bound to an imported entity.
+///
+/// The bound-name counterpart of [`collect_qualified_field_refs`]: a surface
+/// that writes `context shelf: alias/Shelf` reads the relationship as
+/// `shelf.copies`, and the qualified spelling never appears.
+fn collect_bound_field_refs<'a>(
+    expr: &'a Expr,
+    bound: &HashMap<&str, &str>,
+    out: &mut HashSet<&'a str>,
+) {
+    if let Expr::MemberAccess { object, field, .. } | Expr::OptionalAccess { object, field, .. } =
+        expr
+    {
+        if matches!(object.as_ref(), Expr::Ident(i) if bound.contains_key(i.name.as_str())) {
+            out.insert(&field.name);
+        }
+    }
+    walk_expr_children(expr, &mut |child| collect_bound_field_refs(child, bound, out));
+}
+
+fn collect_bound_field_refs_from_item<'a>(
+    kind: &'a BlockItemKind,
+    bound: &HashMap<&str, &str>,
+    out: &mut HashSet<&'a str>,
+) {
+    match kind {
+        BlockItemKind::Clause { value, .. }
+        | BlockItemKind::Assignment { value, .. }
+        | BlockItemKind::ParamAssignment { value, .. }
+        | BlockItemKind::Let { value, .. }
+        | BlockItemKind::PathAssignment { value, .. }
+        | BlockItemKind::InvariantBlock { body: value, .. }
+        | BlockItemKind::FieldWithWhen { value, .. } => {
+            collect_bound_field_refs(value, bound, out);
+        }
+        BlockItemKind::ForBlock { collection, filter, items, .. } => {
+            collect_bound_field_refs(collection, bound, out);
+            if let Some(f) = filter {
+                collect_bound_field_refs(f, bound, out);
+            }
+            for item in items {
+                collect_bound_field_refs_from_item(&item.kind, bound, out);
+            }
+        }
+        BlockItemKind::IfBlock { branches, else_items } => {
+            for b in branches {
+                collect_bound_field_refs(&b.condition, bound, out);
+                for item in &b.items {
+                    collect_bound_field_refs_from_item(&item.kind, bound, out);
+                }
+            }
+            if let Some(items) = else_items {
+                for item in items {
+                    collect_bound_field_refs_from_item(&item.kind, bound, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+
 fn collect_accessed_fields_from_item<'a>(kind: &'a BlockItemKind, out: &mut HashSet<&'a str>) {
     match kind {
         BlockItemKind::Clause { value, .. }
@@ -4799,10 +4861,11 @@ pub fn collect_reverse_contributions<'a>(
         );
     }
 
-    // Fields the importer references through this alias (`alias/Entity.field`),
-    // restricted to real imported-entity fields. Credited so the imported module
-    // does not report a field as unused when its only reference lives across the
-    // boundary.
+    // Fields the importer references through this alias, credited so the
+    // imported module does not report a field as unused when its only reference
+    // lives across the boundary. Two spellings reach the same field:
+    // `alias/Entity.field`, and `binding.field` where the binding was typed to
+    // an imported entity.
     let mut imported_field_names: HashSet<&str> = HashSet::new();
     for entity in module_blocks(imported, BlockKind::Entity)
         .chain(module_blocks(imported, BlockKind::ExternalEntity))
@@ -4816,20 +4879,69 @@ pub fn collect_reverse_contributions<'a>(
         }
     }
     if !imported_field_names.is_empty() {
-        let mut qualified_refs: HashSet<&str> = HashSet::new();
+        let mut refs: HashSet<&str> = HashSet::new();
         for block in &importer.declarations {
             if let Decl::Block(b) = block {
                 for item in &b.items {
-                    collect_qualified_field_refs_from_item(&item.kind, alias, &mut qualified_refs);
+                    collect_qualified_field_refs_from_item(&item.kind, alias, &mut refs);
                 }
             }
         }
-        for f in qualified_refs {
+
+        // Every imported entity, in the shape the binding-type helpers take.
+        // They read this map for membership only, so passing all the entities
+        // rather than `status_by_entity`'s status-bearing ones types a binding
+        // whatever the entity's lifecycle — which is what a field read wants,
+        // and what a lifecycle check deliberately does not.
+        let entity_names: HashMap<&str, HashSet<&str>> =
+            module_blocks(imported, BlockKind::Entity)
+                .chain(module_blocks(imported, BlockKind::ExternalEntity))
+                .filter_map(|e| e.name.as_ref().map(|n| (n.name.as_str(), HashSet::new())))
+                .collect();
+
+        // A trigger's parameters, typed from the surface that provides it, so a
+        // rule subscribing to that trigger knows which of its bindings is an
+        // imported entity. The same table `command_param_types` holds above,
+        // built over every entity rather than the status-bearing ones.
+        let mut param_types: HashMap<&str, Vec<Option<&str>>> = HashMap::new();
+        collect_importer_command_param_types(importer, alias, &entity_names, &mut param_types);
+
+        // A surface reads through the name its own `context`/`facing` bound.
+        for surface in module_blocks(importer, BlockKind::Surface) {
+            let mut bound: HashMap<&str, &str> = HashMap::new();
+            for item in &surface.items {
+                if let BlockItemKind::Clause { keyword, value } = &item.kind {
+                    if keyword == "context" || keyword == "facing" {
+                        qualified_context_binding(value, alias, &entity_names, &mut bound);
+                    }
+                }
+            }
+            if bound.is_empty() {
+                continue;
+            }
+            for item in &surface.items {
+                collect_bound_field_refs_from_item(&item.kind, &bound, &mut refs);
+            }
+        }
+
+        // A rule reads through the name its trigger bound.
+        for rule in module_blocks(importer, BlockKind::Rule) {
+            let bound = rule_trigger_bindings(rule, alias, &param_types);
+            if bound.is_empty() {
+                continue;
+            }
+            for item in &rule.items {
+                collect_bound_field_refs_from_item(&item.kind, &bound, &mut refs);
+            }
+        }
+
+        for f in refs {
             if imported_field_names.contains(f) {
                 out.referenced_fields.insert(f.to_string());
             }
         }
     }
+
 
     out
 }
@@ -5226,6 +5338,49 @@ fn collect_qualified_created(
 /// qualified subject types the binding directly; or a local trigger the
 /// importer owns whose parameters its own surface typed to a qualified imported
 /// entity (`context t: alias/Entity`, then `provides: LocalTrigger(t)`, #65).
+/// Rule bindings typed to an imported entity by the trigger the rule subscribes
+/// to, mapped positionally against `param_types`.
+///
+/// The same resolution [`collect_witnessed_transition`] does for its own
+/// `when:` clause, over a parameter table built for every imported entity
+/// rather than the status-bearing ones. A qualified `alias/Trigger` names an
+/// imported trigger; a bare `Trigger` names one the importer owns whose
+/// parameters its surface typed to an imported entity (#65).
+fn rule_trigger_bindings<'a>(
+    rule: &'a BlockDecl,
+    alias: &str,
+    param_types: &HashMap<&'a str, Vec<Option<&'a str>>>,
+) -> HashMap<&'a str, &'a str> {
+    let mut bound: HashMap<&str, &str> = HashMap::new();
+    for item in &rule.items {
+        let BlockItemKind::Clause { keyword, value } = &item.kind else {
+            continue;
+        };
+        if keyword != "when" {
+            continue;
+        }
+        let Expr::Call { function, args, .. } = value else {
+            continue;
+        };
+        let trigger_name = match function.as_ref() {
+            Expr::QualifiedName(q) if q.qualifier.as_deref() == Some(alias) => Some(&q.name),
+            Expr::Ident(id) => Some(&id.name),
+            _ => None,
+        };
+        let Some(name) = trigger_name else { continue };
+        let Some(params) = param_types.get(name.as_str()) else {
+            continue;
+        };
+        for (arg, param) in args.iter().zip(params) {
+            if let (CallArg::Positional(Expr::Ident(b)), Some(entity)) = (arg, param) {
+                bound.insert(b.name.as_str(), entity);
+            }
+        }
+    }
+    bound
+}
+
+
 fn collect_witnessed_transition(
     rule: &BlockDecl,
     alias: &str,
@@ -8719,6 +8874,89 @@ surface AccountManagement {
         assert!(rc.referenced_fields.contains("due_at"));
         let other = collect_reverse_contributions(&importer, "other", &imported);
         assert!(!other.referenced_fields.contains("due_at"));
+    }
+
+    #[test]
+    fn reverse_contributions_credit_field_read_through_a_context_binding() {
+        let imported =
+            module_of("entity Shelf {\n  name: String\n  copies: Copy with shelf = this\n}\n");
+        // `copies` is read as `shelf.copies`, where `shelf` is bound by the
+        // surface's own `context` to an imported entity. That is the ordinary
+        // way a surface reads an imported relationship — the qualified form
+        // `shelves/Shelf.copies` never appears — so it must be credited just as
+        // a qualified reference is.
+        let importer = module_of(
+            "use \"./s.allium\" as shelves\nsurface ShelfView {\n  context shelf: shelves/Shelf\n  exposes:\n    for c in shelf.copies:\n      c.title\n}\n",
+        );
+        let rc = collect_reverse_contributions(&importer, "shelves", &imported);
+        assert!(rc.referenced_fields.contains("copies"));
+        let other = collect_reverse_contributions(&importer, "other", &imported);
+        assert!(!other.referenced_fields.contains("copies"));
+    }
+
+    #[test]
+    fn reverse_contributions_credit_field_read_through_a_facing_binding() {
+        let imported = module_of("entity Reader {\n  handle: String\n}\n");
+        // `facing` types a binding the same way `context` does, so the credit
+        // must not depend on which keyword introduced it.
+        let importer = module_of(
+            "use \"./r.allium\" as people\nsurface Desk {\n  facing reader: people/Reader\n  exposes:\n    reader.handle\n}\n",
+        );
+        let rc = collect_reverse_contributions(&importer, "people", &imported);
+        assert!(rc.referenced_fields.contains("handle"));
+    }
+
+    #[test]
+    fn reverse_contributions_credit_field_read_through_a_refined_binding() {
+        let imported = module_of("entity Shelf {\n  name: String\n  copies: Copy\n}\n");
+        // `context b: alias/E where …` types `b` exactly as the bare form does
+        // (#76 family); the refinement must not cost the credit.
+        let importer = module_of(
+            "use \"./s.allium\" as shelves\nsurface ShelfView {\n  context shelf: shelves/Shelf where name = \"a\"\n  exposes:\n    shelf.copies\n}\n",
+        );
+        let rc = collect_reverse_contributions(&importer, "shelves", &imported);
+        assert!(rc.referenced_fields.contains("copies"));
+    }
+
+    #[test]
+    fn reverse_contributions_ignore_binding_to_a_name_that_is_no_entity() {
+        let imported = module_of("entity Shelf {\n  copies: Copy\n}\n");
+        // The alias resolves, but `Ledger` is not an entity of the imported
+        // module, so the binding types nothing and the read credits nothing.
+        let importer = module_of(
+            "use \"./s.allium\" as shelves\nsurface ShelfView {\n  context led: shelves/Ledger\n  exposes:\n    led.copies\n}\n",
+        );
+        let rc = collect_reverse_contributions(&importer, "shelves", &imported);
+        assert!(!rc.referenced_fields.contains("copies"));
+    }
+
+    #[test]
+    fn reverse_contributions_credit_field_read_through_a_rule_trigger_binding() {
+        let imported = module_of("entity Shelf {\n  copies: Copy with shelf = this\n}\n");
+        // The read is in a rule, not a surface: `shelf` is bound by the rule's
+        // trigger, which the importer's own surface typed by passing its
+        // `context` binding as the argument (#65's shape, one channel over).
+        let importer = module_of(
+            "use \"./s.allium\" as shelves\nsurface Desk {\n  context shelf: shelves/Shelf\n  provides:\n    Audit(shelf)\n}\nrule DoAudit {\n  when: Audit(shelf)\n  ensures:\n    for c in shelf.copies:\n      Noted(copy: c)\n}\n",
+        );
+        let rc = collect_reverse_contributions(&importer, "shelves", &imported);
+        assert!(rc.referenced_fields.contains("copies"));
+        let other = collect_reverse_contributions(&importer, "other", &imported);
+        assert!(!other.referenced_fields.contains("copies"));
+    }
+
+    #[test]
+    fn reverse_contributions_ignore_a_field_the_importer_never_reads() {
+        let imported =
+            module_of("entity Shelf {\n  copies: Copy\n  catalogue_key: String\n}\n");
+        // Precision: crediting one field of a bound entity must not credit the
+        // entity's other fields, or the warning stops meaning anything.
+        let importer = module_of(
+            "use \"./s.allium\" as shelves\nsurface ShelfView {\n  context shelf: shelves/Shelf\n  exposes:\n    shelf.copies\n}\n",
+        );
+        let rc = collect_reverse_contributions(&importer, "shelves", &imported);
+        assert!(rc.referenced_fields.contains("copies"));
+        assert!(!rc.referenced_fields.contains("catalogue_key"));
     }
 
     #[test]
