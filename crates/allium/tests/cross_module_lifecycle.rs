@@ -1110,3 +1110,188 @@ fn bad_alias_on_a_collection_is_still_diagnosed() {
         "an unknown alias on a collection must still be diagnosed.\n{stdout}"
     );
 }
+
+// ===========================================================================
+// A field read across the boundary through a *bound* name. A surface writes
+// `context shelf: shelves/Shelf` and reads `shelf.copies`; a rule subscribing
+// to a trigger that surface provides reads the same relationship off its own
+// trigger binding. The qualified spelling `shelves/Shelf.copies` appears at
+// neither site, so the qualified pass credits nothing and the imported module
+// reports a field unused that its only reader iterates. Found downstream in
+// friend-mesh, where `Group.messages` is read exactly this way.
+//
+// Same oracles as everywhere above: the merged single file is the control, the
+// imported module alone keeps its warning, and crediting needs a real `use`
+// edge.
+// ===========================================================================
+
+fn unused_fields(stdout: &str) -> Vec<String> {
+    parse_diagnostics(stdout)
+        .into_iter()
+        .filter(|d| d.code == "allium.field.unused")
+        .map(|d| d.message)
+        .collect()
+}
+
+const SHELF_BOUND: &str = r#"-- allium: 3
+
+entity Shelf {
+    name: String
+    copies: Copy with shelf = this
+    catalogue_key: String
+}
+
+entity Copy {
+    title: String
+    shelf: Shelf
+}
+"#;
+
+const CONSOLE_BOUND: &str = r#"-- allium: 3
+
+use "./shelf.allium" as shelves
+
+surface ShelfView {
+    context shelf: shelves/Shelf
+
+    exposes:
+        shelf.name
+        shelf.copies
+}
+"#;
+
+const MERGED_BOUND: &str = r#"-- allium: 3
+
+entity Shelf {
+    name: String
+    copies: Copy with shelf = this
+    catalogue_key: String
+}
+
+entity Copy {
+    title: String
+    shelf: Shelf
+}
+
+surface ShelfView {
+    context shelf: Shelf
+
+    exposes:
+        shelf.name
+        shelf.copies
+}
+"#;
+
+#[test]
+fn bound_context_read_credits_imported_field() {
+    let dir = TempDir::new("bound-pair");
+    dir.write("shelf.allium", SHELF_BOUND);
+    dir.write("console.allium", CONSOLE_BOUND);
+
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        !unused_fields(&stdout).iter().any(|m| m.contains("Shelf.copies")),
+        "`shelf.copies` is read off a context binding typed to the imported entity.\n{stdout}"
+    );
+}
+
+#[test]
+fn bound_read_leaves_an_unreferenced_field_reported() {
+    // Precision: crediting `copies` must not credit the rest of the entity.
+    let dir = TempDir::new("bound-precision");
+    dir.write("shelf.allium", SHELF_BOUND);
+    dir.write("console.allium", CONSOLE_BOUND);
+
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        unused_fields(&stdout).iter().any(|m| m.contains("Shelf.catalogue_key")),
+        "`catalogue_key` is read by nobody and must still be reported.\n{stdout}"
+    );
+}
+
+#[test]
+fn bound_read_matches_the_merged_single_file_control() {
+    let pair = TempDir::new("bound-pair-oracle");
+    pair.write("shelf.allium", SHELF_BOUND);
+    pair.write("console.allium", CONSOLE_BOUND);
+    let (_ok, pair_out) = run("check", &[pair.path().to_str().unwrap()]);
+
+    let one = TempDir::new("bound-merged");
+    one.write("merged.allium", MERGED_BOUND);
+    let (_ok, one_out) = run("check", &[&one.file("merged.allium")]);
+
+    let mut from_pair = unused_fields(&pair_out);
+    let mut from_one = unused_fields(&one_out);
+    from_pair.sort();
+    from_one.sort();
+    assert_eq!(
+        from_pair, from_one,
+        "the pair must report exactly what the equivalent one-file spec reports"
+    );
+}
+
+#[test]
+fn bound_read_imported_module_alone_keeps_its_warning() {
+    let dir = TempDir::new("bound-alone");
+    dir.write("shelf.allium", SHELF_BOUND);
+
+    let (_ok, stdout) = run("check", &[&dir.file("shelf.allium")]);
+    assert!(
+        unused_fields(&stdout).iter().any(|m| m.contains("Shelf.copies")),
+        "checked alone, shelf.allium has no reader for `copies` and must still warn.\n{stdout}"
+    );
+}
+
+#[test]
+fn gate_no_import_edge_means_no_field_credit() {
+    // The `gate_no_import_edge_means_no_credit` guard, for the bound read.
+    let dir = TempDir::new("bound-no-edge");
+    dir.write("shelf.allium", SHELF_BOUND);
+    dir.write(
+        "unrelated.allium",
+        "-- allium: 3\n\nsurface Stray {\n    context shelf: Shelf\n\n    exposes:\n        shelf.copies\n}\n",
+    );
+
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        unused_fields(&stdout).iter().any(|m| m.contains("Shelf.copies")),
+        "without a `use` edge, a co-supplied file's bound read must not credit.\n{stdout}"
+    );
+}
+
+#[test]
+fn rule_trigger_binding_read_credits_imported_field() {
+    // The read is in a rule: `shelf` is bound by the trigger, which the
+    // importer's own surface typed by passing its `context` binding as the
+    // argument. This is friend-mesh's `Group.members` shape.
+    let dir = TempDir::new("bound-rule");
+    dir.write("shelf.allium", SHELF_BOUND);
+    dir.write(
+        "console.allium",
+        r#"-- allium: 3
+
+use "./shelf.allium" as shelves
+
+surface Desk {
+    context shelf: shelves/Shelf
+
+    provides:
+        Audit(shelf)
+}
+
+rule DoAudit {
+    when: Audit(shelf)
+
+    ensures:
+        for c in shelf.copies:
+            Noted(copy: c)
+}
+"#,
+    );
+
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        !unused_fields(&stdout).iter().any(|m| m.contains("Shelf.copies")),
+        "a rule binding typed by its trigger reads `shelf.copies`.\n{stdout}"
+    );
+}
