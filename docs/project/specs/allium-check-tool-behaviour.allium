@@ -324,6 +324,33 @@ rule UnresolvedUsePathWarnsInMultiFileMode {
     ensures: FindingMessage includes path
 }
 
+-- A use path has three states, not two. Resolved: a file in the check set.
+-- Knowable but out of set: a local file present on disk (the single-file case,
+-- checking one member of a pair) or a registry coordinate (github.com/org/spec/sha),
+-- an immutable remote reference never expected on disk. Broken: a local .allium
+-- path that resolves neither in the check set nor on disk. References through a
+-- broken import are diagnosed per reference, independent of the use-line
+-- unresolvedPath warning that a per-line allium-ignore can suppress (#87).
+
+rule ReferenceThroughBrokenUsePathWarns {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: file references alias/Name where a use declaration binds alias
+    requires: the alias's use path is a local .allium reference
+    requires: the path resolves neither in the check set nor on disk
+
+    ensures: FindingObserved(code: "allium.reference.unresolvedImport", severity: warning)
+    ensures: FindingMessage names the reference and the unresolved path
+    ensures: the finding survives a use-line allium-ignore of allium.use.unresolvedPath
+}
+
+rule ReferenceThroughKnowableOutOfSetImportStaysSilent {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: file references alias/Name where a use declaration binds alias
+    requires: the alias's use path is present on disk but outside the check set, or is a registry coordinate
+
+    ensures: FindingNotObserved(code: "allium.reference.unresolvedImport", name: Name)
+}
+
 rule QualifiedTriggerCallIsValidTriggerForm {
     when: CheckCommandInvokedWithInputs(inputs)
     requires: rule when clause is qualified trigger call (e.g. alias/Trigger(params))
@@ -339,6 +366,26 @@ rule CrossModuleTriggerEmissionSatisfiesSubscription {
     requires: file_b has use declaration mapping alias to file_a
 
     ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
+}
+
+-- A rule emits a trigger through any bare call statement in its ensures block,
+-- in any position and not only the first, and through an otherwise: emission on
+-- a requires guard. Every such emission counts locally and exports to importers,
+-- so a listener of a second-position, post-assignment, or otherwise: emission is
+-- reachable and its qualified reference resolves (#88). Widening the emitted set
+-- can also expose a real ambiguity the checker previously could not see, raising
+-- allium.use.ambiguousReference where two imported modules both emit the trigger
+-- and one did so after the first statement.
+
+rule EmissionInAnyEnsuresPositionExports {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: inputs resolve to multiple files
+    requires: file_a rule emits trigger as a bare call in any ensures position, or via an otherwise: clause
+    requires: file_b listens for trigger qualified via use alias mapping to file_a
+    requires: file_b has use declaration mapping alias to file_a
+
+    ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
+    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: trigger)
 }
 
 rule QualifiedTriggerUnreachableWhenAliasedModuleLacksIt {
@@ -403,9 +450,13 @@ rule UndeclaredImportAliasIsDiagnosedAtEveryReferenceSite {
 
 -- Beyond the alias, the name itself must resolve: with a valid alias whose
 -- target is in the check set, a qualified reference alias/Name where the aliased
--- module offers no such name (a declared type or a referenced trigger) is
--- diagnosed at the reference. Same unified pass, every site (#72 and the
--- name-existence audit). A target outside the check set is unknowable.
+-- module offers no such name is diagnosed at the reference. A module offers its
+-- declared types, its referenced triggers, `config` when it declares a config
+-- block, and each deferred declaration's root name (`deferred Foo` and
+-- `deferred Foo.bar` both offer `Foo`). A foreign-qualified deferred names a
+-- construct another module owns (`deferred other/Foo`) and is deliberately not
+-- offered. Same unified pass, every site (#72, #89 and the name-existence
+-- audit). A target outside the check set is unknowable.
 --
 -- One reference form is exempt: a name in a collection-consuming position
 -- (a `for … in` / `in` / `where` iterable, or a `let` value) is an entity
@@ -419,7 +470,7 @@ rule UnknownImportedNameIsDiagnosedAtEveryReferenceSite {
     when: CheckCommandInvokedWithInputs(inputs)
     requires: inputs resolve to multiple files
     requires: a qualified reference alias/Name where a use declaration binds alias to a file in the check set
-    requires: the aliased module offers no declared type or referenced trigger named Name
+    requires: the aliased module offers no name named Name (no declared type, referenced trigger, config block, or deferred root)
     requires: the reference is not in a collection-consuming position
 
     ensures: FindingObserved(code: "allium.reference.unknownName", severity: warning)
@@ -439,6 +490,40 @@ rule QualifiedCollectionReferenceNotFlagged {
     requires: a use declaration binds alias to a file in the check set
 
     ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
+}
+
+-- Config and deferred names resolve across the boundary. alias/config.param is
+-- the documented config-reference form (a config default reading an imported
+-- module's config value); alias/DeferredName names a deferred the module
+-- declares. Both previously drew a false unknownName (#89).
+
+rule QualifiedConfigReferenceResolves {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: a qualified reference alias/config where a use declaration binds alias to a file in the check set
+    requires: the aliased module declares a config block
+
+    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: config)
+}
+
+rule QualifiedDeferredReferenceResolves {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: a qualified reference alias/Name where a use declaration binds alias to a file in the check set
+    requires: the aliased module declares deferred Name, or deferred Name.field with root Name
+
+    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
+}
+
+-- Field-level resolution of alias/config.field is not yet implemented: the
+-- qualified-reference node carries config, not the member chain, so a mistyped
+-- config field is silent here rather than flagged. Chosen false negative;
+-- config rules 46/47 (field existence, type) are a follow-up (#89).
+
+rule QualifiedConfigFieldNotCheckedAtThisLayer {
+    when: CheckCommandInvokedWithInputs(inputs)
+    requires: a qualified reference alias/config.field where the aliased module declares a config block
+    requires: the config block declares no parameter named field
+
+    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: field)
 }
 
 rule WitnessedTransitionCreditsImportedLifecycle {
