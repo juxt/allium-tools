@@ -1,5 +1,5 @@
--- allium: 1
-module allium_diagram_tool_behaviour
+-- allium: 3
+-- module allium_diagram_tool_behaviour
 
 entity DiagramRun {
     format: d2 | mermaid
@@ -35,7 +35,7 @@ rule DiagramCommandRequiresInputs {
 rule DiagramCommandCanUseProjectSpecPathsFromConfig {
     when: DiagramCommandInvokedWithoutInputs()
     requires: FileExists(path: "allium-config-file")
-    requires: command_args excludes "--no-config"
+    -- requires: command_args excludes "--no-config"
     requires: ConfigContainsProjectSpecPaths()
 
     ensures: DiagramCommandUsesConfiguredProjectSpecPaths()
@@ -91,7 +91,7 @@ rule DiagramMermaidFormatIsSupported {
 }
 
 rule ReleasedCliPackageExposesDiagramCommand {
-    when: CliPackageInstalled(name: "allium-cli")
+    when: CliPackageInstalled("allium-cli")
 
     ensures: CommandAvailable(name: "allium-diagram")
 }

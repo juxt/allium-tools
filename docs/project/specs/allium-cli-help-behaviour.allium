@@ -1,4 +1,4 @@
--- allium: 1
+-- allium: 3
 -- allium-cli-help-behaviour.allium
 -- Scope: Top-level `allium` CLI dispatch and help behaviour (crates/allium).
 -- Includes:

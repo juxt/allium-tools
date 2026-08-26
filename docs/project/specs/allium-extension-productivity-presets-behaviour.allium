@@ -1,5 +1,5 @@
--- allium: 1
-module allium_extension_productivity_presets_behaviour
+-- allium: 3
+-- module allium_extension_productivity_presets_behaviour
 
 entity DiagnosticsProfile {
     value: custom | strict_authoring | legacy_migration | doc_writing
@@ -11,27 +11,27 @@ entity Finding {
 }
 
 rule StrictAuthoringProfileForcesStrictMode {
-    when: ProfileSelected(profile: strict_authoring)
+    when: ProfileSelected(strict_authoring)
 
     ensures: DiagnosticsProfile.created(value: strict_authoring)
     ensures: DiagnosticsModeApplied(value: strict)
 }
 
 rule LegacyMigrationProfileForcesRelaxedMode {
-    when: ProfileSelected(profile: legacy_migration)
+    when: ProfileSelected(legacy_migration)
 
     ensures: DiagnosticsProfile.created(value: legacy_migration)
     ensures: DiagnosticsModeApplied(value: relaxed)
 }
 
 rule ApplyMissingEnsuresFixesCommand {
-    when: CommandInvoked(name: "allium.applySafeFixes.missingEnsures")
+    when: CommandInvoked("allium.applySafeFixes.missingEnsures")
 
     ensures: SafeFixesApplied(category: missing_ensures)
 }
 
 rule ApplyTemporalGuardFixesCommand {
-    when: CommandInvoked(name: "allium.applySafeFixes.temporalGuards")
+    when: CommandInvoked("allium.applySafeFixes.temporalGuards")
 
     ensures: SafeFixesApplied(category: temporal_guards)
 }

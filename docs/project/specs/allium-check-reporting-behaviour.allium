@@ -1,5 +1,5 @@
--- allium: 1
-module allium_check_reporting_behaviour
+-- allium: 3
+-- module allium_check_reporting_behaviour
 
 entity CheckFindingFingerprint {
     value: String

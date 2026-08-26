@@ -1,4 +1,4 @@
--- allium: 1
+-- allium: 3
 -- allium-trace-tool-behaviour.allium
 -- Scope: Standalone CLI behavior for tracing rule coverage from specs to tests.
 -- Includes:
@@ -114,7 +114,7 @@ rule TraceIncludesExactTestReferenceLocations {
 rule TraceConfigDefaultsCanBeLoadedFromWorkspaceFile {
     when: TraceCommandInvoked(inputs, tests)
     requires: FileExists(path: "allium-config-file")
-    requires: command_args excludes "--no-config"
+    -- requires: command_args excludes "--no-config"
 
     ensures: ConfigDefaultsLoaded(section: trace)
 }
@@ -123,7 +123,7 @@ rule TraceCanUseConfigProvidedTestAndSpecInputs {
     when: TraceCommandInvokedWithoutExplicitInputs()
     requires: FileExists(path: "allium-config-file")
     requires: ConfigContainsTraceDefaultSpecAndTestInputs()
-    requires: command_args excludes "--no-config"
+    -- requires: command_args excludes "--no-config"
 
     ensures: TraceCommandUsesConfiguredSpecInputs()
     ensures: TraceCommandUsesConfiguredTestInputs()

@@ -19,6 +19,15 @@ entity SingleFileRun {
     input: String
 }
 
+-- The single-file commands' external stimuli. Declared so each listener
+-- resolves its trigger, and the run it completes carries the run entity.
+surface SingleFileCli {
+    provides:
+        SingleFileCommandInvoked(argument_count)
+        SingleFileCommandInvokedWithInput(input)
+        SingleFileRunCompleted(run: SingleFileRun)
+}
+
 -- The parser is error-tolerant: a spec that does not parse still yields a
 -- partial module plus diagnostics rather than failing outright. The exit
 -- code and the diagnostics channel are the only signals that distinguish a

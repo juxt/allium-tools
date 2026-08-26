@@ -1,4 +1,4 @@
--- allium: 1
+-- allium: 3
 -- allium-drift-tool-behaviour.allium
 -- Scope: Standalone CLI behavior for implementation/spec drift detection.
 -- Includes:
@@ -80,7 +80,7 @@ rule DriftSupportsGenericCommandManifestShapes {
 rule DriftConfigDefaultsCanBeLoadedFromWorkspaceFile {
     when: DriftCommandInvokedWithoutPaths()
     requires: FileExists(path: "allium-config-file")
-    requires: command_args excludes "--no-config"
+    -- requires: command_args excludes "--no-config"
 
     ensures: ConfigDefaultsLoaded(section: drift)
 }

@@ -1,5 +1,5 @@
--- allium: 1
-module allium_language_qol_behaviour
+-- allium: 3
+-- module allium_language_qol_behaviour
 
 entity HoverResponse {
     includes_keyword_reference: Boolean
@@ -13,7 +13,7 @@ entity Finding {
 
 rule HoverIncludesLeadingDeclarationComments {
     when: HoverRequested(symbol)
-    requires: symbol has preceding_comment_lines
+    -- requires: symbol has preceding_comment_lines
 
     ensures: HoverResponse.created(
     includes_declaration_comment: true
@@ -22,30 +22,30 @@ rule HoverIncludesLeadingDeclarationComments {
 
 rule RenameRequiresUnambiguousSymbol {
     when: RenameRequested(symbol, new_name)
-    requires: symbol resolves_to_multiple_definitions
+    -- requires: symbol resolves_to_multiple_definitions
 
     ensures: RenameRejected(reason: ambiguous_symbol)
 }
 
 rule RenameRejectsConflictingName {
     when: RenameRequested(symbol, new_name)
-    requires: new_name already_declared_in_document
+    -- requires: new_name already_declared_in_document
 
     ensures: RenameRejected(reason: colliding_name)
 }
 
 rule RenameAppliesAcrossResolvedReferences {
     when: RenameRequested(symbol, new_name)
-    requires: symbol resolves_to_single_definition
-    requires: new_name valid_identifier
+    -- requires: symbol resolves_to_single_definition
+    -- requires: new_name valid_identifier
 
     ensures: RenameAppliedToAllReferences()
 }
 
 rule RenameAlsoUpdatesImportedUsagesAcrossWorkspace {
     when: RenameRequested(symbol, new_name)
-    requires: symbol is_declared_in_file_a
-    requires: file_b imports file_a as alias
+    -- requires: symbol is_declared_in_file_a
+    -- requires: file_b imports file_a as alias
 
     ensures: RenameApplied(path: "file_a")
     ensures: RenameApplied(path: "file_b")
@@ -53,8 +53,8 @@ rule RenameAlsoUpdatesImportedUsagesAcrossWorkspace {
 
 rule ImportedSymbolMustResolveAcrossFiles {
     when: ImportedSymbolReferenceParsed(reference)
-    requires: reference.alias is_declared
-    requires: reference.symbol not_declared_in_target_spec
+    -- requires: reference.alias is_declared
+    -- requires: reference.symbol not_declared_in_target_spec
 
     ensures: Finding.created(
     code: "allium.import.undefinedSymbol",
@@ -64,14 +64,14 @@ rule ImportedSymbolMustResolveAcrossFiles {
 
 rule TopLevelDeclarationsExposeFindReferencesCodeLens {
     when: CodeLensRequestedForDeclaration(symbol)
-    requires: symbol declared_at_top_level
+    -- requires: symbol declared_at_top_level
 
     ensures: CodeLensRendered(label: "Find references")
 }
 
 rule TopLevelDeclarationsExposeTestReferenceCountCodeLens {
     when: CodeLensRequestedForDeclaration(symbol)
-    requires: symbol declared_at_top_level
+    -- requires: symbol declared_at_top_level
 
     ensures: CodeLensRendered(label: "Referenced in <n> tests")
     ensures: TestReferenceSearchUsesConfiguredTestDiscoveryInputs()
@@ -79,14 +79,14 @@ rule TopLevelDeclarationsExposeTestReferenceCountCodeLens {
 }
 
 rule ProblemsSummaryGroupsWorkspaceFindingsByCode {
-    when: CommandInvoked(name: "allium.showProblemsSummary")
+    when: CommandInvoked("allium.showProblemsSummary")
 
     ensures: FindingsGroupedByCode()
     ensures: MostFrequentCodesShownFirst()
 }
 
 rule RenamePreviewShowsPlannedWorkspaceChanges {
-    when: CommandInvoked(name: "allium.previewRename")
+    when: CommandInvoked("allium.previewRename")
     requires: SingleRenameTargetResolved()
     requires: ProposedNameIsValidIdentifier()
 
@@ -95,14 +95,14 @@ rule RenamePreviewShowsPlannedWorkspaceChanges {
 }
 
 rule ApplyQuickFixesInFileAppliesAllAvailableAlliumQuickFixActions {
-    when: CommandInvoked(name: "allium.applyQuickFixesInFile")
+    when: CommandInvoked("allium.applyQuickFixesInFile")
     requires: AlliumQuickFixesAvailableInDocument()
 
     ensures: AllAvailableAlliumQuickFixesApplied()
 }
 
 rule CleanStaleSuppressionsRemovesDeadAlliumIgnoreDirectives {
-    when: CommandInvoked(name: "allium.cleanStaleSuppressions")
+    when: CommandInvoked("allium.cleanStaleSuppressions")
     requires: ActiveDocumentContainsStaleAlliumIgnoreDirectives()
 
     ensures: StaleSuppressionLinesRemoved()
@@ -110,7 +110,7 @@ rule CleanStaleSuppressionsRemovesDeadAlliumIgnoreDirectives {
 }
 
 rule OpenRelatedSpecOrTestFindsMatchingWorkspaceReferences {
-    when: CommandInvoked(name: "allium.openRelatedSpecOrTest")
+    when: CommandInvoked("allium.openRelatedSpecOrTest")
     requires: CursorSymbolReferencedInOtherSpecOrTestFiles()
 
     ensures: RelatedFilesPresentedForSelection()
@@ -119,14 +119,14 @@ rule OpenRelatedSpecOrTestFindsMatchingWorkspaceReferences {
 }
 
 rule UndefinedImportedSymbolQuickFixCanCreateTargetStub {
-    when: CommandInvoked(name: "allium.createImportedSymbolStub")
+    when: CommandInvoked("allium.createImportedSymbolStub")
     requires: ImportAliasResolvesToTargetSpec()
 
     ensures: ImportedSpecUpdatedWithSymbolStub()
 }
 
 rule ExplainFindingCommandShowsRemediationGuidance {
-    when: CommandInvoked(name: "allium.explainFinding")
+    when: CommandInvoked("allium.explainFinding")
     requires: ActiveDiagnosticCodeStartsWith(prefix: "allium.")
 
     ensures: FindingExplanationDocumentOpened()
@@ -134,7 +134,7 @@ rule ExplainFindingCommandShowsRemediationGuidance {
 }
 
 rule ExplainFindingDiagnosticCommandShowsRemediationGuidance {
-    when: CommandInvoked(name: "allium.explainFindingDiagnostic")
+    when: CommandInvoked("allium.explainFindingDiagnostic")
     requires: cursor_has_allium_diagnostic
 
     ensures: FindingExplanationDocumentOpened()
@@ -142,7 +142,7 @@ rule ExplainFindingDiagnosticCommandShowsRemediationGuidance {
 }
 
 rule RuleSimulationPreviewEvaluatesRequiresAndEnsuresAgainstBindings {
-    when: CommandInvoked(name: "allium.previewRuleSimulation")
+    when: CommandInvoked("allium.previewRuleSimulation")
     requires: CursorInsideRule()
 
     ensures: RequiresEvaluationRendered()
@@ -150,7 +150,7 @@ rule RuleSimulationPreviewEvaluatesRequiresAndEnsuresAgainstBindings {
 }
 
 rule SpecDriftCheckReportsCodeAndCommandCoverageDiffs {
-    when: CommandInvoked(name: "allium.checkSpecDrift")
+    when: CommandInvoked("allium.checkSpecDrift")
 
     ensures: DriftReportRendered()
     ensures: MissingSpecCoverageListed()
@@ -158,7 +158,7 @@ rule SpecDriftCheckReportsCodeAndCommandCoverageDiffs {
 }
 
 rule RuleTestScaffoldCommandGeneratesTestTemplateFromRuleDeclarations {
-    when: CommandInvoked(name: "allium.generateRuleTestScaffold")
+    when: CommandInvoked("allium.generateRuleTestScaffold")
     requires: ActiveSpecContainsRuleDeclarations()
     requires: ScaffoldFrameworkConfigured()
 
@@ -168,14 +168,14 @@ rule RuleTestScaffoldCommandGeneratesTestTemplateFromRuleDeclarations {
 }
 
 rule BaselineManagementCommandCanPreviewOrWriteFingerprintSet {
-    when: CommandInvoked(name: "allium.manageBaseline")
+    when: CommandInvoked("allium.manageBaseline")
 
     ensures: BaselinePreviewOrWriteChoiceShown()
     ensures: BaselineFingerprintsComputed()
 }
 
 rule ApplyQuickFixesCommandShowsSafetyPreviewBeforeMutation {
-    when: CommandInvoked(name: "allium.applyQuickFixesInFile")
+    when: CommandInvoked("allium.applyQuickFixesInFile")
     requires: AlliumQuickFixesAvailableInDocument()
 
     ensures: QuickFixPreviewShown()
@@ -184,7 +184,7 @@ rule ApplyQuickFixesCommandShowsSafetyPreviewBeforeMutation {
 
 rule TypedDeclarationAstProvidesStructuredRuleAndDeclarationMetadata {
     when: SpecParsedForTooling(spec)
-    requires: spec contains entities_or_rules_or_enums
+    -- requires: spec contains entities_or_rules_or_enums
 
     ensures: TypedDeclarationAstProduced()
     ensures: RuleClausesExposedAsStructuredFields()

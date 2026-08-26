@@ -1,4 +1,4 @@
--- allium: 1
+-- allium: 3
 -- allium-snippets-behaviour.allium
 -- Scope: Snippet catalog behavior for authoring official Allium language constructs.
 -- Includes:
@@ -9,7 +9,7 @@
 --   - TextMate scope behavior
 
 rule SnippetCatalogIncludesCoreDeclarations {
-    when: SnippetCatalogLoaded(language: allium)
+    when: SnippetCatalogLoaded(allium)
 
     ensures: SnippetAvailable(prefix: entity)
     ensures: SnippetAvailable(prefix: value)
@@ -26,7 +26,7 @@ rule SnippetCatalogIncludesCoreDeclarations {
 }
 
 rule SnippetCatalogIncludesOperationalConstructs {
-    when: SnippetCatalogLoaded(language: allium)
+    when: SnippetCatalogLoaded(allium)
 
     ensures: SnippetAvailable(prefix: deferred)
     ensures: SnippetAvailable(prefix: open-question)

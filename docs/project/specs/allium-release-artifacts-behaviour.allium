@@ -1,4 +1,4 @@
--- allium: 1
+-- allium: 3
 -- allium-release-artifacts-behaviour.allium
 -- Scope: Build and release path for non-Marketplace distribution.
 -- Includes:
@@ -15,7 +15,7 @@ entity ReleaseArtifact {
 }
 
 rule LocalReleaseBuildCreatesArtifacts {
-    when: CommandInvoked(name: "npm run release:artifacts")
+    when: CommandInvoked("npm run release:artifacts")
 
     ensures: ReleaseArtifact.created(kind: vsix, name: "allium-vscode-<version>.vsix")
     ensures: ReleaseArtifact.created(kind: cli_npm_tgz, name: "allium-cli-<version>.tgz")
@@ -23,7 +23,7 @@ rule LocalReleaseBuildCreatesArtifacts {
 }
 
 rule TaggedBuildPublishesReleaseAssets {
-    when: GitTagPushed(pattern: "v*")
+    when: GitTagPushed("v*")
 
     ensures: CIWorkflowExecuted(name: release_artifacts)
     ensures: ReleaseArtifactUploaded(kind: vsix)
@@ -31,14 +31,14 @@ rule TaggedBuildPublishesReleaseAssets {
 }
 
 rule ManualBuildUploadsArtifacts {
-    when: WorkflowDispatched(name: release_artifacts)
+    when: WorkflowDispatched(release_artifacts)
 
     ensures: ReleaseArtifactUploaded(kind: vsix)
     ensures: ReleaseArtifactUploaded(kind: cli_npm_tgz)
 }
 
 rule WorkspaceUnitTestStageIsShellGlobIndependent {
-    when: CommandInvoked(name: "npm run test")
+    when: CommandInvoked("npm run test")
 
     ensures: CompiledTestFilesDiscoveredByScript(path: "scripts/run-node-tests.mjs")
     ensures: UnitTestsExecutedInLinuxShellWithoutGlobstarAssumption()

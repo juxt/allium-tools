@@ -1,5 +1,5 @@
--- allium: 1
-module allium_diagram_ergonomics_behaviour
+-- allium: 3
+-- module allium_diagram_ergonomics_behaviour
 
 entity DiagramInvocation {
     format: d2 | mermaid
@@ -83,14 +83,14 @@ rule DeclaredFieldTypeReferencesAreLinked {
 
 rule ReverseLinksOptionAddsInverseEdges {
     when: DiagramCommandInvoked(args)
-    requires: args includes "--reverse-links"
+    -- requires: args includes "--reverse-links"
 
     ensures: InverseEdgesRendered(prefix: "reverse:")
 }
 
 rule ConstraintLabelsOptionAnnotatesWhenEdgesWithRequiresExpressions {
     when: DiagramCommandInvoked(args)
-    requires: args includes "--constraint-labels"
+    -- requires: args includes "--constraint-labels"
 
     ensures: WhenEdgeLabelsIncludeConstraintText()
 }

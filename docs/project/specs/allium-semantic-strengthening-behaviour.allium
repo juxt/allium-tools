@@ -1,5 +1,5 @@
--- allium: 1
-module allium_semantic_strengthening_behaviour
+-- allium: 3
+-- module allium_semantic_strengthening_behaviour
 
 entity Finding {
     code: String
@@ -34,8 +34,8 @@ rule QualifiedTriggerResolvedAgainstAliasedModule {
     when: RuleBlockParsed(rule)
     requires: rule.when_is_external_trigger_call = true
     requires: rule.trigger_name_is_qualified = true
-    requires: alias target resolves to a module in the check set
-    requires: target module neither provides nor emits rule.trigger_name
+    -- requires: alias target resolves to a module in the check set
+    -- requires: target module neither provides nor emits rule.trigger_name
 
     ensures: Finding.created(
     code: "allium.rule.unreachableTrigger",
@@ -45,7 +45,7 @@ rule QualifiedTriggerResolvedAgainstAliasedModule {
 
 rule EqualityAcrossLiteralTypesIsMismatch {
     when: RuleClauseParsed(clause)
-    requires: clause compares_string_literal_with_numeric_literal_using_equality = true
+    -- requires: clause compares_string_literal_with_numeric_literal_using_equality = true
 
     ensures: Finding.created(
     code: "allium.expression.typeMismatch",

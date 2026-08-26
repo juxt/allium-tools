@@ -1,5 +1,5 @@
--- allium: 1
-module allium_extension_diagram_preview_behaviour
+-- allium: 3
+-- module allium_extension_diagram_preview_behaviour
 
 entity DiagramPreviewSession {
     scope: active_file | workspace
@@ -7,19 +7,19 @@ entity DiagramPreviewSession {
 }
 
 rule DiagramCommandPromptsForScope {
-    when: CommandInvoked(name: "allium.generateDiagram")
+    when: CommandInvoked("allium.generateDiagram")
 
     ensures: ScopePickerShown(options: active_file | workspace)
 }
 
 rule DiagramCommandPromptsForFormat {
-    when: CommandInvoked(name: "allium.generateDiagram")
+    when: CommandInvoked("allium.generateDiagram")
 
     ensures: FormatPickerShown(options: d2 | mermaid)
 }
 
 rule DiagramCommandBuildsMergedWorkspaceDiagram {
-    when: CommandInvoked(name: "allium.generateDiagram")
+    when: CommandInvoked("allium.generateDiagram")
     requires: UserSelected(scope: workspace)
 
     ensures: DiagramPreviewSession.created(scope: workspace)
@@ -28,7 +28,7 @@ rule DiagramCommandBuildsMergedWorkspaceDiagram {
 }
 
 rule DiagramCommandBuildsActiveFileDiagram {
-    when: CommandInvoked(name: "allium.generateDiagram")
+    when: CommandInvoked("allium.generateDiagram")
     requires: UserSelected(scope: active_file)
 
     ensures: DiagramPreviewSession.created(scope: active_file)
@@ -36,14 +36,14 @@ rule DiagramCommandBuildsActiveFileDiagram {
 }
 
 rule DiagramPreviewCopyAction {
-    when: PreviewActionInvoked(name: copy)
+    when: PreviewActionInvoked(copy)
 
     ensures: ClipboardWritten()
     ensures: UserInformed(message: "Allium diagram copied.")
 }
 
 rule DiagramPreviewExportAction {
-    when: PreviewActionInvoked(name: export)
+    when: PreviewActionInvoked(export)
 
     ensures: SaveDialogShown()
     ensures: FileWritten(path: "allium-diagram.<ext>")
@@ -51,14 +51,14 @@ rule DiagramPreviewExportAction {
 }
 
 rule DiagramPreviewNodeJumpAction {
-    when: PreviewActionInvoked(name: reveal_node)
+    when: PreviewActionInvoked(reveal_node)
 
     ensures: SourceNodeLocationResolved()
     ensures: EditorRevealedAtNodeLocation()
 }
 
 rule DiagramPreviewEdgeJumpAction {
-    when: PreviewActionInvoked(name: reveal_edge)
+    when: PreviewActionInvoked(reveal_edge)
 
     ensures: SourceEdgeLocationResolved()
     ensures: EditorRevealedAtEdgeLocation()

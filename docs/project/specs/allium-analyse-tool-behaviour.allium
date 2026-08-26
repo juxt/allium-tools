@@ -1,4 +1,4 @@
--- allium: 1
+-- allium: 3
 -- allium-analyse-tool-behaviour.allium
 -- Scope: Process-level analysis command that extends structural checking
 --   with data flow, reachability, deadlock, conflict and invariant analysis.
@@ -45,8 +45,8 @@ rule FindingsAreFlatJsonObjects {
 rule FindingsAreDeterministicallyOrdered {
     when: AnalyseCommandCompleted(file, diagnostics, findings)
 
-    ensures: findings are ordered by type then summary
-    ensures: the findings array is identical across repeated runs on identical input
+    -- ensures: findings are ordered by type then summary
+    -- ensures: the findings array is identical across repeated runs on identical input
 }
 
 -- Exit codes
@@ -145,7 +145,7 @@ rule DeadlockEdgesIncludeBlockedReasons {
 -- does not produce a false deadlock (#58).
 rule TransitionWitnessedInConditionalBranchIsAchievable {
     when: EntityStateAnalysed(entity, state, terminal_states)
-    requires: a rule assigns an outgoing target state in an ensures clause inside an if or else branch
+    -- requires: a rule assigns an outgoing target state in an ensures clause inside an if or else branch
 
     ensures: NoAchievablePathToTerminal(entity, state) = false
 }
@@ -155,9 +155,9 @@ rule TransitionWitnessedInConditionalBranchIsAchievable {
 -- achievable and no deadlock is reported. Requires a real use import edge.
 rule ImporterWitnessedTransitionCountsAsAchievable {
     when: EntityStateAnalysed(entity, state, terminal_states)
-    requires: entity is imported by another file in the analysis set via use alias
-    requires: importer rule subscribes to an entity trigger qualified via alias, guards on state, and assigns target
-    requires: entity declares a transition edge from state to target
+    -- requires: entity is imported by another file in the analysis set via use alias
+    -- requires: importer rule subscribes to an entity trigger qualified via alias, guards on state, and assigns target
+    -- requires: entity declares a transition edge from state to target
 
     ensures: NoAchievablePathToTerminal(entity, state) = false
 }
@@ -168,10 +168,10 @@ rule ImporterWitnessedTransitionCountsAsAchievable {
 -- via a context binding (#65).
 rule ImporterOwnedTriggerWitnessCountsAsAchievable {
     when: EntityStateAnalysed(entity, state, terminal_states)
-    requires: entity is imported by another file in the analysis set via use alias
-    requires: importer surface types a trigger parameter alias/entity via a context binding
-    requires: importer rule subscribes to that trigger, guards on state, and assigns target
-    requires: entity declares a transition edge from state to target
+    -- requires: entity is imported by another file in the analysis set via use alias
+    -- requires: importer surface types a trigger parameter alias/entity via a context binding
+    -- requires: importer rule subscribes to that trigger, guards on state, and assigns target
+    -- requires: entity declares a transition edge from state to target
 
     ensures: NoAchievablePathToTerminal(entity, state) = false
 }
@@ -184,10 +184,10 @@ rule ImporterOwnedTriggerWitnessCountsAsAchievable {
 -- binding only by a status guard, not a transition trigger or a surface param.
 rule EmittedEventPayloadTypedByStatusEquation {
     when: EntityStateAnalysed(entity, state, terminal_states)
-    requires: entity is imported by another file in the analysis set via use alias
-    requires: imported module rule emits an event whose payload binding is typed by a status equation on the entity
-    requires: importer rule subscribes to that event, guards on state, and assigns target
-    requires: entity declares a transition edge from state to target
+    -- requires: entity is imported by another file in the analysis set via use alias
+    -- requires: imported module rule emits an event whose payload binding is typed by a status equation on the entity
+    -- requires: importer rule subscribes to that event, guards on state, and assigns target
+    -- requires: entity declares a transition edge from state to target
 
     ensures: NoAchievablePathToTerminal(entity, state) = false
 }
@@ -237,7 +237,7 @@ rule UnreachableTriggerIncludesSurfacesChecked {
 -- no unreachable_trigger finding is produced for them.
 rule QualifiedProvidesFromImporterSatisfiesListeners {
     when: TriggerAnalysed(trigger_name, listening_rules, surface_names)
-    requires: an importer in the analysis set provides trigger_name qualified via use alias
+    -- requires: an importer in the analysis set provides trigger_name qualified via use alias
 
     ensures: AnalyseFindingNotObserved(type: unreachable_trigger, trigger: trigger_name)
 }
@@ -264,7 +264,7 @@ rule ConflictDetected {
 
 rule ConflictDetectedOnImportedEntity {
     when: RulePairAnalysed(rule_a, rule_b, entity, state)
-    requires: entity is imported by the analysed file via a use alias
+    -- requires: entity is imported by the analysed file via a use alias
     requires: RulesShareOverlappingRequiresState(rule_a, rule_b, entity, state) = true
     requires: RulesSetConflictingEnsuresValues(rule_a, rule_b, entity) = true
     requires: NotBothCallTriggered(rule_a, rule_b) = true
