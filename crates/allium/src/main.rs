@@ -424,6 +424,15 @@ fn build_cross_module_context(parsed: &[ParsedFile]) -> CrossModuleContext {
                     // broken. Registry coordinates (`github.com/org/spec/sha`)
                     // are immutable remote references that are not expected on
                     // disk; they stay out-of-set, never broken.
+                    //
+                    // This `exists()` makes `check` output depend on the
+                    // filesystem, not just its input files: a wrong-case local
+                    // path reads as present on a case-insensitive filesystem
+                    // (macOS, Windows) and broken on a case-sensitive one
+                    // (Linux CI), so the same spec can diagnose differently by
+                    // platform. The divergence runs in the safe direction: CI
+                    // is the stricter of the two, so nothing dead slips the
+                    // gate that a developer saw as clean.
                     missing_for_file.insert(path_text.clone());
                 }
 
