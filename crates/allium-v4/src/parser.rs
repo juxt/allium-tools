@@ -230,6 +230,45 @@ impl<'s> Parser<'s> {
         }
     }
 
+    /// Capture the NAMES in a `(name [: type], …)` list, for scope. Types are
+    /// consumed but not returned. Empty if there is no `(`.
+    fn capture_params(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !matches!(self.cur().tok, Tok::LParen) {
+            return out;
+        }
+        self.advance(); // (
+        while !matches!(self.cur().tok, Tok::RParen | Tok::Eof) {
+            if let Tok::Ident(n) = &self.cur().tok {
+                out.push(n.clone());
+                self.advance();
+            } else {
+                self.advance();
+                continue;
+            }
+            if matches!(self.cur().tok, Tok::Colon) {
+                self.advance();
+                let mut depth = 0i32;
+                loop {
+                    match &self.cur().tok {
+                        Tok::Eof => break,
+                        Tok::LParen | Tok::LBrace | Tok::LBracket => depth += 1,
+                        Tok::RParen | Tok::RBrace | Tok::RBracket if depth == 0 => break,
+                        Tok::RParen | Tok::RBrace | Tok::RBracket => depth -= 1,
+                        Tok::Comma if depth == 0 => break,
+                        _ => {}
+                    }
+                    self.advance();
+                }
+            }
+            if matches!(self.cur().tok, Tok::Comma) {
+                self.advance();
+            }
+        }
+        self.eat(Tok::RParen);
+        out
+    }
+
     fn parse_item(&mut self) -> Option<Item> {
         let start = self.span();
         let mut modifiers = Vec::new();
@@ -308,9 +347,7 @@ impl<'s> Parser<'s> {
     fn parse_named_typed(&mut self, kind: ItemKind, start: Span) -> Item {
         let mut it = Item::new(kind, start);
         it.name = self.take_name();
-        if matches!(self.cur().tok, Tok::LParen) {
-            self.skip_balanced();
-        }
+        it.params = self.capture_params();
         if matches!(self.cur().tok, Tok::Colon) {
             self.advance();
             it.body = self.read_raw(ITEM_STARTERS, false); // raw type text
@@ -328,9 +365,7 @@ impl<'s> Parser<'s> {
     fn parse_role_pred(&mut self, kind: ItemKind, start: Span) -> Item {
         let mut it = Item::new(kind, start);
         it.name = self.take_name();
-        if matches!(self.cur().tok, Tok::LParen) {
-            self.skip_balanced(); // parameterised role predicate, e.g. `fault f(i, j) means …`
-        }
+        it.params = self.capture_params(); // parameterised role predicate, e.g. `fault f(i, j) means …`
         if self.eat_ident("means") {
             it.body = self.read_raw(ITEM_STARTERS, false);
         }
@@ -341,9 +376,7 @@ impl<'s> Parser<'s> {
     fn parse_action(&mut self, start: Span) -> Item {
         let mut it = Item::new(ItemKind::Action, start);
         it.name = self.take_name();
-        if matches!(self.cur().tok, Tok::LParen) {
-            self.skip_balanced();
-        }
+        it.params = self.capture_params();
         if self.eat_ident("requires") {
             it.requires = self.read_raw(ITEM_STARTERS_PLUS_ENSURES, true);
         }

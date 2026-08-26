@@ -69,6 +69,9 @@ pub struct Item {
     pub kind: ItemKind,
     /// Declared name where the item has one (entity/state/given/action/invariant/guarantee).
     pub name: Option<String>,
+    /// Parameter/argument names in the item's `(…)`, e.g. an action's params or a
+    /// relation's arguments. In scope for this item's predicate bodies.
+    pub params: Vec<String>,
     /// Modifiers seen before the item keyword: `pub`, `abstract`, `readable`.
     pub modifiers: Vec<String>,
     /// Raw predicate span for `means`/`init`/`establish` bodies.
@@ -87,6 +90,7 @@ impl Item {
             span,
             kind,
             name: None,
+            params: Vec::new(),
             modifiers: Vec::new(),
             body: None,
             requires: None,
