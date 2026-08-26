@@ -119,6 +119,7 @@ pub fn analyze_with_cross_module(
     ambiguous_imports: &AmbiguousImports,
     reverse: &ReverseContributions,
     imported_referenced_triggers: &HashMap<String, HashSet<String>>,
+    missing_use_paths: &HashSet<String>,
 ) -> Vec<Diagnostic> {
     let mut ctx = Ctx::new(
         module,
@@ -130,6 +131,7 @@ pub fn analyze_with_cross_module(
     ctx.imported_entity_fields = Some(imported_entity_fields);
     ctx.reverse_contributions = Some(reverse);
     ctx.imported_referenced_triggers = Some(imported_referenced_triggers);
+    ctx.missing_use_paths = Some(missing_use_paths);
     run_checks(ctx, source)
 }
 
@@ -207,6 +209,7 @@ pub fn analyse_with_cross_module(
     reverse: &ReverseContributions,
     imported_referenced_triggers: &HashMap<String, HashSet<String>>,
     imported_entity_statuses: &HashMap<String, HashSet<String>>,
+    missing_use_paths: &HashSet<String>,
 ) -> crate::diagnostic::AnalyseResult {
     let diagnostics = analyze_with_cross_module(
         module,
@@ -218,6 +221,7 @@ pub fn analyse_with_cross_module(
         ambiguous_imports,
         reverse,
         imported_referenced_triggers,
+        missing_use_paths,
     );
     let findings = find_process_issues(
         module,
@@ -421,6 +425,12 @@ struct Ctx<'a> {
     /// entities and triggers. `None` in single-file mode (and effectively empty
     /// when no importer references this module).
     reverse_contributions: Option<&'a ReverseContributions>,
+    /// Multi-file mode only: `use` path strings that resolve neither to a file
+    /// in the check set nor to a file on disk — a broken import, as opposed to
+    /// an out-of-set one. References through an alias bound to such a path are
+    /// diagnosed rather than left unknowable. `None` in single-file mode and
+    /// for callers without filesystem access (they behave as before).
+    missing_use_paths: Option<&'a HashSet<String>>,
     diagnostics: Vec<Diagnostic>,
     findings: Vec<crate::diagnostic::Finding>,
 }
@@ -442,6 +452,7 @@ impl<'a> Ctx<'a> {
             imported_entity_fields: None,
             imported_referenced_triggers: None,
             reverse_contributions: None,
+            missing_use_paths: None,
             diagnostics: Vec::new(),
             findings: Vec::new(),
         }
@@ -3464,9 +3475,9 @@ impl Ctx<'_> {
             }
         }
 
-        // Collect triggers emitted by rule ensures clauses.
-        // Only collect the leading call in each ensures value, matching the
-        // TS regex which captures only the first identifier after `ensures:`.
+        // Collect triggers emitted by rule ensures clauses (every emission
+        // statement in the block, not just the first) and by `otherwise:`
+        // clauses on requires guards.
         let mut emitted: HashSet<&str> = HashSet::new();
         for rule in self.blocks(BlockKind::Rule) {
             for item in &rule.items {
@@ -3565,12 +3576,18 @@ impl Ctx<'_> {
     }
 }
 
-/// Collect emitted triggers from block items, only looking at ensures clauses
-/// and recursing into for/if blocks for nested ensures.
+/// Collect emitted triggers from block items: ensures clauses, `otherwise:`
+/// emissions attached to requires guards, and for/if blocks recursed for
+/// nested ensures.
 fn collect_emitted_trigger_from_item<'a>(kind: &'a BlockItemKind, out: &mut HashSet<&'a str>) {
     match kind {
         BlockItemKind::Clause { keyword, value } if keyword == "ensures" => {
-            collect_leading_ensures_call(value, out);
+            collect_ensures_emission_calls(value, out);
+        }
+        // `requires: cond otherwise: SomeError(...)` parses as an assignment
+        // item named `otherwise`; the failing guard emits its value's trigger.
+        BlockItemKind::Assignment { name, value } if name.name == "otherwise" => {
+            collect_ensures_emission_calls(value, out);
         }
         BlockItemKind::ForBlock { items, .. } => {
             for item in items {
@@ -3593,13 +3610,15 @@ fn collect_emitted_trigger_from_item<'a>(kind: &'a BlockItemKind, out: &mut Hash
     }
 }
 
-/// Extract only the leading PascalCase call from an ensures expression,
-/// matching the TS regex which captures only the first identifier followed
-/// by `(` after `ensures:`. An `if`/`else if`/`else` conditional contributes
-/// the leading call of each branch body, and a `for` iteration the leading
-/// call of its body — a trigger emitted on any branch is an emission
-/// (issue #19); the TS branch-call lane collects the same set.
-fn collect_leading_ensures_call<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
+/// Extract every emitted PascalCase call from an ensures expression: each
+/// statement of a block whose top-level expression is a bare call is an
+/// emission — not only the first (a block emitting two triggers emits both,
+/// and an emission below an entity creation or field assignment is still an
+/// emission). An `if`/`else if`/`else` conditional contributes each branch
+/// body, and a `for` iteration its body — a trigger emitted on any branch is
+/// an emission (issue #19). Value-producing calls nested inside assignments,
+/// `let` bindings or arguments are not emissions and are not collected.
+fn collect_ensures_emission_calls<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
     match expr {
         Expr::Call { function, .. } => {
             if let Expr::Ident(id) = function.as_ref() {
@@ -3609,8 +3628,8 @@ fn collect_leading_ensures_call<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) 
             }
         }
         Expr::Block { items, .. } => {
-            if let Some(first) = items.first() {
-                collect_leading_ensures_call(first, out);
+            for item in items {
+                collect_ensures_emission_calls(item, out);
             }
         }
         Expr::Conditional {
@@ -3619,14 +3638,14 @@ fn collect_leading_ensures_call<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) 
             ..
         } => {
             for b in branches {
-                collect_leading_ensures_call(&b.body, out);
+                collect_ensures_emission_calls(&b.body, out);
             }
             if let Some(body) = else_body {
-                collect_leading_ensures_call(body, out);
+                collect_ensures_emission_calls(body, out);
             }
         }
         Expr::For { body, .. } => {
-            collect_leading_ensures_call(body, out);
+            collect_ensures_emission_calls(body, out);
         }
         _ => {}
     }
@@ -4933,6 +4952,72 @@ fn collect_importer_command_param_types<'a>(
 /// rule's own trigger gives `b`, mapped positionally so a positional subscriber
 /// binding resolves. This lets a consumer subscribing to a rule-emitted event
 /// across a module boundary type its binding.
+/// Type an emitting rule's bindings from its `requires`/`ensures`
+/// `binding.status = value` equations, mirroring the consumer-side
+/// `resolve_binding_entity_from_status` fallbacks (case-insensitive entity match
+/// and unique status-target inference). Without this, a producer rule whose
+/// binding is typed only by status equations — not a transition trigger or a
+/// surface parameter — contributes no payload type across a module boundary, so
+/// a lifecycle whose exit it witnesses is falsely reported as a dead end.
+fn augment_binding_types_from_status<'a>(
+    rule: &'a BlockDecl,
+    status_by_entity: &HashMap<&'a str, HashSet<&'a str>>,
+    binding_types: &mut HashMap<&'a str, &'a str>,
+) {
+    let status_values: HashMap<&str, (HashSet<&str>, Vec<&Ident>)> = status_by_entity
+        .iter()
+        .map(|(k, v)| (*k, (v.clone(), Vec::new())))
+        .collect();
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    for_each_rule_clause(&rule.items, &mut |keyword, value| {
+        if keyword == "requires" || keyword == "ensures" {
+            collect_status_equations(value, &mut pairs);
+        }
+    });
+    for (binding, target) in pairs {
+        if binding_types.contains_key(binding) {
+            continue;
+        }
+        if let Some(entity) =
+            resolve_binding_entity_from_status(binding, Some(target), binding_types, &status_values)
+        {
+            binding_types.insert(binding, entity);
+        }
+    }
+}
+
+/// Collect `binding.status = value` equations from an expression as
+/// (binding, value) pairs, recursing through blocks and conditionals.
+fn collect_status_equations<'a>(expr: &'a Expr, out: &mut Vec<(&'a str, &'a str)>) {
+    match expr {
+        Expr::Comparison { left, op: ComparisonOp::Eq, right, .. } => {
+            if let (Some((binding, "status")), Some(target)) =
+                (expr_as_member_access(left), expr_as_ident(right))
+            {
+                out.push((binding, target));
+            }
+        }
+        Expr::LogicalOp { left, right, .. } => {
+            collect_status_equations(left, out);
+            collect_status_equations(right, out);
+        }
+        Expr::Block { items, .. } => {
+            for item in items {
+                collect_status_equations(item, out);
+            }
+        }
+        Expr::Conditional { branches, else_body, .. } => {
+            for b in branches {
+                collect_status_equations(&b.body, out);
+            }
+            if let Some(body) = else_body {
+                collect_status_equations(body, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_emitted_event_param_types<'a>(
     imported: &'a Module,
     status_by_entity: &HashMap<&'a str, HashSet<&'a str>>,
@@ -4955,6 +5040,7 @@ fn collect_emitted_event_param_types<'a>(
     for rule in module_blocks(imported, BlockKind::Rule) {
         let mut binding_types = collect_rule_binding_types(rule, status_by_entity);
         augment_binding_types_from_commands(rule, &surface_params, &mut binding_types);
+        augment_binding_types_from_status(rule, status_by_entity, &mut binding_types);
         if binding_types.is_empty() {
             continue;
         }
@@ -5931,6 +6017,30 @@ impl Ctx<'_> {
             })
             .collect();
 
+        // Aliases whose use path resolves neither in the check set nor on
+        // disk: the import is broken, not merely out of set. References
+        // through such an alias resolve against nothing, so each one is
+        // diagnosed — independent of the use-line unresolvedPath warning,
+        // which a per-line allium-ignore can suppress.
+        let broken_alias_paths: HashMap<&str, &str> = match self.missing_use_paths {
+            Some(missing) => self
+                .module
+                .declarations
+                .iter()
+                .filter_map(|d| match d {
+                    Decl::Use(u) => {
+                        let path = u.path.text();
+                        let alias = u.alias.as_ref()?;
+                        missing
+                            .get(&path)
+                            .map(|p| (alias.name.as_str(), p.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            None => HashMap::new(),
+        };
+
         let mut refs = collect_qref_nodes(self.module);
         // A `default alias/Type` reference's qualifier sits on the declaration,
         // not inside its value expression, so add it explicitly.
@@ -5958,6 +6068,17 @@ impl Ctx<'_> {
                         ),
                     )
                     .with_code("allium.reference.undefinedImportedAlias"),
+                );
+            } else if let Some(path) = broken_alias_paths.get(r.qualifier) {
+                self.push(
+                    Diagnostic::warning(
+                        r.span,
+                        format!(
+                            "Reference '{}/{}' goes through use path \"{}\", which does not resolve to a file in the check set or on disk.",
+                            r.qualifier, r.name, path
+                        ),
+                    )
+                    .with_code("allium.reference.unresolvedImport"),
                 );
             } else if let Some(offered) = self
                 .imported_referenced_triggers
@@ -7547,6 +7668,7 @@ mod tests {
             &AmbiguousImports::default(),
             &ReverseContributions::default(),
             &HashMap::new(),
+            &HashSet::new(),
         )
     }
 
@@ -7596,6 +7718,7 @@ mod tests {
             &ambiguous,
             &ReverseContributions::default(),
             &HashMap::new(),
+            &HashSet::new(),
         )
     }
 
@@ -7986,6 +8109,120 @@ surface AccountManagement {
         assert!(!names.contains("other"), "the alias itself is not an offering");
     }
 
+    // -- Emissions after the first ensures statement --
+
+    const MULTI_EMISSION_SPEC: &str = r#"
+surface Api {
+    provides:
+        Do1(x)
+        Do2(x)
+}
+
+rule EmitsTwo {
+    when: Do1(x)
+
+    ensures:
+        FirstEmitted(value: x)
+        SecondEmitted(value: x)
+}
+
+rule EmitsAfterAssignment {
+    when: Do2(x)
+
+    ensures:
+        x.field = 1
+        AfterAssignEmitted(value: x)
+}
+
+rule ConsumesSecond {
+    when: SecondEmitted(value)
+
+    ensures: Done1(value: value)
+}
+
+rule ConsumesAfterAssign {
+    when: AfterAssignEmitted(value)
+
+    ensures: Done2(value: value)
+}
+"#;
+
+    #[test]
+    fn trigger_emitted_after_the_first_ensures_statement_is_reachable() {
+        // An ensures block emits every trigger it calls, not only its first
+        // statement. A local listener of a second-position or post-assignment
+        // emission must not be reported unreachable.
+        let ds = analyze_src(MULTI_EMISSION_SPEC);
+        let false_positives: Vec<_> = ds
+            .iter()
+            .filter(|d| {
+                d.code == Some("allium.rule.unreachableTrigger")
+                    && (d.message.contains("SecondEmitted")
+                        || d.message.contains("AfterAssignEmitted"))
+            })
+            .map(|d| &d.message)
+            .collect();
+        assert!(
+            false_positives.is_empty(),
+            "emissions after the first ensures statement are emissions. Got: {false_positives:?}"
+        );
+    }
+
+    const OTHERWISE_EMISSION_SPEC: &str = r#"
+surface Api {
+    provides:
+        Submit(form)
+}
+
+rule ValidatesForm {
+    when: Submit(form)
+
+    requires: form.name != null
+        otherwise: ValidationFailed(form, "name_required")
+
+    ensures: FormAccepted(form: form)
+}
+
+rule ShowsError {
+    when: ValidationFailed(form, reason)
+
+    ensures: ErrorShown(form: form)
+}
+"#;
+
+    #[test]
+    fn trigger_emitted_via_otherwise_is_reachable() {
+        // `requires: ... otherwise: SomeError(...)` emits the error trigger on
+        // the failing branch; a sibling rule listening for it must not be
+        // reported unreachable.
+        let ds = analyze_src(OTHERWISE_EMISSION_SPEC);
+        let false_positives: Vec<_> = ds
+            .iter()
+            .filter(|d| {
+                d.code == Some("allium.rule.unreachableTrigger")
+                    && d.message.contains("ValidationFailed")
+            })
+            .map(|d| &d.message)
+            .collect();
+        assert!(
+            false_positives.is_empty(),
+            "an otherwise: emission is an emission. Got: {false_positives:?}"
+        );
+    }
+
+    #[test]
+    fn a_trigger_no_rule_emits_is_still_unreachable() {
+        // Don't overcorrect: a listener of a trigger nothing emits or provides
+        // must still be reported.
+        let src = "rule Lonely {\n    when: NeverEmitted(x)\n\n    ensures: Done(x: x)\n}\n";
+        let ds = analyze_src(src);
+        assert!(
+            ds.iter().any(|d| d.code == Some("allium.rule.unreachableTrigger")
+                && d.message.contains("NeverEmitted")),
+            "a trigger nothing emits must stay unreachable"
+        );
+    }
+
     // -- Unused entities --
 
     #[test]
@@ -8210,7 +8447,7 @@ surface AccountManagement {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./core.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new(), &HashSet::new());
         assert!(!has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -8221,7 +8458,7 @@ surface AccountManagement {
         let result = parse(&input);
         // Only "./other.allium" is resolved — "./missing.allium" is not.
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new(), &HashSet::new());
         assert!(has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -8242,7 +8479,7 @@ surface AccountManagement {
         let src = "use \"./missing.allium\" as missing\n\nentity Handler {\n  x: String\n}\n";
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new(), &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &HashSet::new(), &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new(), &HashSet::new());
         assert!(has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -8252,7 +8489,7 @@ surface AccountManagement {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new(), &HashSet::new());
         let diag = ds.iter().find(|d| d.code == Some("allium.use.unresolvedPath")).unwrap();
         assert!(diag.message.contains("nowhere.allium"), "message should name the path: {}", diag.message);
     }
@@ -8263,7 +8500,7 @@ surface AccountManagement {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./other.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new(), &HashSet::new());
         assert!(!has_code(&ds, "allium.use.unresolvedPath"));
     }
 
@@ -8273,7 +8510,7 @@ surface AccountManagement {
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let resolved: HashSet<String> = ["./found.allium".to_string()].into_iter().collect();
-        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new());
+        let ds = analyze_with_cross_module(&result.module, &input, &HashSet::new(), &resolved, &HashMap::new(), &HashMap::new(), &AmbiguousImports::default(), &ReverseContributions::default(), &HashMap::new(), &HashSet::new());
         let unresolved: Vec<_> = ds.iter()
             .filter(|d| d.code == Some("allium.use.unresolvedPath"))
             .collect();

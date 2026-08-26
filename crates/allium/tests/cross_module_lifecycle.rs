@@ -1223,3 +1223,135 @@ fn config_reference_against_a_module_without_config_still_warns() {
         "referencing config on a module with no config block must still warn.\n{stdout}"
     );
 }
+
+// ===========================================================================
+// Emissions after the first ensures statement export to importers
+// ===========================================================================
+
+// A provider whose rules emit triggers in every position an ensures block
+// offers: alone, first-of-two, second-of-two, and after an assignment. Plus
+// one trigger emitted only through a `requires: ... otherwise:` clause.
+const EMISSIONS_PROVIDER: &str = r#"-- allium: 3
+surface Api {
+    accepts:
+        Do1(x)
+        Do2(x)
+        Do3(x)
+        Do4(form)
+}
+
+rule ExportsFirst {
+    when: Do1(x)
+
+    ensures: AloneEmitted(value: x)
+}
+
+rule EmissionAfterEmission {
+    when: Do2(x)
+
+    ensures:
+        FirstEmitted(value: x)
+        SecondEmitted(value: x)
+}
+
+rule EmissionAfterAssignment {
+    when: Do3(x)
+
+    ensures:
+        x.field = 1
+        AfterAssignEmitted(value: x)
+}
+
+rule ValidatesForm {
+    when: Do4(form)
+
+    requires: form.name != null
+        otherwise: ValidationFailed(form, "name_required")
+
+    ensures: FormAccepted(form: form)
+}
+"#;
+
+const EMISSIONS_CONSUMER: &str = r#"-- allium: 3
+use "./provider.allium" as p
+
+rule ConsumesAlone {
+    when: p/AloneEmitted(value)
+
+    ensures: R1(value: value)
+}
+
+rule ConsumesFirst {
+    when: p/FirstEmitted(value)
+
+    ensures: R2(value: value)
+}
+
+rule ConsumesSecond {
+    when: p/SecondEmitted(value)
+
+    ensures: R3(value: value)
+}
+
+rule ConsumesAfterAssign {
+    when: p/AfterAssignEmitted(value)
+
+    ensures: R4(value: value)
+}
+
+rule ConsumesOtherwise {
+    when: p/ValidationFailed(form, reason)
+
+    ensures: R5(form: form)
+}
+"#;
+
+#[test]
+fn triggers_emitted_after_the_first_ensures_statement_export_to_importers() {
+    // The export table used to register only the first statement of each
+    // ensures block, so consumers of SecondEmitted / AfterAssignEmitted drew
+    // false unknownName warnings although the emissions are in the provider's
+    // text. All emission statements must export.
+    let dir = TempDir::new("ensures-export");
+    dir.write("provider.allium", EMISSIONS_PROVIDER);
+    dir.write("consumer.allium", EMISSIONS_CONSUMER);
+
+    let (ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    let false_positives: Vec<_> = parse_diagnostics(&stdout)
+        .into_iter()
+        .filter(|d| {
+            (d.code == "allium.reference.unknownName"
+                || d.code == "allium.rule.unreachableTrigger")
+                && ["SecondEmitted", "AfterAssignEmitted", "ValidationFailed"]
+                    .iter()
+                    .any(|n| d.message.contains(n))
+        })
+        .collect();
+    assert!(
+        false_positives.is_empty(),
+        "every emission in an ensures block (and an otherwise: emission) must export.\nGot: {:?}",
+        false_positives.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    assert!(ok, "check on the pair should exit 0.\n{stdout}");
+}
+
+#[test]
+fn a_trigger_the_provider_never_emits_still_warns() {
+    // Don't overcorrect: widening the export table must not admit names the
+    // provider never mentions anywhere.
+    let dir = TempDir::new("ensures-export-guard");
+    dir.write("provider.allium", EMISSIONS_PROVIDER);
+    dir.write(
+        "consumer.allium",
+        "-- allium: 3\nuse \"./provider.allium\" as p\n\n\
+         rule ConsumesGhost {\n    when: p/NeverEmitted(value)\n\n    ensures: R(value: value)\n}\n",
+    );
+
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        parse_diagnostics(&stdout)
+            .iter()
+            .any(|d| d.code == "allium.reference.unknownName" && d.message.contains("NeverEmitted")),
+        "a trigger the provider never mentions must still warn.\n{stdout}"
+    );
+}
