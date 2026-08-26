@@ -80,7 +80,7 @@ rule DriftSupportsGenericCommandManifestShapes {
 rule DriftConfigDefaultsCanBeLoadedFromWorkspaceFile {
     when: DriftCommandInvokedWithoutPaths()
     requires: FileExists(path: "allium-config-file")
-    -- requires: command_args excludes "--no-config"
+    requires: not command_args.contains("--no-config")
 
     ensures: ConfigDefaultsLoaded(section: drift)
 }

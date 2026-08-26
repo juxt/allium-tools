@@ -83,14 +83,14 @@ rule DeclaredFieldTypeReferencesAreLinked {
 
 rule ReverseLinksOptionAddsInverseEdges {
     when: DiagramCommandInvoked(args)
-    -- requires: args includes "--reverse-links"
+    requires: args.contains("--reverse-links")
 
     ensures: InverseEdgesRendered(prefix: "reverse:")
 }
 
 rule ConstraintLabelsOptionAnnotatesWhenEdgesWithRequiresExpressions {
     when: DiagramCommandInvoked(args)
-    -- requires: args includes "--constraint-labels"
+    requires: args.contains("--constraint-labels")
 
     ensures: WhenEdgeLabelsIncludeConstraintText()
 }

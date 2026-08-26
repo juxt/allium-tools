@@ -13,7 +13,7 @@ entity Finding {
 
 rule HoverIncludesLeadingDeclarationComments {
     when: HoverRequested(symbol)
-    -- requires: symbol has preceding_comment_lines
+    requires: symbol.has_preceding_comment_lines
 
     ensures: HoverResponse.created(
     includes_declaration_comment: true
@@ -22,30 +22,30 @@ rule HoverIncludesLeadingDeclarationComments {
 
 rule RenameRequiresUnambiguousSymbol {
     when: RenameRequested(symbol, new_name)
-    -- requires: symbol resolves_to_multiple_definitions
+    requires: symbol.resolves_to_multiple_definitions
 
     ensures: RenameRejected(reason: ambiguous_symbol)
 }
 
 rule RenameRejectsConflictingName {
     when: RenameRequested(symbol, new_name)
-    -- requires: new_name already_declared_in_document
+    requires: new_name.already_declared_in_document
 
     ensures: RenameRejected(reason: colliding_name)
 }
 
 rule RenameAppliesAcrossResolvedReferences {
     when: RenameRequested(symbol, new_name)
-    -- requires: symbol resolves_to_single_definition
-    -- requires: new_name valid_identifier
+    requires: symbol.resolves_to_single_definition
+    requires: new_name.valid_identifier
 
     ensures: RenameAppliedToAllReferences()
 }
 
 rule RenameAlsoUpdatesImportedUsagesAcrossWorkspace {
     when: RenameRequested(symbol, new_name)
-    -- requires: symbol is_declared_in_file_a
-    -- requires: file_b imports file_a as alias
+    requires: symbol.is_declared_in_file_a
+    requires: FileImportsAs(file_b, file_a, alias)
 
     ensures: RenameApplied(path: "file_a")
     ensures: RenameApplied(path: "file_b")
@@ -53,8 +53,8 @@ rule RenameAlsoUpdatesImportedUsagesAcrossWorkspace {
 
 rule ImportedSymbolMustResolveAcrossFiles {
     when: ImportedSymbolReferenceParsed(reference)
-    -- requires: reference.alias is_declared
-    -- requires: reference.symbol not_declared_in_target_spec
+    requires: reference.alias.is_declared
+    requires: reference.symbol.not_declared_in_target_spec
 
     ensures: Finding.created(
     code: "allium.import.undefinedSymbol",
@@ -64,14 +64,14 @@ rule ImportedSymbolMustResolveAcrossFiles {
 
 rule TopLevelDeclarationsExposeFindReferencesCodeLens {
     when: CodeLensRequestedForDeclaration(symbol)
-    -- requires: symbol declared_at_top_level
+    requires: symbol.declared_at_top_level
 
     ensures: CodeLensRendered(label: "Find references")
 }
 
 rule TopLevelDeclarationsExposeTestReferenceCountCodeLens {
     when: CodeLensRequestedForDeclaration(symbol)
-    -- requires: symbol declared_at_top_level
+    requires: symbol.declared_at_top_level
 
     ensures: CodeLensRendered(label: "Referenced in <n> tests")
     ensures: TestReferenceSearchUsesConfiguredTestDiscoveryInputs()
@@ -184,7 +184,7 @@ rule ApplyQuickFixesCommandShowsSafetyPreviewBeforeMutation {
 
 rule TypedDeclarationAstProvidesStructuredRuleAndDeclarationMetadata {
     when: SpecParsedForTooling(spec)
-    -- requires: spec contains entities_or_rules_or_enums
+    requires: spec.contains_entities_or_rules_or_enums
 
     ensures: TypedDeclarationAstProduced()
     ensures: RuleClausesExposedAsStructuredFields()

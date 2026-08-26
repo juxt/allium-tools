@@ -70,8 +70,8 @@ rule ReleasedCliPackageExposesFormatCommand {
 
 rule FormatterSupportsConfigurableIndentAndSpacing {
     when: FormatCommandInvokedWithOptions(indent_width, top_level_spacing)
-    -- requires: indent_width in [1..8]
-    -- requires: top_level_spacing in [0..3]
+    requires: indent_width >= 1 and indent_width <= 8
+    requires: top_level_spacing >= 0 and top_level_spacing <= 3
 
     ensures: FormattingAppliedWith(indent_width, top_level_spacing)
 }
@@ -95,7 +95,7 @@ rule FormatterSupportsStdinStdoutPipeline {
 rule FormatterConfigDefaultsCanBeLoadedFromWorkspaceFile {
     when: FormatCommandInvokedWithInputs(inputs)
     requires: FileExists(path: "allium-config-file")
-    -- requires: command_args excludes "--no-config"
+    requires: not command_args.contains("--no-config")
 
     ensures: ConfigDefaultsLoaded(section: format)
 }
@@ -103,7 +103,7 @@ rule FormatterConfigDefaultsCanBeLoadedFromWorkspaceFile {
 rule FormatterCanUseProjectSpecPathsFromConfig {
     when: FormatCommandInvokedWithoutInputs()
     requires: FileExists(path: "allium-config-file")
-    -- requires: command_args excludes "--no-config"
+    requires: not command_args.contains("--no-config")
     requires: ConfigContainsProjectSpecPaths()
 
     ensures: FormatCommandUsesConfiguredProjectSpecPaths()

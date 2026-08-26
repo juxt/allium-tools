@@ -35,7 +35,7 @@ rule DiagramCommandRequiresInputs {
 rule DiagramCommandCanUseProjectSpecPathsFromConfig {
     when: DiagramCommandInvokedWithoutInputs()
     requires: FileExists(path: "allium-config-file")
-    -- requires: command_args excludes "--no-config"
+    requires: not command_args.contains("--no-config")
     requires: ConfigContainsProjectSpecPaths()
 
     ensures: DiagramCommandUsesConfiguredProjectSpecPaths()
