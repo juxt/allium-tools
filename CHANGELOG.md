@@ -2,7 +2,7 @@
 
 Behaviour changes worth knowing before you upgrade. Releases ship from a single version tag, see `docs/releasing.md`.
 
-## Unreleased
+## 3.6.1
 
 Cross-module reference checking, new in 3.5.3, had three gaps. Closing them changes what `allium check` reports, and two of the changes can turn a previously green gate red on upgrade.
 
