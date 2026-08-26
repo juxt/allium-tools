@@ -282,7 +282,11 @@ fn run_multi_file(
     // crate and is selected on `command` here.
     if has_v4 {
         for (path, source, _) in files_src {
-            let result = allium_v4::parse(&source);
+            let result = if command == "check" {
+                allium_v4::check(&source)
+            } else {
+                allium_v4::parse(&source)
+            };
             if result.diagnostics.iter().any(|d| d.is_error()) {
                 any_issues = true;
             }

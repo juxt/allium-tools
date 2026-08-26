@@ -4,12 +4,14 @@
 //! check-set is all v4.
 
 pub mod ast;
+pub mod check;
 pub mod diagnostic;
 pub mod lexer;
 pub mod parser;
 pub mod span;
 
 pub use ast::Module;
+pub use check::check;
 pub use diagnostic::{Diagnostic, Severity};
 pub use parser::{detect_version, parse, ParseResult};
 pub use span::Span;
