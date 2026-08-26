@@ -30,6 +30,9 @@ pub enum Tok {
     Le,         // <=
     Ge,         // >=
     Arrow,      // ->
+    Plus,       // +
+    Minus,      // -
+    Star,       // *
     Eof,
 }
 
@@ -134,6 +137,9 @@ pub fn lex(src: &str) -> Vec<Token> {
                 '=' => (Tok::Eq, 1),
                 '<' => (Tok::Lt, 1),
                 '>' => (Tok::Gt, 1),
+                '+' => (Tok::Plus, 1),
+                '-' => (Tok::Minus, 1),
+                '*' => (Tok::Star, 1),
                 // Unknown byte: skip it so lexing never wedges. The parser reports
                 // structural problems; a stray glyph is not worth a lexer error.
                 _ => {

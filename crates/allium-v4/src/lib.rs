@@ -6,6 +6,7 @@
 pub mod ast;
 pub mod check;
 pub mod diagnostic;
+pub mod expr;
 pub mod lexer;
 pub mod parser;
 pub mod span;
@@ -13,5 +14,6 @@ pub mod span;
 pub use ast::Module;
 pub use check::check;
 pub use diagnostic::{Diagnostic, Severity};
+pub use expr::{parse_predicate, Expr};
 pub use parser::{detect_version, parse, ParseResult};
 pub use span::Span;
