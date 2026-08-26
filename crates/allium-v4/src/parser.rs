@@ -16,8 +16,8 @@ pub struct ParseResult {
 /// Item keywords that terminate a raw predicate / type at bracket depth 0.
 const ITEM_STARTERS: &[&str] = &[
     "entity", "observable", "state", "given", "action", "init", "invariant",
-    "guarantee", "establish", "pub", "abstract", "readable", "contract",
-    "component", "end", "satisfies",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish",
+    "pub", "abstract", "readable", "contract", "component", "use", "end", "satisfies",
 ];
 
 fn is_starter(s: &str) -> bool {
@@ -84,9 +84,11 @@ impl<'s> Parser<'s> {
         while !self.at_eof() {
             if self.is_ident("contract") || self.is_ident("component") {
                 decls.push(self.parse_decl());
+            } else if self.is_ident("use") {
+                decls.push(self.parse_use());
             } else {
                 let found = self.token_desc();
-                self.error(self.span(), format!("expected a `contract` or `component` declaration, found {found}"));
+                self.error(self.span(), format!("expected a `contract`, `component` or `use` declaration, found {found}"));
                 self.advance();
             }
         }
@@ -142,7 +144,49 @@ impl<'s> Parser<'s> {
         if !self.eat_ident("end") {
             self.error(end, format!("expected `end` to close `{name}`, found {}", self.token_desc()));
         }
-        Decl { span: start.merge(end), kind, name, params, satisfies, items }
+        Decl { span: start.merge(end), kind, name, alias: None, params, satisfies, items }
+    }
+
+    /// `use <target> as <alias>`. Target is a bare name or a string path. A banked
+    /// import (CONSTRUCTS.md:196); v4 cross-module resolution semantics are parked.
+    fn parse_use(&mut self) -> Decl {
+        let start = self.span();
+        self.eat_ident("use");
+        let name = match &self.cur().tok {
+            Tok::Ident(s) => {
+                let s = s.clone();
+                self.advance();
+                s
+            }
+            Tok::Str(s) => {
+                let s = s.clone();
+                self.advance();
+                s
+            }
+            _ => {
+                self.error(self.span(), format!("expected an import target after `use`, found {}", self.token_desc()));
+                String::new()
+            }
+        };
+        let mut alias = None;
+        if self.eat_ident("as") {
+            if let Some(a) = self.cur_ident() {
+                self.advance();
+                alias = Some(a);
+            } else {
+                self.error(self.span(), "expected an alias name after `as`");
+            }
+        }
+        let end = self.tokens[self.pos.saturating_sub(1)].span;
+        Decl {
+            span: start.merge(end),
+            kind: DeclKind::Import,
+            name,
+            alias,
+            params: Vec::new(),
+            satisfies: Vec::new(),
+            items: Vec::new(),
+        }
     }
 
     /// `( name [: type] (, name [: type])* )`. Types captured as raw text.
@@ -228,13 +272,10 @@ impl<'s> Parser<'s> {
                 it.body = self.read_raw(ITEM_STARTERS, false);
                 it
             }
-            Some("invariant") => {
+            Some(role) if role_kind(role).is_some() => {
+                let kind = role_kind(role).unwrap();
                 self.advance();
-                self.parse_named_pred(ItemKind::Invariant, start)
-            }
-            Some("guarantee") => {
-                self.advance();
-                self.parse_named_pred(ItemKind::Guarantee, start)
+                self.parse_role_pred(kind, start)
             }
             Some("establish") => {
                 self.advance();
@@ -273,19 +314,26 @@ impl<'s> Parser<'s> {
         if matches!(self.cur().tok, Tok::Colon) {
             self.advance();
             it.body = self.read_raw(ITEM_STARTERS, false); // raw type text
+        } else if self.eat_ident("means") {
+            // A defined relation/value: `name(args) means <pred>` (the head-once
+            // `means` definitional form, DECISIONS 2026-07-31).
+            it.body = self.read_raw(ITEM_STARTERS, false);
         }
         it
     }
 
-    /// `name means <pred>`.
-    fn parse_named_pred(&mut self, kind: ItemKind, start: Span) -> Item {
-        let word = kind_word(&kind);
+    /// A role-tagged named predicate: `<role> <name> [means <pred>]`. The `means`
+    /// body is optional so a contract can DECLARE a promise (e.g. `guarantee foo`)
+    /// whose proof lives in the satisfying component (SEAL-1).
+    fn parse_role_pred(&mut self, kind: ItemKind, start: Span) -> Item {
         let mut it = Item::new(kind, start);
         it.name = self.take_name();
-        if !self.eat_ident("means") {
-            self.error(self.span(), format!("expected `means` after the {word} name, found {}", self.token_desc()));
+        if matches!(self.cur().tok, Tok::LParen) {
+            self.skip_balanced(); // parameterised role predicate, e.g. `fault f(i, j) means …`
         }
-        it.body = self.read_raw(ITEM_STARTERS, false);
+        if self.eat_ident("means") {
+            it.body = self.read_raw(ITEM_STARTERS, false);
+        }
         it
     }
 
@@ -389,22 +437,30 @@ impl<'s> Parser<'s> {
 
 const ITEM_STARTERS_PLUS_ENSURES: &[&str] = &[
     "entity", "observable", "state", "given", "action", "init", "invariant",
-    "guarantee", "establish", "pub", "abstract", "readable", "contract",
-    "component", "end", "satisfies", "ensures",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish",
+    "pub", "abstract", "readable", "contract", "component", "use", "end",
+    "satisfies", "ensures",
 ];
 
 const ITEM_STARTERS_PLUS_BY: &[&str] = &[
     "entity", "observable", "state", "given", "action", "init", "invariant",
-    "guarantee", "establish", "pub", "abstract", "readable", "contract",
-    "component", "end", "satisfies", "by",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish",
+    "pub", "abstract", "readable", "contract", "component", "use", "end",
+    "satisfies", "by",
 ];
 
-fn kind_word(k: &ItemKind) -> &'static str {
-    match k {
-        ItemKind::Invariant => "invariant",
-        ItemKind::Guarantee => "guarantee",
-        _ => "item",
-    }
+/// Maps a role keyword to its item kind (CONSTRUCTS.md P2 roles). `None` if the
+/// word is not a role, so `parse_item` falls through to the projection case.
+fn role_kind(s: &str) -> Option<ItemKind> {
+    Some(match s {
+        "invariant" => ItemKind::Invariant,
+        "guarantee" => ItemKind::Guarantee,
+        "fault" => ItemKind::Fault,
+        "requirement" => ItemKind::Requirement,
+        "axiom" => ItemKind::Axiom,
+        "rely" | "relies" => ItemKind::Rely,
+        _ => return None,
+    })
 }
 
 /// Own version detection over the `-- allium: N` marker (no shared call to v3).
