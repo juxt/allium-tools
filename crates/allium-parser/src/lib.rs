@@ -15,5 +15,5 @@ pub use analysis::{
 };
 pub use ast::Module;
 pub use diagnostic::{AnalyseResult, Diagnostic, Finding};
-pub use parser::{parse, ParseResult};
+pub use parser::{detect_version, parse, ParseResult};
 pub use span::Span;

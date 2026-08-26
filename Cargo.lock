@@ -7,6 +7,7 @@ name = "allium-cli"
 version = "3.6.0"
 dependencies = [
  "allium-parser",
+ "allium-v4",
  "serde",
  "serde_json",
 ]
@@ -18,6 +19,13 @@ dependencies = [
  "regex-lite",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "allium-v4"
+version = "3.6.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

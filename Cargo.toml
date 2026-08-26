@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/allium-parser", "crates/allium", "crates/allium-wasm"]
+members = ["crates/allium-parser", "crates/allium-v4", "crates/allium", "crates/allium-wasm"]
 
 [workspace.package]
 version = "3.6.0"

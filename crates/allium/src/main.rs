@@ -244,25 +244,65 @@ fn run_multi_file(
         return ExitCode::from(2);
     }
 
-    // Pass 1: parse all files.
-    let mut parsed: Vec<ParsedFile> = Vec::new();
     let mut any_issues = false;
 
+    // Pass 0: read every file and detect its language version. v4 files may not be
+    // mixed with v1-v3 (or untagged) files in one invocation. This is the
+    // parallel-implementation rule (DECISIONS 2026-08-26): a mixed set is an error,
+    // not a silent choice of pipeline.
+    let mut files_src: Vec<(PathBuf, String, Option<u32>)> = Vec::new();
     for path in &files {
-        let source = match std::fs::read_to_string(path) {
-            Ok(s) => s,
+        match std::fs::read_to_string(path) {
+            Ok(s) => {
+                let ver = allium_parser::detect_version(&s);
+                files_src.push((path.clone(), s, ver));
+            }
             Err(e) => {
                 eprintln!("{}: {e}", path.display());
                 any_issues = true;
-                continue;
             }
-        };
+        }
+    }
+
+    let has_v4 = files_src.iter().any(|(_, _, v)| *v == Some(4));
+    let has_other = files_src.iter().any(|(_, _, v)| *v != Some(4));
+    if has_v4 && has_other {
+        eprintln!(
+            "error: cannot mix allium v4 files with v1-v3 or untagged files in one `{command}` invocation."
+        );
+        for (p, _, v) in &files_src {
+            let tag = if *v == Some(4) { "v4   " } else { "other" };
+            eprintln!("  {tag}  {}", p.display());
+        }
+        return ExitCode::from(2);
+    }
+
+    // v4 pipeline: fully parallel, sharing only this JSON envelope with v3. For now
+    // it is the 4a parse pass; check/analyse/monitor logic grows in the allium-v4
+    // crate and is selected on `command` here.
+    if has_v4 {
+        for (path, source, _) in files_src {
+            let result = allium_v4::parse(&source);
+            if result.diagnostics.iter().any(|d| d.is_error()) {
+                any_issues = true;
+            }
+            let output = serde_json::json!({
+                "command": command,
+                "spec_file": path.display().to_string(),
+                "language_version": 4,
+                "diagnostics": result.diagnostics,
+                "findings": [],
+            });
+            println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        }
+        return if any_issues { ExitCode::from(1) } else { ExitCode::SUCCESS };
+    }
+
+    // Pass 1: parse all files (untouched v3 path).
+    let mut parsed: Vec<ParsedFile> = Vec::new();
+    for (path, source, _ver) in files_src {
         let result = allium_parser::parse(&source);
-        parsed.push(ParsedFile {
-            path: path.clone(),
-            source,
-            result,
-        });
+        parsed.push(ParsedFile { path, source, result });
     }
 
     // Pass 2: build cross-module context.

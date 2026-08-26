@@ -323,10 +323,14 @@ impl<'s> Parser<'s> {
                 ));
             }
             Some(1) | Some(2) | Some(3) => {}
+            // v4 has a parallel pipeline (see `crate::v4`). During phase 4a the v4
+            // entry delegates here, so accept the version rather than error; the v4
+            // grammar diverges from this point as it is built.
+            Some(4) => {}
             Some(v) => {
                 self.diagnostics.push(Diagnostic::error(
                     start,
-                    format!("unsupported allium version {v}; this parser supports versions 1, 2 and 3"),
+                    format!("unsupported allium version {v}; this parser supports versions 1, 2, 3 and 4"),
                 ));
             }
         }
@@ -349,7 +353,7 @@ impl<'s> Parser<'s> {
     }
 }
 
-fn detect_version(source: &str) -> Option<u32> {
+pub fn detect_version(source: &str) -> Option<u32> {
     for line in source.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
