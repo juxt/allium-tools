@@ -4729,8 +4729,11 @@ pub fn collect_trigger_outputs(module: &Module) -> HashSet<String> {
 }
 
 /// Collect every name a module *offers* to importers: declared type names
-/// (`collect_declared_names`), plus every trigger name it references — provided,
-/// emitted (`collect_trigger_outputs`), or listened for in `when:` clauses.
+/// (`collect_declared_names`), every trigger name it references — provided,
+/// emitted (`collect_trigger_outputs`), or listened for in `when:` clauses —
+/// its `deferred` declarations, and `config` when it declares a config block
+/// (the language reference's "Config parameter references" makes
+/// `alias/config.param` a documented reference form, checker rule 46).
 /// Used by multi-file checking to validate a qualified reference `alias/Name`
 /// against the aliased module — a name it never mentions is a resolution error
 /// at the reference (#72, and the name-existence audit).
@@ -4738,18 +4741,32 @@ pub fn collect_referenced_trigger_names(module: &Module) -> HashSet<String> {
     let mut names = collect_trigger_outputs(module);
     names.extend(collect_declared_names(module));
     for d in &module.declarations {
-        let Decl::Block(b) = d else { continue };
-        if b.kind != BlockKind::Rule {
-            continue;
-        }
-        for item in &b.items {
-            if let BlockItemKind::Clause { keyword, value } = &item.kind {
-                if keyword == "when" {
-                    for tref in extract_trigger_refs(value) {
-                        names.insert(tref.name.to_string());
+        match d {
+            // A deferred declaration offers its root name (`deferred Foo` and
+            // `deferred Foo.bar` both offer `Foo`). A deferred declared
+            // against another module's alias (`deferred other/Foo`) names a
+            // construct that module owns, not a local offering —
+            // extract_leading_ident returns None for qualified paths.
+            Decl::Deferred(def) => {
+                if let Some(id) = extract_leading_ident(&def.path) {
+                    names.insert(id.name.clone());
+                }
+            }
+            Decl::Block(b) if b.kind == BlockKind::Config => {
+                names.insert("config".to_string());
+            }
+            Decl::Block(b) if b.kind == BlockKind::Rule => {
+                for item in &b.items {
+                    if let BlockItemKind::Clause { keyword, value } = &item.kind {
+                        if keyword == "when" {
+                            for tref in extract_trigger_refs(value) {
+                                names.insert(tref.name.to_string());
+                            }
+                        }
                     }
                 }
             }
+            _ => {}
         }
     }
     names
@@ -8058,6 +8075,38 @@ surface AccountManagement {
             "for-block-provided trigger must not yield an unreachable_trigger finding. Findings: {:?}",
             r.findings.iter().map(|f| f["summary"].clone()).collect::<Vec<_>>()
         );
+    }
+
+    // -- Names offered to importers --
+
+    #[test]
+    fn deferred_declarations_and_config_are_offered_to_importers() {
+        let input = "-- allium: 3\nconfig {\n    page_size: Integer = 25\n}\n\ndeferred ExternalHelper\ndeferred Matching.suggest\n";
+        let result = parse(input);
+        let names = collect_referenced_trigger_names(&result.module);
+        assert!(names.contains("config"), "a declared config block is referenceable as alias/config");
+        assert!(names.contains("ExternalHelper"), "a deferred declaration is referenceable by name");
+        assert!(names.contains("Matching"), "a dotted deferred offers its root name");
+    }
+
+    #[test]
+    fn a_module_without_config_or_deferred_offers_neither() {
+        let input = "-- allium: 3\nentity Thing {\n    id: Integer\n}\n";
+        let result = parse(input);
+        let names = collect_referenced_trigger_names(&result.module);
+        assert!(!names.contains("config"), "no config block, no config offering");
+        assert!(!names.contains("ExternalHelper"));
+    }
+
+    #[test]
+    fn a_deferred_declared_against_another_modules_alias_is_not_offered() {
+        // `deferred other/Foreign` records that `other` owns the construct;
+        // the declaring module offers neither the name nor the alias.
+        let input = "-- allium: 3\nuse \"./other.allium\" as other\n\ndeferred other/Foreign\n";
+        let result = parse(input);
+        let names = collect_referenced_trigger_names(&result.module);
+        assert!(!names.contains("Foreign"), "a foreign deferred is not a local offering");
+        assert!(!names.contains("other"), "the alias itself is not an offering");
     }
 
     // -- Emissions after the first ensures statement --
