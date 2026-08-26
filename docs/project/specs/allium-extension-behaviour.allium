@@ -190,8 +190,8 @@ rule UndefinedDefaultTypeIsError {
 
 rule UndefinedDefaultImportedAliasIsError {
     when: DefaultDeclarationParsed(default_instance)
-    -- requires: default_instance.type_reference matches "<alias>/<TypeName>"
-    -- requires: alias not declared in use_imports
+    requires: default_instance.type_reference.matches("<alias>/<TypeName>")
+    requires: not default_instance.alias_declared_in_use_imports
 
     ensures: Finding.created(
     code: "allium.default.undefinedImportedAlias",
@@ -233,8 +233,8 @@ rule UndefinedConfigReferenceIsInfoInRelaxedMode {
 
 rule UnknownExternalConfigAliasIsError {
     when: ConfigReferenceParsed(reference)
-    -- requires: reference matches "<alias>/config.<key>"
-    -- requires: alias not declared in use_imports
+    requires: reference.matches("<alias>/config.<key>")
+    requires: not reference.alias_declared_in_use_imports
 
     ensures: Finding.created(
     code: "allium.config.undefinedExternalReference",
@@ -285,14 +285,14 @@ rule QualifiedTriggerSubscriptionNotFlaggedInSingleFileAnalysis {
 
 rule EnsuresBranchEmissionCountsAsTriggerEmission {
     when: RuleBlockParsed(rule)
-    -- requires: rule ensures clause contains if/else branch or for iteration whose leading statement is a trigger call
+    requires: rule.ensures_branch_or_iteration_leads_with_trigger_call = true
 
-    -- ensures: TriggerEmittedByRule(trigger_call.name) = true
+    ensures: BranchLeadingTriggerEmissionCounted(rule)
 }
 
 rule EqualityLiteralTypeMismatchIsError {
     when: RuleClauseParsed(clause)
-    -- requires: clause compares_string_literal_with_numeric_literal_using_equality = true
+    requires: clause.compares_string_literal_with_numeric_literal_using_equality = true
 
     ensures: Finding.created(
     code: "allium.expression.typeMismatch",
@@ -322,7 +322,7 @@ rule EmptyEnumIsWarning {
 
 rule DiscriminatorMustResolveToVariants {
     when: EntityDiscriminatorParsed(entity, discriminator)
-    -- requires: discriminator.names include name_without_matching_variant_declaration
+    requires: DiscriminatorNamesIncludeUndeclaredVariant(discriminator)
     requires: discriminator.has_at_least_one_declared_variant = true
 
     ensures: Finding.created(
@@ -344,7 +344,7 @@ rule V1InlineEnumSyntaxIsError {
 
 rule InvalidDiscriminatorLiteralShapeIsError {
     when: EntityDiscriminatorParsed(entity, discriminator)
-    -- requires: discriminator contains_non_literal_or_unsupported_item = true
+    requires: discriminator.contains_non_literal_or_unsupported_item = true
 
     ensures: Finding.created(
     code: "allium.sum.invalidDiscriminator",
@@ -354,7 +354,7 @@ rule InvalidDiscriminatorLiteralShapeIsError {
 
 rule VariantMustAppearInBaseDiscriminator {
     when: VariantParsed(variant, base_entity)
-    -- requires: variant.name missing_from base_entity.discriminator_names
+    requires: not VariantNameInBaseDiscriminator(variant, base_entity)
 
     ensures: Finding.created(
     code: "allium.sum.variantMissingInDiscriminator",
@@ -364,7 +364,7 @@ rule VariantMustAppearInBaseDiscriminator {
 
 rule SumTypeBaseCannotBeInstantiatedDirectly {
     when: EnsuresCreationCallParsed(call)
-    -- requires: call.target is base_entity_with_discriminator
+    requires: call.target_is_base_entity_with_discriminator = true
 
     ensures: Finding.created(
     code: "allium.sum.baseInstantiation",
@@ -374,7 +374,7 @@ rule SumTypeBaseCannotBeInstantiatedDirectly {
 
 rule VariantDeclarationRequiresVariantKeyword {
     when: TopLevelDeclarationParsed(declaration)
-    -- requires: declaration matches "<Name> : <Base> {"
+        requires: declaration.text.matches("<Name> : <Base> {")
         requires: declaration.keyword != variant
 
         ensures: Finding.created(
@@ -385,7 +385,7 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule UndefinedTypeReferenceIsError {
         when: FieldTypeReferenceParsed(type_ref)
-        -- requires: type_ref not declared_locally_or_imported
+        requires: not type_ref.declared_locally_or_imported
 
         ensures: Finding.created(
         code: "allium.type.undefinedReference",
@@ -395,8 +395,8 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule UndefinedImportedTypeAliasIsError {
         when: FieldTypeReferenceParsed(type_ref)
-        -- requires: type_ref matches "<alias>/<TypeName>"
-        -- requires: alias not declared in use_imports
+        requires: type_ref.matches("<alias>/<TypeName>")
+        requires: not type_ref.alias_declared_in_use_imports
 
         ensures: Finding.created(
         code: "allium.type.undefinedImportedAlias",
@@ -416,8 +416,8 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule UndefinedRelationshipImportedAliasIsError {
         when: RelationshipFieldParsed(relationship)
-        -- requires: relationship.target_type_reference matches "<alias>/<TypeName>"
-        -- requires: alias not declared in use_imports
+        requires: relationship.target_type_reference.matches("<alias>/<TypeName>")
+        requires: not relationship.alias_declared_in_use_imports
 
         ensures: Finding.created(
         code: "allium.relationship.undefinedImportedAlias",
@@ -437,7 +437,7 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule UndefinedRuleTypeReferenceIsError {
         when: RuleTypeReferenceParsed(type_ref)
-        -- requires: type_ref not declared_locally_or_imported
+        requires: not type_ref.declared_locally_or_imported
 
         ensures: Finding.created(
         code: "allium.rule.undefinedTypeReference",
@@ -447,8 +447,8 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule UndefinedRuleImportedAliasIsError {
         when: RuleTypeReferenceParsed(type_ref)
-        -- requires: type_ref matches "<alias>/<TypeName>"
-        -- requires: alias not declared in use_imports
+        requires: type_ref.matches("<alias>/<TypeName>")
+        requires: not type_ref.alias_declared_in_use_imports
 
         ensures: Finding.created(
         code: "allium.rule.undefinedImportedAlias",
@@ -603,7 +603,7 @@ rule VariantDeclarationRequiresVariantKeyword {
     rule UndefinedRuleBindingIsError {
         when: RuleClauseParsed(clause)
         requires: clause.references_unqualified_binding_or_exists_for_source = true
-        -- requires: referenced_binding not resolved_from [given, trigger_parameters, default_instances, let_bindings, for_bindings]
+        requires: not ReferencedBindingResolvedFromScopes(clause.referenced_binding)
 
         ensures: Finding.created(
         code: "allium.rule.undefinedBinding",
@@ -731,7 +731,7 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule UndefinedProvidesTriggerIsError {
         when: SurfaceProvidesEntryParsed(entry)
-        -- requires: entry.trigger_name not defined_as_external_stimulus_trigger
+        requires: not entry.trigger_name_defined_as_external_stimulus_trigger
 
         ensures: Finding.created(
         code: "allium.surface.undefinedProvidesTrigger",
@@ -742,7 +742,7 @@ rule VariantDeclarationRequiresVariantKeyword {
     rule ImplicitLambdaShorthandIsError {
         when: CollectionOperatorCallParsed(call)
         requires: call.operator in [any, all, each]
-        -- requires: call.argument is identifier_shorthand
+        requires: call.argument.is_identifier_shorthand
 
         ensures: Finding.created(
         code: "allium.expression.implicitLambda",
@@ -791,7 +791,7 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule QuickFixForDiagnosticSuppression {
         when: QuickFixRequestedForFinding(finding)
-        -- requires: finding.code starts_with "allium."
+        requires: finding.code.starts_with("allium.")
 
         ensures: EditProposed(
         title: "Suppress this diagnostic here",
@@ -801,8 +801,8 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule RefactorTemporalWhenToGuardedRule {
         when: RefactorRequestedFromSelection(selection)
-        -- requires: selection.line starts_with "when:"
-        -- requires: selection.when_clause is temporal
+        requires: selection.line.starts_with("when:")
+        requires: selection.when_clause_is_temporal = true
         requires: selection.containing_rule.has_requires = false
 
         ensures: EditProposed(
@@ -813,8 +813,8 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule RefactorExtractRepeatedLiteralToConfig {
         when: RefactorRequestedFromSelection(selection)
-        -- requires: selection.value is string_literal or integer_literal
-        -- requires: selection.value appears_multiple_times_in_document
+        requires: SelectionValueIsStringOrIntegerLiteral(selection)
+        requires: selection.value_appears_multiple_times_in_document = true
 
         ensures: EditProposed(
         title: "Extract repeated literal to config",
@@ -824,7 +824,7 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule RefactorInlineEnumToNamedEnum {
         when: RefactorRequestedFromSelection(selection)
-        -- requires: selection.line contains selection.inline_enum_field
+        requires: selection.line.contains(selection.inline_enum_field)
         requires: selection.inline_enum_field.values_are_lowercase_literals = true
 
         ensures: EditProposed(
@@ -864,14 +864,14 @@ rule VariantDeclarationRequiresVariantKeyword {
     rule ResolveLocalDefinitions {
         when: DefinitionRequested(document, symbol_at_cursor)
         requires: document.language_id = "allium"
-        -- requires: symbol_at_cursor references local declaration (including enum) or config key
+        requires: SymbolAtCursorReferencesLocalDeclarationOrConfigKey(symbol_at_cursor)
 
         ensures: DefinitionLocationReturned()
     }
 
     rule ResolveDefinitionsAcrossUseImports {
         when: DefinitionRequested(document, symbol_at_cursor)
-        -- requires: symbol_at_cursor references imported_alias_symbol
+        requires: symbol_at_cursor.references_imported_alias_symbol = true
         requires: use_import_target_file_exists = true
 
         ensures: DefinitionLocationReturned()
@@ -887,7 +887,7 @@ rule VariantDeclarationRequiresVariantKeyword {
     rule ProvideDocumentLinksForUseImports {
         when: DocumentLinksRequested(document)
         requires: document.language_id = "allium"
-        -- requires: document contains use_import_alias_statement
+        requires: document.contains_use_import_alias_statement = true
 
         ensures: LinkReturned(for: quoted_use_import_path)
         ensures: LinkTargetResolvesRelativeToCurrentDocument()
@@ -895,7 +895,7 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule FindReferencesForDeclaredSymbol {
         when: ReferencesRequested(document, symbol_at_cursor)
-        -- requires: symbol_at_cursor references locally_declared_symbol or local_config_key
+        requires: SymbolAtCursorReferencesLocalSymbolOrConfigKey(symbol_at_cursor)
 
         ensures: ReferenceLocationsReturned()
         ensures: ReferenceLocationsExcludeCommentOnlyMatches()
@@ -903,7 +903,7 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule FindReferencesForImportedSymbol {
         when: ReferencesRequested(document, symbol_at_cursor)
-        -- requires: symbol_at_cursor references imported_alias_symbol
+        requires: symbol_at_cursor.references_imported_alias_symbol = true
         requires: use_import_target_file_exists = true
 
         ensures: ReferenceLocationsReturned(from: import_target_document)
@@ -911,8 +911,8 @@ rule VariantDeclarationRequiresVariantKeyword {
 
     rule RenameDeclaredSymbol {
         when: RenameRequested(document, symbol_at_cursor, new_name)
-        -- requires: new_name is valid_identifier
-        -- requires: symbol_at_cursor references locally_declared_symbol
+        requires: new_name.is_valid_identifier
+        requires: symbol_at_cursor.references_locally_declared_symbol = true
 
         ensures: SymbolOccurrencesRewritten(document)
         ensures: CommentOnlyMatchesNotRewritten()
@@ -962,13 +962,13 @@ rule VariantDeclarationRequiresVariantKeyword {
         ensures: CompletionItemAvailable(label: with)
         ensures: CompletionItemAvailable(label: exists)
         ensures: CompletionItemAvailable(label: identified_by)
-        -- ensures: CompletionAfter("config.") includes_declared_config_keys = true
+        ensures: CompletionAfterConfigDotIncludesDeclaredConfigKeys()
     }
 
     rule SpecDriftCommandLoadsWorkspaceDriftConfig {
         when: CommandInvoked("allium.checkSpecDrift")
         requires: FileExists(path: "allium-config-file")
-        -- requires: command_args excludes "--no-config"
+        requires: not command_args.contains("--no-config")
 
         ensures: ConfigDefaultsLoaded(section: drift)
     }

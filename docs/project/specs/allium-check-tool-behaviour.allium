@@ -10,9 +10,9 @@
 --   - Packaging/distribution details for npm or extension marketplaces
 --
 -- Each rule expresses its checkable core (which diagnostic code, at which
--- severity) as ensures. Conditions and guarantees Allium cannot express as
--- predicates are kept verbatim under @guidance; the classes are catalogued in
--- docs/capability-gaps.md.
+-- severity) as ensures, with its conditions and guarantees stated as requires
+-- and ensures predicates. The classes of predicate Allium can express only
+-- descriptively are catalogued in docs/capability-gaps.md.
 
 value CheckMode {
     value: strict | relaxed
@@ -76,19 +76,15 @@ rule DirectoryInputExpandsToAlliumFiles {
     when: CheckCommandInvokedWithInput(input)
     requires: input.kind = directory_path
     ensures: ResolvedFilesAreRecursiveAlliumFiles()
-
-    @guidance
-        -- ensures: CheckRun.files includes input.recursive_files where file.extension = ".allium"
+    ensures: CheckRunFilesIncludeRecursiveAlliumFiles(input)
 }
 
 rule WildcardInputMatchesAlliumFiles {
     when: CheckCommandInvokedWithInput(input)
     requires: input.kind = wildcard_pattern
     ensures: ResolvedFilesMatchWildcardAlliumOnly()
-
-    @guidance
-        -- ensures: CheckRun.files includes file where MatchesWildcard(file.relative_path, input)
-        -- ensures: CheckRun.files excludes file where file.extension != ".allium"
+    ensures: CheckRunFilesIncludeWildcardMatches(input)
+    ensures: CheckRunFilesExcludeNonAlliumExtensions()
 }
 
 rule FindingsArePrintedPerFile {
@@ -116,23 +112,21 @@ rule InformationalOnlyFindingsSucceed {
 rule AutofixFlagAppliesSafeFixes {
     when: CheckCommandInvokedWithInputs(inputs)
 
+    requires: command_args.contains("--autofix")
+
     ensures: SafeFixApplied(kind: missing_ensures_scaffold)
     ensures: SafeFixApplied(kind: missing_when_scaffold)
     ensures: SafeFixApplied(kind: temporal_guard_scaffold)
-
-    @guidance
-        -- requires: command_args includes "--autofix"
 }
 
 rule FixCodeOptionScopesAutofixToSelectedDiagnosticCodes {
     when: CheckCommandInvokedWithOptions(options)
 
+    requires: options.contains("--autofix")
+    requires: options.contains("--fix-code allium.rule.missingEnsures")
+
     ensures: SafeFixApplied(kind: missing_ensures_scaffold)
     ensures: SafeFixNotApplied(kind: temporal_guard_scaffold)
-
-    @guidance
-        -- requires: options includes "--autofix"
-        -- requires: options includes "--fix-code allium.rule.missingEnsures"
 }
 
 rule AutofixWritesUpdatedSpecs {
@@ -145,12 +139,11 @@ rule AutofixWritesUpdatedSpecs {
 rule AutofixDryRunDoesNotWriteChanges {
     when: CheckCommandInvokedWithInputs(inputs)
 
+    requires: command_args.contains("--autofix")
+    requires: command_args.contains("--dryrun")
+
     ensures: LinePrinted(message: "<path>: would autofix")
     ensures: FileUnchanged(path: "<input>.allium")
-
-    @guidance
-        -- requires: command_args includes "--autofix"
-        -- requires: command_args includes "--dryrun"
 }
 
 rule WorkspaceCheckCommandDelegatesToChecker {
@@ -162,96 +155,86 @@ rule WorkspaceCheckCommandDelegatesToChecker {
 rule WatchModeReevaluatesInputsOnFileChanges {
     when: CheckCommandInvokedWithOptions(options)
 
-    ensures: CheckRunRepeatedOnInputChange()
+    requires: options.contains("--watch")
 
-    @guidance
-        -- requires: options includes "--watch"
+    ensures: CheckRunRepeatedOnInputChange()
 }
 
 rule ChangedFlagChecksModifiedAlliumFiles {
     when: CheckCommandInvokedWithOptions(options)
 
-    ensures: ResolveAlliumFilesFromGitStatus()
+    requires: options.contains("--changed")
 
-    @guidance
-        -- requires: options includes "--changed"
+    ensures: ResolveAlliumFilesFromGitStatus()
 }
 
 rule MinSeverityFiltersReportedFindings {
     when: CheckCommandInvokedWithOptions(options)
-    ensures: FindingsBelowMinSeverityFilteredOut(severity: info)
+    requires: options.contains("--min-severity warning")
 
-    @guidance
-        -- requires: options includes "--min-severity warning"
-        -- ensures: FindingsWithSeverity(info) are_filtered_out
+    ensures: FindingsBelowMinSeverityFilteredOut(severity: info)
+    ensures: FindingsWithSeverityFilteredOut(severity: info)
 }
 
 rule IgnoreCodeFiltersMatchingFindings {
     when: CheckCommandInvokedWithOptions(options)
-    ensures: FindingsWithIgnoredCodeFilteredOut()
+    requires: options.contains("--ignore-code")
 
-    @guidance
-        -- requires: options includes "--ignore-code"
-        -- ensures: FindingsWithCode(code) are_filtered_out
+    ensures: FindingsWithIgnoredCodeFilteredOut()
+    ensures: FindingsWithCodeFilteredOut(code)
 }
 
 rule StatsOptionPrintsCountsByCode {
     when: CheckCommandInvokedWithOptions(options)
 
-    ensures: FindingCountsPrintedGroupedByCode()
+    requires: options.contains("--stats")
 
-    @guidance
-        -- requires: options includes "--stats"
+    ensures: FindingCountsPrintedGroupedByCode()
 }
 
 rule FailOnThresholdControlsBlockingSeverity {
     when: CheckCommandInvokedWithOptions(options)
-    ensures: BlockingSeverityControlledByFailOnThreshold()
+    requires: options.contains("--fail-on error")
 
-    @guidance
-        -- requires: options includes "--fail-on error"
-        -- ensures: FindingsWithSeverity(warning) do_not_fail_process
-        -- ensures: FindingsWithSeverity(error) fail_process
+    ensures: BlockingSeverityControlledByFailOnThreshold()
+    ensures: FindingsWithSeverityDoNotFailProcess(severity: warning)
+    ensures: FindingsWithSeverityFailProcess(severity: error)
 }
 
 rule ReportOptionWritesRenderedOutputToPath {
     when: CheckCommandInvokedWithOptions(options)
 
-    ensures: ReportFileWritten(path: options.report_path)
+    requires: options.contains("--report")
 
-    @guidance
-        -- requires: options includes "--report"
+    ensures: ReportFileWritten(path: options.report_path)
 }
 
 rule FixInteractivePromptsBeforeApplyingEachSafeFix {
     when: CheckCommandInvokedWithOptions(options)
 
+    requires: options.contains("--autofix")
+    requires: options.contains("--fix-interactive")
+
     ensures: SafeFixPromptPrintedPerFix()
     ensures: SafeFixAppliedOnlyWhenAccepted()
-
-    @guidance
-        -- requires: options includes "--autofix"
-        -- requires: options includes "--fix-interactive"
 }
 
 rule CacheOptionStoresAndReusesFindingsForUnchangedFiles {
     when: CheckCommandInvokedWithOptions(options)
 
+    requires: options.contains("--cache")
+
     ensures: CacheFileWritten(path: ".allium-check-cache.json")
     ensures: UnchangedFilesReuseCachedFindings()
-
-    @guidance
-        -- requires: options includes "--cache"
 }
 
 rule ConfigFileCanProvideCheckDefaults {
     when: CheckCommandInvokedWithOptions(options)
     requires: FileExists(path: "allium-config-file")
 
-    ensures: ConfigDefaultsLoaded(section: check)
+    requires: not options.contains("--no-config")
 
-    @guidance
-        -- requires: options excludes "--no-config"
+    ensures: ConfigDefaultsLoaded(section: check)
 }
 
 rule CheckCanUseProjectSpecPathsFromConfig {
@@ -259,10 +242,9 @@ rule CheckCanUseProjectSpecPathsFromConfig {
     requires: FileExists(path: "allium-config-file")
     requires: ConfigContainsProjectSpecPaths()
 
-    ensures: CheckCommandUsesConfiguredProjectSpecPaths()
+    requires: not command_args.contains("--no-config")
 
-    @guidance
-        -- requires: command_args excludes "--no-config"
+    ensures: CheckCommandUsesConfiguredProjectSpecPaths()
 }
 
 rule SpecDriftGateRunsInPreCommitWorkflow {
@@ -281,11 +263,10 @@ rule ReleasedCliPackageExposesCheckCommand {
 rule StandaloneCheckerMatchesExtensionRuleSet {
     when: CheckCommandInvokedWithInputs(inputs)
 
+    requires: InputsIncludeSpecFileWithKnownInformationalFindings(inputs)
+
     ensures: FindingObserved(code: "allium.field.unused", severity: info)
     ensures: FindingObserved(code: "allium.rule.unreachableTrigger", severity: info)
-
-    @guidance
-        -- requires: inputs includes spec_file_with_known_informational_findings
 }
 
 -- Output ordering is a deterministic function of the input, independent of
@@ -294,10 +275,7 @@ rule StandaloneCheckerMatchesExtensionRuleSet {
 rule DiagnosticsAreDeterministicallyOrdered {
     when: CheckCommandInvokedWithInputs(inputs)
     ensures: DiagnosticsOrderedBySourcePositionThenCode()
-
-    @guidance
-        -- ensures: diagnostics are ordered by source position then code
-        -- ensures: the diagnostics array is identical across repeated runs on identical input
+    ensures: DiagnosticsArrayIdenticalAcrossRepeatedRunsOnIdenticalInput()
 }
 
 -- What counts as a reference for allium.field.unused. A field is used when it
@@ -308,31 +286,28 @@ rule DiagnosticsAreDeterministicallyOrdered {
 rule FieldReferencedBySiblingDerivedFieldIsUsed {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.field.unused", field: field)
+    requires: EntityDeclaresField(field)
+    requires: DerivedFieldOnSameEntityReferencesFieldByBareName(field)
 
-    @guidance
-        -- requires: entity declares field
-        -- requires: another derived field on the same entity references field by bare name
+    ensures: FindingNotObserved(code: "allium.field.unused", field: field)
 }
 
 rule FieldPopulatedByCreatedNamedArgumentIsUsed {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.field.unused", field: field)
+    requires: EntityDeclaresField(field)
+    requires: RuleSetsFieldViaNamedArgumentInCreated(field)
 
-    @guidance
-        -- requires: entity declares field
-        -- requires: a rule sets field via a named argument in Entity.created(field: value)
+    ensures: FindingNotObserved(code: "allium.field.unused", field: field)
 }
 
 rule BareIdentifierElsewhereDoesNotSuppressUnusedField {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingObserved(code: "allium.field.unused", field: field, severity: info)
+    requires: EntityDeclaresFieldNeverReferencedOnTheEntity(field)
+    requires: RuleBindingOrTriggerParameterSharesFieldName(field)
 
-    @guidance
-        -- requires: entity declares field never referenced on the entity
-        -- requires: a rule binding or trigger parameter shares the field's name
+    ensures: FindingObserved(code: "allium.field.unused", field: field, severity: info)
 }
 
 -- Reachability passes descend into nested block bodies (if/else and for), not
@@ -341,21 +316,19 @@ rule BareIdentifierElsewhereDoesNotSuppressUnusedField {
 rule StatusAssignedInConditionalBranchIsReachable {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.status.unreachableValue", status: value)
+    requires: EntityDeclaresStatusValue(value)
+    requires: RuleAssignsStatusValueInEnsuresInsideConditionalBranch(value)
 
-    @guidance
-        -- requires: entity declares status value
-        -- requires: a rule assigns the status value in an ensures clause inside an if or else branch
+    ensures: FindingNotObserved(code: "allium.status.unreachableValue", status: value)
 }
 
 rule TriggerProvidedInsideForBlockIsReachable {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
+    requires: RuleListensForTrigger(trigger)
+    requires: SurfaceProvidesTriggerInsideForBlock(trigger)
 
-    @guidance
-        -- requires: a rule listens for trigger
-        -- requires: a surface provides trigger inside a for block in its provides section
+    ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
 }
 
 -- A becomes/transitions_to trigger fires with the entity already in its target
@@ -365,37 +338,33 @@ rule TriggerProvidedInsideForBlockIsReachable {
 -- modules therefore never yields fewer reports than the equivalent single file.
 rule TransitionTriggerEstablishesStartStateLocally {
     when: CheckCommandInvokedWithInputs(inputs)
-    ensures: FindingNotObserved(code: "allium.status.noExit", status: source)
+    requires: RuleTriggeredByBecomesOrTransitionsToOnStatusValue(source)
+    requires: SameRuleAssignsDifferentDeclaredStatusValueInEnsures(source)
 
-    @guidance
-        -- requires: a rule is triggered by a becomes or transitions_to trigger on a status value
-        -- requires: the same rule assigns a different declared status value in its ensures
-        -- ensures: the transition from the trigger's state to the assigned state is observed
-        -- ensures: FindingNotObserved(code: "allium.status.noExit", status: the trigger's state)
+    ensures: FindingNotObserved(code: "allium.status.noExit", status: source)
+    ensures: TransitionFromTriggerStateToAssignedStateObserved(source)
 }
 
 rule CrossModuleReferenceSuppressesUnusedWarning {
     when: CheckCommandInvokedWithInputs(inputs)
 
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileDeclares(file_a, entity_or_value)
+    requires: FileReferencesViaQualifiedName(file_b, entity_or_value)
+    requires: FileHasUseDeclarationMappingAliasTo(file_b, file_a)
+
     ensures: FindingNotObserved(code: "allium.entity.unused", entity: entity_or_value)
     ensures: FindingNotObserved(code: "allium.definition.unused", definition: entity_or_value)
-
-    @guidance
-        -- requires: inputs resolve to multiple files
-        -- requires: file_a declares entity_or_value
-        -- requires: file_b references entity_or_value via qualified name (e.g. alias/Name)
-        -- requires: file_b has use declaration mapping alias to file_a
 }
 
 rule UnresolvedUsePathWarnsInMultiFileMode {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingObserved(code: "allium.use.unresolvedPath", severity: warning)
+    requires: FileContainsUseDeclarationWithPath(path)
+    requires: not PathResolvesToFileInCheckSet(path)
 
-    @guidance
-        -- requires: file contains use declaration with path
-        -- requires: path does not resolve to a file in the check set
-        -- ensures: FindingMessage includes path
+    ensures: FindingObserved(code: "allium.use.unresolvedPath", severity: warning)
+    ensures: FindingMessageIncludes(path)
 }
 
 -- A use path has three states, not two. Resolved: a file in the check set.
@@ -409,45 +378,41 @@ rule UnresolvedUsePathWarnsInMultiFileMode {
 rule ReferenceThroughBrokenUsePathWarns {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingObserved(code: "allium.reference.unresolvedImport", severity: warning)
+    requires: FileReferencesQualifiedNameWithBoundAlias(alias, Name)
+    requires: AliasUsePathIsLocalAlliumReference(alias)
+    requires: PathResolvesNeitherInCheckSetNorOnDisk(alias)
 
-    @guidance
-        -- requires: file references alias/Name where a use declaration binds alias
-        -- requires: the alias's use path is a local .allium reference
-        -- requires: the path resolves neither in the check set nor on disk
-        -- ensures: FindingMessage names the reference and the unresolved path
-        -- ensures: the finding survives a use-line allium-ignore of allium.use.unresolvedPath
+    ensures: FindingObserved(code: "allium.reference.unresolvedImport", severity: warning)
+    ensures: FindingMessageNamesReferenceAndUnresolvedPath(Name, alias)
+    ensures: FindingSurvivesUseLineIgnoreOf(code: "allium.use.unresolvedPath")
 }
 
 rule ReferenceThroughKnowableOutOfSetImportStaysSilent {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.reference.unresolvedImport", name: Name)
+    requires: FileReferencesQualifiedNameWithBoundAlias(alias, Name)
+    requires: AliasUsePathIsKnowableButOutOfSet(alias)
 
-    @guidance
-        -- requires: file references alias/Name where a use declaration binds alias
-        -- requires: the alias's use path is present on disk but outside the check set, or is a registry coordinate
+    ensures: FindingNotObserved(code: "allium.reference.unresolvedImport", name: Name)
 }
 
 rule QualifiedTriggerCallIsValidTriggerForm {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.rule.invalidTrigger")
+    requires: RuleWhenClauseIsQualifiedTriggerCall()
 
-    @guidance
-        -- requires: rule when clause is qualified trigger call (e.g. alias/Trigger(params))
+    ensures: FindingNotObserved(code: "allium.rule.invalidTrigger")
 }
 
 rule CrossModuleTriggerEmissionSatisfiesSubscription {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileProvidesOrEmitsTrigger(file_a, trigger)
+    requires: FileListensForTriggerQualifiedOrUnqualified(file_b, trigger)
+    requires: FileHasUseDeclarationMappingAliasTo(file_b, file_a)
 
-    @guidance
-        -- requires: inputs resolve to multiple files
-        -- requires: file_a provides or emits trigger
-        -- requires: file_b listens for trigger, qualified via use alias mapping to file_a or unqualified
-        -- requires: file_b has use declaration mapping alias to file_a
+    ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
 }
 
 -- A rule emits a trigger through any bare call statement in its ensures block,
@@ -462,36 +427,33 @@ rule CrossModuleTriggerEmissionSatisfiesSubscription {
 rule EmissionInAnyEnsuresPositionExports {
     when: CheckCommandInvokedWithInputs(inputs)
 
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileRuleEmitsTriggerInAnyEnsuresPositionOrOtherwise(file_a, trigger)
+    requires: FileListensForTriggerQualifiedViaAliasMappingTo(file_b, trigger, file_a)
+    requires: FileHasUseDeclarationMappingAliasTo(file_b, file_a)
+
     ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
     ensures: FindingNotObserved(code: "allium.reference.unknownName", name: trigger)
-
-    @guidance
-        -- requires: inputs resolve to multiple files
-        -- requires: file_a rule emits trigger as a bare call in any ensures position, or via an otherwise: clause
-        -- requires: file_b listens for trigger qualified via use alias mapping to file_a
-        -- requires: file_b has use declaration mapping alias to file_a
 }
 
 rule QualifiedTriggerUnreachableWhenAliasedModuleLacksIt {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingObserved(code: "allium.rule.unreachableTrigger", severity: info)
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileListensForTriggerQualifiedViaAliasMappingTo(file_b, trigger, file_a)
+    requires: FileNeitherProvidesNorEmitsTrigger(file_a, trigger)
 
-    @guidance
-        -- requires: inputs resolve to multiple files
-        -- requires: file_b listens for trigger qualified via use alias mapping to file_a
-        -- requires: file_a neither provides nor emits trigger
-        -- ensures: FindingMessage names the imported module alias
+    ensures: FindingObserved(code: "allium.rule.unreachableTrigger", severity: info)
+    ensures: FindingMessageNamesImportedModuleAlias()
 }
 
 rule QualifiedTriggerOutsideCheckSetNotFlagged {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
+    requires: FileListensForTriggerQualifiedViaUseAlias(trigger)
+    requires: not AliasTargetResolvesToFileInCheckSet(alias)
 
-    @guidance
-        -- requires: file listens for trigger qualified via use alias
-        -- requires: alias target does not resolve to a file in the check set
+    ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
 }
 
 -- Reverse cross-module aggregation: #19 credits a listener's imports for
@@ -503,25 +465,23 @@ rule QualifiedTriggerOutsideCheckSetNotFlagged {
 rule QualifiedCreationCreditsImportedStatusLifecycle {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.status.unreachableValue", status: value)
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileDeclaresEntityWithStatusValue(file_a, value)
+    requires: FileHasUseDeclarationMappingAliasTo(file_b, file_a)
+    requires: FileAssignsStatusValueViaQualifiedCreation(file_b, value)
 
-    @guidance
-        -- requires: inputs resolve to multiple files
-        -- requires: file_a declares entity with status value
-        -- requires: file_b has use declaration mapping alias to file_a
-        -- requires: file_b assigns status value via qualified creation (e.g. alias/Entity.created(status: value))
+    ensures: FindingNotObserved(code: "allium.status.unreachableValue", status: value)
 }
 
 rule QualifiedProvidesCreditsImportedTriggerReachability {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileRuleListensForTrigger(file_a, trigger)
+    requires: FileHasUseDeclarationMappingAliasTo(file_b, file_a)
+    requires: FileSurfaceProvidesTriggerQualifiedViaAlias(file_b, trigger)
 
-    @guidance
-        -- requires: inputs resolve to multiple files
-        -- requires: file_a rule listens for trigger
-        -- requires: file_b has use declaration mapping alias to file_a
-        -- requires: file_b surface provides trigger qualified via alias (e.g. alias/Trigger(params))
+    ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
 }
 
 -- A qualified reference alias/Name at any site — a when trigger or entity
@@ -534,12 +494,11 @@ rule QualifiedProvidesCreditsImportedTriggerReachability {
 rule UndeclaredImportAliasIsDiagnosedAtEveryReferenceSite {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingObserved(code: "allium.reference.undefinedImportedAlias", severity: error)
+    requires: QualifiedReferenceAppearsAtAnySite(alias, Name)
+    requires: not UseDeclarationInModuleBinds(alias)
 
-    @guidance
-        -- requires: a qualified reference alias/Name appears at any site
-        -- requires: no use declaration in the module binds alias
-        -- ensures: FindingMessage anchored at the reference names the unknown alias
+    ensures: FindingObserved(code: "allium.reference.undefinedImportedAlias", severity: error)
+    ensures: FindingMessageAnchoredAtReferenceNamesUnknownAlias(alias)
 }
 
 -- Beyond the alias, the name itself must resolve: with a valid alias whose
@@ -563,33 +522,30 @@ rule UndeclaredImportAliasIsDiagnosedAtEveryReferenceSite {
 rule UnknownImportedNameIsDiagnosedAtEveryReferenceSite {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingObserved(code: "allium.reference.unknownName", severity: warning)
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: QualifiedReferenceBindsAliasToFileInCheckSet(alias, Name)
+    requires: AliasedModuleOffersNoNameNamed(alias, Name)
+    requires: not ReferenceInCollectionConsumingPosition(Name)
 
-    @guidance
-        -- requires: inputs resolve to multiple files
-        -- requires: a qualified reference alias/Name where a use declaration binds alias to a file in the check set
-        -- requires: the aliased module offers no name named Name (no declared type, referenced trigger, config block, or deferred root)
-        -- requires: the reference is not in a collection-consuming position
-        -- ensures: FindingMessage anchored at the reference names the unknown name
+    ensures: FindingObserved(code: "allium.reference.unknownName", severity: warning)
+    ensures: FindingMessageAnchoredAtReferenceNamesUnknownName(Name)
 }
 
 rule QualifiedNameOutsideCheckSetNotFlagged {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
+    requires: QualifiedReferenceAliasTargetOutsideCheckSet(alias, Name)
 
-    @guidance
-        -- requires: a qualified reference alias/Name where alias's target is outside the check set
+    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
 }
 
 rule QualifiedCollectionReferenceNotFlagged {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
+    requires: QualifiedReferenceInCollectionConsumingPosition(alias, Name)
+    requires: UseDeclarationBindsAliasToFileInCheckSet(alias)
 
-    @guidance
-        -- requires: a qualified reference alias/Name in a collection-consuming position
-        -- requires: a use declaration binds alias to a file in the check set
+    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
 }
 
 -- Config and deferred names resolve across the boundary. alias/config.param is
@@ -600,21 +556,19 @@ rule QualifiedCollectionReferenceNotFlagged {
 rule QualifiedConfigReferenceResolves {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: config)
+    requires: QualifiedConfigReferenceBindsAliasToFileInCheckSet(alias)
+    requires: AliasedModuleDeclaresConfigBlock(alias)
 
-    @guidance
-        -- requires: a qualified reference alias/config where a use declaration binds alias to a file in the check set
-        -- requires: the aliased module declares a config block
+    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: config)
 }
 
 rule QualifiedDeferredReferenceResolves {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
+    requires: QualifiedReferenceBindsAliasToFileInCheckSet(alias, Name)
+    requires: AliasedModuleDeclaresDeferredWithRoot(alias, Name)
 
-    @guidance
-        -- requires: a qualified reference alias/Name where a use declaration binds alias to a file in the check set
-        -- requires: the aliased module declares deferred Name, or deferred Name.field with root Name
+    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
 }
 
 -- Field-level resolution of alias/config.field is not yet implemented: the
@@ -625,118 +579,108 @@ rule QualifiedDeferredReferenceResolves {
 rule QualifiedConfigFieldNotCheckedAtThisLayer {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: field)
+    requires: QualifiedConfigFieldReferenceWhereModuleDeclaresConfigBlock(alias, field)
+    requires: ConfigBlockDeclaresNoParameterNamed(field)
 
-    @guidance
-        -- requires: a qualified reference alias/config.field where the aliased module declares a config block
-        -- requires: the config block declares no parameter named field
+    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: field)
 }
 
 rule WitnessedTransitionCreditsImportedLifecycle {
     when: CheckCommandInvokedWithInputs(inputs)
 
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileDeclaresEntityWithTransitionEdge(file_a, source, target)
+    requires: FileSurfaceProvidesTriggerWithPayloadTypedToEntity(file_a)
+    requires: FileHasUseDeclarationMappingAliasTo(file_b, file_a)
+    requires: FileRuleSubscribesQualifiedGuardsOnSourceAssignsTarget(file_b, source, target)
+
     ensures: FindingNotObserved(code: "allium.status.unreachableValue", status: target)
     ensures: FindingNotObserved(code: "allium.status.noExit", status: source)
-
-    @guidance
-        -- requires: inputs resolve to multiple files
-        -- requires: file_a declares entity with transition edge from source to target
-        -- requires: file_a surface provides trigger with payload typed to entity
-        -- requires: file_b has use declaration mapping alias to file_a
-        -- requires: file_b rule subscribes to trigger qualified via alias, guards on source, assigns target
 }
 
 rule ImporterOwnedTriggerWitnessCreditsImportedLifecycle {
     when: CheckCommandInvokedWithInputs(inputs)
 
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileDeclaresEntityWithTransitionEdge(file_a, source, target)
+    requires: FileHasUseDeclarationMappingAliasTo(file_b, file_a)
+    requires: FileSurfaceDeclaresContextBindingAndProvidesTriggerCarryingIt(file_b)
+    requires: FileRuleSubscribesGuardsOnSourceAssignsTarget(file_b, source, target)
+
     ensures: FindingNotObserved(code: "allium.status.unreachableValue", status: target)
     ensures: FindingNotObserved(code: "allium.status.noExit", status: source)
-
-    @guidance
-        -- requires: inputs resolve to multiple files
-        -- requires: file_a declares entity with transition edge from source to target
-        -- requires: file_b has use declaration mapping alias to file_a
-        -- requires: file_b surface declares a context binding typed alias/entity and provides a trigger carrying it
-        -- requires: file_b rule subscribes to that trigger, guards on source, assigns target
 }
 
 rule ImportedModuleAloneKeepsLocalLifecycleWarnings {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingObserved(code: "allium.status.unreachableValue", status: value, severity: warning)
+    requires: InputsResolveToSingleFile(inputs)
+    requires: FileDeclaresStatusValueAssignedOnlyByImporterOutsideCheckSet(value)
 
-    @guidance
-        -- requires: inputs resolve to a single file
-        -- requires: file declares status value assigned only by an importer outside the check set
+    ensures: FindingObserved(code: "allium.status.unreachableValue", status: value, severity: warning)
 }
 
 rule CoSuppliedFilesWithoutImportEdgeDoNotContribute {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingObserved(code: "allium.status.unreachableValue", status: value, severity: warning)
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileDeclaresEntityWithStatusValue(file_a, value)
+    requires: FileAssignsStatusValueWithoutUseDeclarationMappingTo(file_b, value, file_a)
 
-    @guidance
-        -- requires: inputs resolve to multiple files
-        -- requires: file_a declares entity with status value
-        -- requires: file_b assigns status value but has no use declaration mapping to file_a
+    ensures: FindingObserved(code: "allium.status.unreachableValue", status: value, severity: warning)
 }
 
 rule AmbiguousUnqualifiedNameReferenceWarns {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingObserved(code: "allium.use.ambiguousReference", severity: warning)
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: TwoOrMoreDistinctImportedFilesDeclareName(name)
+    requires: ImportingFileReferencesNameUnqualified(name)
+    requires: not ImportingFileDeclaresNameLocally(name)
 
-    @guidance
-        -- requires: inputs resolve to multiple files
-        -- requires: two or more distinct imported files declare name
-        -- requires: importing file references name unqualified
-        -- requires: importing file does not declare name locally
-        -- ensures: FindingMessage names the candidate import aliases
-        -- ensures: FindingMessage suggests a qualified name
-        -- ensures: at most one finding per ambiguous name, at its first reference site
+    ensures: FindingObserved(code: "allium.use.ambiguousReference", severity: warning)
+    ensures: FindingMessageNamesCandidateImportAliases()
+    ensures: FindingMessageSuggestsQualifiedName()
+    ensures: AtMostOneFindingPerAmbiguousNameAtFirstReferenceSite(name)
 }
 
 rule AmbiguousUnqualifiedTriggerSubscriptionWarns {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingObserved(code: "allium.use.ambiguousReference", severity: warning)
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: TwoOrMoreDistinctImportedFilesProvideOrEmitTrigger(trigger)
+    requires: ImportingFileListensForTriggerUnqualified(trigger)
+    requires: not ImportingFileProvidesOrEmitsTriggerLocally(trigger)
 
-    @guidance
-        -- requires: inputs resolve to multiple files
-        -- requires: two or more distinct imported files provide or emit trigger
-        -- requires: importing file listens for trigger unqualified
-        -- requires: importing file neither provides nor emits trigger locally
-        -- ensures: FindingMessage names the candidate import aliases
-        -- ensures: FindingMessage suggests a qualified name
+    ensures: FindingObserved(code: "allium.use.ambiguousReference", severity: warning)
+    ensures: FindingMessageNamesCandidateImportAliases()
+    ensures: FindingMessageSuggestsQualifiedName()
 }
 
 rule AmbiguityResolvedByQualificationOrShadowing {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.use.ambiguousReference")
+    requires: ReferenceQualifiedOrDeclaredLocallyOrAllAliasesTargetSameFile()
 
-    @guidance
-        -- requires: reference is qualified via use alias, or the importing file declares the name locally, or all matching use aliases target the same file
+    ensures: FindingNotObserved(code: "allium.use.ambiguousReference")
 }
 
 rule DeferredWithoutLocationHintWarns {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingObserved(code: "allium.deferred.missingLocationHint", severity: warning)
+    requires: FileContainsDeferredDeclaration()
+    requires: DeferredLineExcludesLocationHint()
 
-    @guidance
-        -- requires: file contains deferred declaration
-        -- requires: deferred line excludes quoted path, URL, and "-- see:" comment
+    ensures: FindingObserved(code: "allium.deferred.missingLocationHint", severity: warning)
 }
 
 rule DeferredWithLocationHintSuppressesWarning {
     when: CheckCommandInvokedWithInputs(inputs)
 
-    ensures: FindingNotObserved(code: "allium.deferred.missingLocationHint", declaration: deferred_declaration)
+    requires: FileContainsDeferredDeclaration(deferred_declaration)
+    requires: DeferredDeclarationLineIncludesLocationHint(deferred_declaration)
 
-    @guidance
-        -- requires: file contains deferred_declaration
-        -- requires: deferred_declaration line includes quoted path, URL, or "-- see:" comment
+    ensures: FindingNotObserved(code: "allium.deferred.missingLocationHint", declaration: deferred_declaration)
 }
 
 rule DeferredPathConstrainedToDottedName {
@@ -744,9 +688,8 @@ rule DeferredPathConstrainedToDottedName {
     -- accepted forms: Name, Name.field.sub, alias/Name, alias/Name.field,
     -- each optionally followed by a quoted location hint on the same line
 
-    ensures: FindingObserved(severity: error)
+    requires: FileContainsDeferredDeclaration(deferred_declaration)
+    requires: not DeferredDeclarationPathIsDottedNameWithOptionalUseAliasQualifier(deferred_declaration)
 
-    @guidance
-        -- requires: file contains deferred_declaration
-        -- requires: deferred_declaration path is not a dotted name with an optional use-alias qualifier
+    ensures: FindingObserved(severity: error)
 }

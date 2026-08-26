@@ -1,17 +1,19 @@
 # Capability gaps
 
-Behavioural claims our own specs need to make that Allium cannot yet express as
-checkable predicates. Where a claim has no expressible form, it lives in a
-`@guidance` annotation or a comment rather than a `requires:`/`ensures:` clause,
-so the intent stays documented and the spec still checks clean. This file
-records the classes so the gaps are visible rather than buried, and so the
-guidance can migrate back into checkable clauses if the language later gains the
-constructs.
+Behavioural claims our own specs make that Allium can express only
+descriptively. Every predicate in these specs is written as a `requires:`/
+`ensures:` clause that parses, but for the classes below the clause is a named
+predicate call (e.g. `DiagnosticsOrderedBySourcePositionThenCode()`) that
+carries the intent without the checker being able to confirm it: the checker
+validates a spec's form, not the truth of its predicates, and nothing in the
+language models the checker's own internals to make these decidable. This file
+records the classes so the limit stays visible. If Allium later gains the
+constructs to reason about them, these predicates can be given real backing.
 
-Surfaced while making `docs/project/specs/allium-check-tool-behaviour.allium`
-adhere to the v3 checker: of 62 rules, the checkable core of each (which
-diagnostic code, at which severity) is expressed as real `ensures:`, while the
-conditions and guarantees below could not be and became `@guidance`.
+Surfaced while migrating `docs/project/specs/` to the v3 checker: each rule's
+checkable core (which diagnostic code, at which severity) is a real `ensures:`
+observation, while the conditions and guarantees below are nominal predicate
+calls of the kinds catalogued here.
 
 ## Meta-claims about output ordering and determinism
 
