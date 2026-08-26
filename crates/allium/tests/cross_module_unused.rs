@@ -962,3 +962,123 @@ fn qualified_default_not_flagged_when_target_outside_check_set() {
         "qualified default with target outside check set must not be flagged: {codes:?}"
     );
 }
+
+// -----------------------------------------------------------------------
+// References through a use path that resolves nowhere
+// -----------------------------------------------------------------------
+
+const BROKEN_IMPORT_CONSUMER: &str = "-- allium: 3\n\
+-- allium-ignore allium.use.unresolvedPath\n\
+use \"./does-not-exist.allium\" as p\n\n\
+surface Api {\n    provides:\n        Go(x)\n}\n\n\
+rule ReferencesThroughBrokenAlias {\n    when: Go(x)\n\n    requires: p/CompletelyMadeUpName(x)\n\n    ensures: Done(x: x)\n}\n";
+
+#[test]
+fn suppressed_unresolved_use_does_not_blind_reference_checking() {
+    // The use-line unresolvedPath warning is the only diagnostic a broken
+    // import produces, and it is suppressible: with one allium-ignore, a spec
+    // referencing completely made-up names through the dead alias checked
+    // clean (exit 0). References through a use path that resolves neither in
+    // the check set nor on disk must keep diagnosing, independent of the
+    // use-line suppression.
+    let dir = TempDir::new("broken-import-suppressed");
+    dir.write("consumer.allium", BROKEN_IMPORT_CONSUMER);
+
+    let output = allium()
+        .args(["check", &dir.path().to_string_lossy()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diags = parse_diagnostics(&stdout);
+
+    assert!(
+        diags.iter().any(|d| d.code == "allium.reference.unresolvedImport"
+            && d.message.contains("CompletelyMadeUpName")
+            && d.message.contains("./does-not-exist.allium")),
+        "a reference through a nowhere-resolving alias must be diagnosed even with the use-line warning suppressed.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+    assert!(
+        !output.status.success(),
+        "a spec whose cross-module references resolve against nothing must not exit 0.\n{stdout}"
+    );
+}
+
+#[test]
+fn unsuppressed_broken_import_reports_both_the_path_and_the_references() {
+    let dir = TempDir::new("broken-import-plain");
+    dir.write(
+        "consumer.allium",
+        &BROKEN_IMPORT_CONSUMER.replace("-- allium-ignore allium.use.unresolvedPath\n", ""),
+    );
+
+    let output = allium()
+        .args(["check", &dir.path().to_string_lossy()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let codes = diagnostic_codes(&stdout);
+
+    assert!(codes.iter().any(|c| c == "allium.use.unresolvedPath"), "{codes:?}");
+    assert!(codes.iter().any(|c| c == "allium.reference.unresolvedImport"), "{codes:?}");
+}
+
+#[test]
+fn references_through_an_on_disk_target_outside_the_check_set_stay_unknowable() {
+    // Single-file workflows: the sibling file exists on disk but is not part
+    // of the 1-file check set. The use line warns unresolvedPath (as today),
+    // but the references through the alias must NOT draw unresolvedImport —
+    // the module is knowable in a wider check, just not this one.
+    let dir = TempDir::new("broken-import-on-disk");
+    dir.write(
+        "provider.allium",
+        "-- allium: 3\nsurface Api {\n    provides:\n        Ping(x)\n}\n",
+    );
+    dir.write(
+        "consumer.allium",
+        "-- allium: 3\nuse \"./provider.allium\" as p\n\n\
+         rule ConsumesPing {\n    when: p/Ping(x)\n\n    ensures: Done(x: x)\n}\n",
+    );
+
+    let output = allium()
+        .args(["check", &dir.path().join("consumer.allium").to_string_lossy()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diags = parse_diagnostics(&stdout);
+
+    assert!(
+        diags.iter().any(|d| d.code == "allium.use.unresolvedPath"),
+        "out-of-set target still warns on the use line.\n{stdout}"
+    );
+    assert!(
+        !diags.iter().any(|d| d.code == "allium.reference.unresolvedImport"),
+        "references through an on-disk target must stay unknowable, not broken.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn references_through_a_registry_coordinate_import_stay_unknowable() {
+    // Registry coordinates (immutable remote references, per the language
+    // reference's "Using other specs") are never on local disk; that does not
+    // make them broken. References through such an alias stay unchecked.
+    let dir = TempDir::new("registry-import");
+    dir.write(
+        "consumer.allium",
+        "-- allium: 3\nuse \"github.com/specs/auth/abc123\" as auth\n\n\
+         rule ConsumesRemote {\n    when: auth/Session(user)\n\n    ensures: Done(user: user)\n}\n",
+    );
+
+    let output = allium()
+        .args(["check", &dir.path().to_string_lossy()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !parse_diagnostics(&stdout)
+            .iter()
+            .any(|d| d.code == "allium.reference.unresolvedImport"),
+        "a registry coordinate is out-of-set, not broken.\nDiagnostics: {stdout}"
+    );
+}
