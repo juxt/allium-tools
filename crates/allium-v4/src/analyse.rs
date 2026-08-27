@@ -28,6 +28,7 @@ pub fn analyse(source: &str) -> ParseResult {
     let mut r = crate::check::check(source);
     r.diagnostics.append(&mut coverage(&r.module, source));
     r.diagnostics.append(&mut consistency(&r.module, source));
+    r.diagnostics.append(&mut feasibility(&r.module, source));
     r
 }
 
@@ -185,10 +186,11 @@ pub fn route_json(source: &str) -> String {
 pub fn consistency(module: &Module, src: &str) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for d in &module.decls {
+        // Invariants and axioms must JOINTLY hold; requirements are handled by feasibility().
         let rules: Vec<(String, Expr)> = d
             .items
             .iter()
-            .filter(|it| matches!(it.kind, ItemKind::Invariant | ItemKind::Requirement | ItemKind::Axiom))
+            .filter(|it| matches!(it.kind, ItemKind::Invariant | ItemKind::Axiom))
             .filter_map(|it| {
                 it.body
                     .map(|sp| (it.name.clone().unwrap_or_else(|| "<anon>".into()), crate::expr::parse_predicate(sp.slice(src)).0))
@@ -241,6 +243,82 @@ pub fn consistency(module: &Module, src: &str) -> Vec<Diagnostic> {
                     d.span,
                     format!("rule set in `{}` is CONTRADICTORY: no state satisfies all constraints. Minimal conflicting core: {}. These rules cannot hold together.", d.name, core.join(", ")),
                 ));
+            }
+        }
+    }
+    out
+}
+
+/// Per-scenario feasibility against a contract. `axiom` items are background truths that
+/// hold of every report; `requirement` items are report shapes the integrating system
+/// declares it will emit. A requirement is INFEASIBLE if no report satisfies it together
+/// with the axioms — the system plans to send reports the contract can never accept, an
+/// integration defect surfaced at design time. On infeasibility a minimal blocking core of
+/// axioms is reported (greedy). Bounded; exact for independent boolean atoms.
+pub fn feasibility(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let pick = |kind: ItemKind| -> Vec<(String, Expr)> {
+            d.items
+                .iter()
+                .filter(|it| it.kind == kind)
+                .filter_map(|it| {
+                    it.body
+                        .map(|sp| (it.name.clone().unwrap_or_else(|| "<anon>".into()), crate::expr::parse_predicate(sp.slice(src)).0))
+                })
+                .collect()
+        };
+        let axioms = pick(ItemKind::Axiom);
+        let reqs = pick(ItemKind::Requirement);
+        if reqs.is_empty() {
+            continue;
+        }
+
+        let mut set = BTreeSet::new();
+        for (_, e) in axioms.iter().chain(reqs.iter()) {
+            collect_atoms(e, &mut set);
+        }
+        let atoms: Vec<String> = set.into_iter().collect();
+        let n = atoms.len();
+        if n == 0 || n > MAX_ATOMS {
+            out.push(Diagnostic::warning(
+                d.span,
+                format!("feasibility in `{}` not checked: {n} atoms (bounded needs 1..={MAX_ATOMS})", d.name),
+            ));
+            continue;
+        }
+
+        // Does some report satisfy `req` and every active axiom?
+        let sat = |req: &Expr, active: &[bool]| -> Option<u64> {
+            (0u64..(1u64 << n)).find(|&mask| {
+                let assign: HashMap<String, bool> =
+                    atoms.iter().enumerate().map(|(i, a)| (a.clone(), (mask >> i) & 1 == 1)).collect();
+                eval(req, &assign) && axioms.iter().enumerate().all(|(k, (_, e))| !active[k] || eval(e, &assign))
+            })
+        };
+
+        for (rname, rexpr) in &reqs {
+            match sat(rexpr, &vec![true; axioms.len()]) {
+                Some(mask) => out.push(Diagnostic::warning(
+                    d.span,
+                    format!("requirement `{}` in `{}` is feasible under the contract (e.g. {}).", rname, d.name, describe(&atoms, mask)),
+                )),
+                None => {
+                    // Minimal blocking core: axioms whose removal restores feasibility.
+                    let mut active = vec![true; axioms.len()];
+                    for k in 0..axioms.len() {
+                        active[k] = false;
+                        if sat(rexpr, &active).is_some() {
+                            active[k] = true; // removing k restored feasibility -> k is a blocker
+                        }
+                    }
+                    let core: Vec<String> =
+                        axioms.iter().enumerate().filter(|(k, _)| active[*k]).map(|(_, (nm, _))| nm.clone()).collect();
+                    out.push(Diagnostic::warning(
+                        d.span,
+                        format!("requirement `{}` in `{}` is INFEASIBLE under the contract: no acceptable report satisfies it. Blocked by: {}. The integration would emit reports the contract rejects.", rname, d.name, core.join(", ")),
+                    ));
+                }
             }
         }
     }
@@ -378,6 +456,19 @@ mod tests {
         );
         assert!(any(&src, "jointly satisfiable"));
         assert!(!any(&src, "is CONTRADICTORY"));
+    }
+
+    #[test]
+    fn feasibility_flags_infeasible_requirement_with_emergent_core() {
+        // c requires b; d forbids b -> a report that is c-and-d is infeasible via a 2-rule
+        // core, with no single axiom forbidding it.
+        let src = format!(
+            "{HDR}  axiom needs_b means c(t) implies b(t)\n  axiom forbids_b means a(t) implies not b(t)\n  requirement can_ship means c(t) and a(t)\n  requirement plain means b(t)\nend\n"
+        );
+        assert!(any(&src, "`can_ship`") && any(&src, "INFEASIBLE"));
+        let bad = msgs(&src).into_iter().find(|m| m.contains("can_ship")).unwrap();
+        assert!(bad.contains("needs_b") && bad.contains("forbids_b"));
+        assert!(any(&src, "`plain`") && any(&src, "feasible under the contract"));
     }
 
     #[test]
