@@ -10,6 +10,7 @@ pub mod diagnostic;
 pub mod expr;
 pub mod lexer;
 pub mod parser;
+pub mod sat;
 pub mod span;
 
 pub use analyse::{analyse, route_json};

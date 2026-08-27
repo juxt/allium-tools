@@ -13,6 +13,7 @@
 //! exact for boolean-state guards (the waterfall) and an over-approximation where
 //! guards use enum equalities (noted in the diagnostic).
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
@@ -32,7 +33,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r
 }
 
-fn canon(e: &Expr) -> String {
+pub(crate) fn canon(e: &Expr) -> String {
     match e {
         Expr::Name(s) => s.clone(),
         Expr::Int(n) => n.to_string(),
@@ -200,40 +201,21 @@ pub fn consistency(module: &Module, src: &str) -> Vec<Diagnostic> {
             continue;
         }
 
-        let mut set = BTreeSet::new();
-        for (_, e) in &rules {
-            collect_atoms(e, &mut set);
-        }
-        let atoms: Vec<String> = set.into_iter().collect();
-        let n = atoms.len();
-        if n == 0 || n > MAX_ATOMS {
-            out.push(Diagnostic::warning(
-                d.span,
-                format!("rule set in `{}` not checked for consistency: {n} atoms (bounded needs 1..={MAX_ATOMS})", d.name),
-            ));
-            continue;
-        }
-
-        // SAT over the currently-active rules: return a satisfying assignment if one exists.
-        let sat = |active: &[bool]| -> Option<u64> {
-            (0u64..(1u64 << n)).find(|&mask| {
-                let assign: HashMap<String, bool> =
-                    atoms.iter().enumerate().map(|(i, a)| (a.clone(), (mask >> i) & 1 == 1)).collect();
-                rules.iter().enumerate().all(|(k, (_, e))| !active[k] || eval(e, &assign))
-            })
+        // Joint satisfiability via the dependency-free SAT engine (scales past enumeration).
+        let subset = |active: &[bool]| -> Vec<&Expr> {
+            rules.iter().enumerate().filter(|(k, _)| active[*k]).map(|(_, (_, e))| e).collect()
         };
-
-        match sat(&vec![true; rules.len()]) {
-            Some(mask) => out.push(Diagnostic::warning(
+        match crate::sat::satisfiable(&subset(&vec![true; rules.len()])) {
+            Some(m) => out.push(Diagnostic::warning(
                 d.span,
-                format!("rule set in `{}` is jointly satisfiable over the bounded atom space (e.g. {}).", d.name, describe(&atoms, mask)),
+                format!("rule set in `{}` is jointly satisfiable (e.g. {}).", d.name, crate::sat::describe(&m)),
             )),
             None => {
                 // Minimal UNSAT core: drop each rule; keep it only if its removal restores SAT.
                 let mut active = vec![true; rules.len()];
                 for k in 0..rules.len() {
                     active[k] = false;
-                    if sat(&active).is_some() {
+                    if crate::sat::satisfiable(&subset(&active)).is_some() {
                         active[k] = true;
                     }
                 }
@@ -274,34 +256,18 @@ pub fn feasibility(module: &Module, src: &str) -> Vec<Diagnostic> {
             continue;
         }
 
-        let mut set = BTreeSet::new();
-        for (_, e) in axioms.iter().chain(reqs.iter()) {
-            collect_atoms(e, &mut set);
-        }
-        let atoms: Vec<String> = set.into_iter().collect();
-        let n = atoms.len();
-        if n == 0 || n > MAX_ATOMS {
-            out.push(Diagnostic::warning(
-                d.span,
-                format!("feasibility in `{}` not checked: {n} atoms (bounded needs 1..={MAX_ATOMS})", d.name),
-            ));
-            continue;
-        }
-
-        // Does some report satisfy `req` and every active axiom?
-        let sat = |req: &Expr, active: &[bool]| -> Option<u64> {
-            (0u64..(1u64 << n)).find(|&mask| {
-                let assign: HashMap<String, bool> =
-                    atoms.iter().enumerate().map(|(i, a)| (a.clone(), (mask >> i) & 1 == 1)).collect();
-                eval(req, &assign) && axioms.iter().enumerate().all(|(k, (_, e))| !active[k] || eval(e, &assign))
-            })
+        // Does some report satisfy `req` together with every active axiom? (SAT engine.)
+        let sat = |rexpr: &Expr, active: &[bool]| -> Option<BTreeMap<String, bool>> {
+            let mut es: Vec<&Expr> = axioms.iter().enumerate().filter(|(k, _)| active[*k]).map(|(_, (_, e))| e).collect();
+            es.push(rexpr);
+            crate::sat::satisfiable(&es)
         };
 
         for (rname, rexpr) in &reqs {
             match sat(rexpr, &vec![true; axioms.len()]) {
-                Some(mask) => out.push(Diagnostic::warning(
+                Some(m) => out.push(Diagnostic::warning(
                     d.span,
-                    format!("requirement `{}` in `{}` is feasible under the contract (e.g. {}).", rname, d.name, describe(&atoms, mask)),
+                    format!("requirement `{}` in `{}` is feasible under the contract (e.g. {}).", rname, d.name, crate::sat::describe(&m)),
                 )),
                 None => {
                     // Minimal blocking core: axioms whose removal restores feasibility.
