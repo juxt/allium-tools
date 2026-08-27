@@ -184,6 +184,7 @@ pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
         }
         let combos = 1u64 << n;
 
+        // Disjointness verdict — one line always emitted for a detected case-split.
         if all_pairwise_contradict {
             out.push(Diagnostic::warning(
                 d.span,
@@ -194,11 +195,22 @@ pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
                 d.span,
                 format!("case-split in `{}` is NOT disjoint: {overlaps}/{combos} condition-combinations match more than one guard (e.g. {}). Two actions fire in the same state — an ambiguous classification.", d.name, over_eg.unwrap()),
             ));
+        } else {
+            out.push(Diagnostic::warning(
+                d.span,
+                format!("case-split in `{}` is disjoint over the bounded atom space (no combination matches two guards; exact for independent boolean conditions).", d.name),
+            ));
         }
+        // Exhaustiveness verdict — one line always emitted.
         if gaps > 0 {
             out.push(Diagnostic::warning(
                 d.span,
                 format!("case-split in `{}` may leave {gaps}/{combos} atom-combinations uncovered (e.g. {}) — a subject in that state matches no action. Bounded/axiom-relative: state the domain axioms (e.g. every cleared trade has a CCP) for a sound verdict.", d.name, gap_eg.unwrap()),
+            ));
+        } else {
+            out.push(Diagnostic::warning(
+                d.span,
+                format!("case-split in `{}` is exhaustive over the bounded atom space (every combination matches an action).", d.name),
             ));
         }
     }
