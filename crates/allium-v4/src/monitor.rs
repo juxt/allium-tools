@@ -56,6 +56,25 @@ fn atoms_of(e: &Expr, in_old: bool, out: &mut Vec<(String, bool)>) {
     }
 }
 
+/// Can this monitor faithfully evaluate the invariant? Returns `Some(reason)` if not.
+/// The monitor is a per-entity, boolean, past-temporal evaluator; anything outside that
+/// (quantifiers, relational atoms over several entities, value comparisons) is SKIPPED and
+/// reported, never silently mis-evaluated — a wrong verdict is worse than an honest gap.
+fn unsupported(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Quant { .. } => Some("quantified (needs the design-time check, not a per-event monitor)".into()),
+        Expr::Binary { op: BinOp::And | BinOp::Or | BinOp::Implies, lhs, rhs } => {
+            unsupported(lhs).or_else(|| unsupported(rhs))
+        }
+        Expr::Binary { .. } => Some("value comparison (monitor is boolean-only)".into()),
+        Expr::Unary { e, .. } => unsupported(e),
+        Expr::App { args, .. } if args.len() != 1 => {
+            Some(format!("relational atom of arity {} (monitor binds one entity)", args.len()))
+        }
+        _ => None,
+    }
+}
+
 /// Evaluate a boolean expression in a single state (no temporal operators inside).
 fn eval_state(e: &Expr, s: &HashMap<String, bool>) -> bool {
     match e {
@@ -127,6 +146,19 @@ pub fn monitor(source: &str, trace: &str) -> String {
         })
         .collect();
 
+    // Partition into monitorable invariants and honestly-skipped ones.
+    let mut skipped: Vec<String> = Vec::new();
+    let invs: Vec<(String, Expr, bool)> = invs
+        .into_iter()
+        .filter(|(name, expr, _)| match unsupported(expr) {
+            Some(reason) => {
+                skipped.push(format!("{{\"invariant\":\"{}\",\"reason\":\"{}\"}}", esc(name), esc(&reason)));
+                false
+            }
+            None => true,
+        })
+        .collect();
+
     let events = parse_trace(trace);
     let mut prev: HashMap<String, HashMap<String, bool>> = HashMap::new();
     let mut violations: Vec<String> = Vec::new();
@@ -170,8 +202,10 @@ pub fn monitor(source: &str, trace: &str) -> String {
     }
 
     format!(
-        "{{\"events\":{},\"violations\":[{}],\"ok\":{}}}",
+        "{{\"events\":{},\"monitored\":{},\"skipped\":[{}],\"violations\":[{}],\"ok\":{}}}",
         events.len(),
+        invs.len(),
+        skipped.join(","),
         violations.join(","),
         violations.is_empty()
     )
@@ -206,6 +240,16 @@ mod tests {
                      t=2 entity=R2 collateralised=F has_code=F accepted=F rejected=T\n";
         let r = monitor(SPEC, trace);
         assert!(count(&r, "once_accepted") == 1, "{r}");
+    }
+
+    #[test]
+    fn skips_unsupported_invariant_instead_of_misevaluating() {
+        // A value-comparison invariant the boolean monitor cannot evaluate.
+        let spec = "-- allium: 4\ncomponent M\n  entity R\n  observable state bal(R) : bool\n  invariant keeps means bal(r) = old(bal(r))\nend\n";
+        let r = monitor(spec, "t=1 entity=R1 bal=T\nt=2 entity=R1 bal=F\n");
+        assert!(r.contains("\"monitored\":0"), "{r}");
+        assert!(r.contains("keeps") && r.contains("boolean-only"), "{r}");
+        assert!(r.contains("\"ok\":true"), "{r}"); // nothing wrongly flagged
     }
 
     #[test]
