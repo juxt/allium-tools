@@ -204,15 +204,20 @@ pub fn consistency(module: &Module, src: &str) -> Vec<Diagnostic> {
 pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for d in &module.decls {
-        let guards: Vec<Expr> = d
+        let named: Vec<(String, Expr)> = d
             .items
             .iter()
             .filter(|it| it.kind == ItemKind::Action)
-            .filter_map(|it| it.requires.map(|sp| crate::expr::parse_predicate(sp.slice(src)).0))
+            .filter_map(|it| {
+                it.requires
+                    .map(|sp| (it.name.clone().unwrap_or_else(|| "<anon>".into()), crate::expr::parse_predicate(sp.slice(src)).0))
+            })
             .collect();
-        if guards.len() < 2 {
+        if named.len() < 2 {
             continue; // not a case-split
         }
+        let names: Vec<String> = named.iter().map(|(n, _)| n.clone()).collect();
+        let guards: Vec<Expr> = named.into_iter().map(|(_, e)| e).collect();
 
         let mut set = BTreeSet::new();
         for g in &guards {
@@ -243,16 +248,20 @@ pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
         let mut overlaps = 0u64;
         let mut gap_eg = None;
         let mut over_eg = None;
+        let mut over_names: Vec<String> = Vec::new();
         for mask in 0u64..(1u64 << n) {
             let assign: HashMap<String, bool> =
                 atoms.iter().enumerate().map(|(i, a)| (a.clone(), (mask >> i) & 1 == 1)).collect();
-            let matched = guards.iter().filter(|g| eval(g, &assign)).count();
-            if matched == 0 {
+            let firing: Vec<usize> = guards.iter().enumerate().filter(|(_, g)| eval(g, &assign)).map(|(i, _)| i).collect();
+            if firing.is_empty() {
                 gaps += 1;
                 gap_eg.get_or_insert_with(|| describe(&atoms, mask));
-            } else if matched >= 2 {
+            } else if firing.len() >= 2 {
                 overlaps += 1;
-                over_eg.get_or_insert_with(|| describe(&atoms, mask));
+                if over_eg.is_none() {
+                    over_eg = Some(describe(&atoms, mask));
+                    over_names = firing.iter().map(|&i| names[i].clone()).collect();
+                }
             }
         }
         let combos = 1u64 << n;
@@ -266,7 +275,7 @@ pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
         } else if overlaps > 0 {
             out.push(Diagnostic::warning(
                 d.span,
-                format!("case-split in `{}` is NOT disjoint: {overlaps}/{combos} condition-combinations match more than one guard (e.g. {}). Two actions fire in the same state — an ambiguous classification.", d.name, over_eg.unwrap()),
+                format!("case-split in `{}` is NOT disjoint: actions {} both fire in {overlaps}/{combos} condition-combinations (e.g. {}) — an ambiguous classification.", d.name, over_names.join(" + "), over_eg.unwrap()),
             ));
         } else {
             out.push(Diagnostic::warning(
