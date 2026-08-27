@@ -138,9 +138,31 @@ fn main() -> ExitCode {
                 _ => unreachable!(),
             }
         }
+        "route" => cmd_route(rest),
         other => {
             eprintln!("allium: unknown command `{other}`");
             eprintln!("Run `allium --help` for available commands.");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// v4-only routing dump for fidelity checking (see allium_v4::route_json).
+fn cmd_route(args: &[String]) -> ExitCode {
+    let path = match args.iter().find(|a| !a.starts_with('-')) {
+        Some(p) => p,
+        None => {
+            eprintln!("route: need a single .allium file");
+            return ExitCode::from(2);
+        }
+    };
+    match std::fs::read_to_string(path) {
+        Ok(source) => {
+            println!("{}", allium_v4::route_json(&source));
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("route: {path}: {e}");
             ExitCode::from(2)
         }
     }

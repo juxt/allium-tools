@@ -12,7 +12,7 @@ pub mod lexer;
 pub mod parser;
 pub mod span;
 
-pub use analyse::analyse;
+pub use analyse::{analyse, route_json};
 pub use ast::Module;
 pub use check::check;
 pub use diagnostic::{Diagnostic, Severity};

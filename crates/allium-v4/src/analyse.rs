@@ -128,6 +128,53 @@ fn contradict(a: &[(String, bool)], b: &[(String, bool)]) -> bool {
     a.iter().any(|(name, pol)| b.iter().any(|(n2, p2)| n2 == name && p2 != pol))
 }
 
+/// Dump, for every boolean assignment to the guards' atoms, which actions fire — so an
+/// external oracle can check ROUTING FIDELITY (does the case-split send each state to the
+/// intended outcome), a stronger property than the structural disjoint+exhaustive check.
+/// v4-only; JSON: `{"atoms":[...ordered], "rows":[[firing action names] per mask]}` where
+/// bit i of the mask is `atoms[i]`. Bounded to 16 atoms (65536 rows).
+pub fn route_json(source: &str) -> String {
+    let module = crate::check::check(source).module;
+    let mut named: Vec<(String, Expr)> = Vec::new();
+    for d in &module.decls {
+        for it in &d.items {
+            if it.kind == ItemKind::Action {
+                if let Some(sp) = it.requires {
+                    named.push((
+                        it.name.clone().unwrap_or_else(|| "<anon>".into()),
+                        crate::expr::parse_predicate(sp.slice(source)).0,
+                    ));
+                }
+            }
+        }
+    }
+    let mut set = BTreeSet::new();
+    for (_, e) in &named {
+        collect_atoms(e, &mut set);
+    }
+    let atoms: Vec<String> = set.into_iter().collect();
+    let n = atoms.len();
+    if n == 0 || n > 16 {
+        return format!("{{\"error\":\"{n} atoms (route needs 1..=16)\",\"atoms\":[],\"rows\":[]}}");
+    }
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut rows = String::new();
+    for mask in 0u64..(1u64 << n) {
+        let assign: HashMap<String, bool> =
+            atoms.iter().enumerate().map(|(i, a)| (a.clone(), (mask >> i) & 1 == 1)).collect();
+        let firing: Vec<String> =
+            named.iter().filter(|(_, e)| eval(e, &assign)).map(|(nm, _)| format!("\"{}\"", esc(nm))).collect();
+        if mask > 0 {
+            rows.push(',');
+        }
+        rows.push('[');
+        rows.push_str(&firing.join(","));
+        rows.push(']');
+    }
+    let atoms_json: Vec<String> = atoms.iter().map(|a| format!("\"{}\"", esc(a))).collect();
+    format!("{{\"atoms\":[{}],\"rows\":[{}]}}", atoms_json.join(","), rows)
+}
+
 /// Joint satisfiability of a component's stated constraints (invariant/requirement/axiom).
 /// A rule set that NO state satisfies is contradictory: the rules cannot hold together.
 /// This is a bug that emerges from rule INTERACTION and is invisible in any single rule,
