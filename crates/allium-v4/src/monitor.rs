@@ -1,22 +1,28 @@
 //! Runtime monitor derived from a v4 spec's invariants. The SAME `invariant` items the
-//! design-time checks verify are evaluated here over a concrete execution trace: this is
-//! the runtime modality of one artifact (design-time verify + build + monitor from one
-//! spec). A point invariant is a per-state safety check; a past-temporal invariant using
-//! `old(...)` is evaluated against the entity's previous trace state, so monotonicity and
-//! non-regression properties ("once accepted, never rejected") are monitorable — the sort
-//! of "fault meaning" a hand-written assert does not carry and cannot keep in step with
-//! the design.
+//! design-time checks verify are evaluated here over a concrete execution trace: the
+//! runtime modality of one artifact (design-time verify + build + monitor from one spec).
+//!
+//! Three kinds of invariant are monitored, and anything outside them is honestly SKIPPED
+//! with a reason (never silently mis-evaluated — a wrong verdict is worse than a gap):
+//!   - point:      a per-state boolean safety check;
+//!   - temporal:   uses `old(...)`, evaluated against the entity's previous trace state,
+//!                 so monotonicity / non-regression ("once accepted, never rejected") work;
+//!   - relational: quantified (`every`/`some`/`no`/`exists`) over the current population of
+//!                 entities, with equality on value fields — uniqueness, referential
+//!                 integrity, functional-dependency properties.
 //!
 //! Trace format (dependency-free, one event per line):
-//!   `t=<int> entity=<id> <pred>=T <pred>=F ...`
-//! where each `<pred>` is a boolean observable-state predicate name. Events for the same
-//! entity are ordered; `old(p(x))` reads that entity's previous event's value of `p`.
+//!   `t=<int> entity=<id> <pred>=T <pred>=F <field>=<value> ...`
+//! A `T/F/true/false/1/0` value is a boolean predicate; anything else is a value field
+//! (for equality in relational invariants). Events for one entity are ordered; `old(p(x))`
+//! reads that entity's previous event; relational invariants read the latest state of every
+//! entity seen so far.
 
 use std::collections::HashMap;
 
 use crate::analyse::canon;
 use crate::ast::ItemKind;
-use crate::expr::{BinOp, Expr, UnOp};
+use crate::expr::{BinOp, Expr, Quant, UnOp};
 
 /// Strip a predicate application to its name: `cleared(r)` -> `cleared`.
 fn pred_name(e: &Expr) -> String {
@@ -27,18 +33,40 @@ fn pred_name(e: &Expr) -> String {
     }
 }
 
-/// Does the invariant reference a previous state (`old`)? Then it is temporal.
+/// A unary atom `pred(var)` -> (pred, var); None if not that shape.
+fn atom_pred_var(e: &Expr) -> Option<(String, String)> {
+    if let Expr::App { head, args } = e {
+        if let (Expr::Name(p), [Expr::Name(v)]) = (head.as_ref(), args.as_slice()) {
+            return Some((p.clone(), v.clone()));
+        }
+    }
+    None
+}
+
+fn has_quant(e: &Expr) -> bool {
+    match e {
+        Expr::Quant { .. } => true,
+        Expr::Unary { e, .. } => has_quant(e),
+        Expr::Binary { lhs, rhs, .. } => has_quant(lhs) || has_quant(rhs),
+        _ => false,
+    }
+}
+
 fn uses_old(e: &Expr) -> bool {
     match e {
         Expr::Unary { op: UnOp::Old, .. } => true,
         Expr::Unary { e, .. } => uses_old(e),
         Expr::Binary { lhs, rhs, .. } => uses_old(lhs) || uses_old(rhs),
+        Expr::Quant { body, .. } => uses_old(body),
         _ => false,
     }
 }
 
-/// The atoms an invariant reads, each tagged as `old` (previous state) or not, for a
-/// focused violation witness. `in_old` propagates through a surrounding `old(...)`.
+// ---------------------------------------------------------------------------
+// Point / temporal path (single entity per event)
+// ---------------------------------------------------------------------------
+
+/// The atoms a point/temporal invariant reads, tagged `old`, for a focused witness.
 fn atoms_of(e: &Expr, in_old: bool, out: &mut Vec<(String, bool)>) {
     match e {
         Expr::Binary { op: BinOp::And | BinOp::Or | BinOp::Implies, lhs, rhs } => {
@@ -56,26 +84,6 @@ fn atoms_of(e: &Expr, in_old: bool, out: &mut Vec<(String, bool)>) {
     }
 }
 
-/// Can this monitor faithfully evaluate the invariant? Returns `Some(reason)` if not.
-/// The monitor is a per-entity, boolean, past-temporal evaluator; anything outside that
-/// (quantifiers, relational atoms over several entities, value comparisons) is SKIPPED and
-/// reported, never silently mis-evaluated — a wrong verdict is worse than an honest gap.
-fn unsupported(e: &Expr) -> Option<String> {
-    match e {
-        Expr::Quant { .. } => Some("quantified (needs the design-time check, not a per-event monitor)".into()),
-        Expr::Binary { op: BinOp::And | BinOp::Or | BinOp::Implies, lhs, rhs } => {
-            unsupported(lhs).or_else(|| unsupported(rhs))
-        }
-        Expr::Binary { .. } => Some("value comparison (monitor is boolean-only)".into()),
-        Expr::Unary { e, .. } => unsupported(e),
-        Expr::App { args, .. } if args.len() != 1 => {
-            Some(format!("relational atom of arity {} (monitor binds one entity)", args.len()))
-        }
-        _ => None,
-    }
-}
-
-/// Evaluate a boolean expression in a single state (no temporal operators inside).
 fn eval_state(e: &Expr, s: &HashMap<String, bool>) -> bool {
     match e {
         Expr::Binary { op: BinOp::And, lhs, rhs } => eval_state(lhs, s) && eval_state(rhs, s),
@@ -86,7 +94,6 @@ fn eval_state(e: &Expr, s: &HashMap<String, bool>) -> bool {
     }
 }
 
-/// Evaluate with history: `old(x)` reads `prev`, everything else reads `cur`.
 fn eval_temporal(e: &Expr, cur: &HashMap<String, bool>, prev: &HashMap<String, bool>) -> bool {
     match e {
         Expr::Binary { op: BinOp::And, lhs, rhs } => eval_temporal(lhs, cur, prev) && eval_temporal(rhs, cur, prev),
@@ -98,10 +105,159 @@ fn eval_temporal(e: &Expr, cur: &HashMap<String, bool>, prev: &HashMap<String, b
     }
 }
 
+/// Unsupported point/temporal form (relational forms go through the relational path).
+fn pt_unsupported(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Binary { op: BinOp::And | BinOp::Or | BinOp::Implies, lhs, rhs } => pt_unsupported(lhs).or_else(|| pt_unsupported(rhs)),
+        Expr::Binary { .. } => Some("value comparison (monitor is boolean-only outside quantifiers)".into()),
+        Expr::Unary { e, .. } => pt_unsupported(e),
+        Expr::App { args, .. } if args.len() != 1 => Some(format!("relational atom of arity {} (use a quantified invariant)", args.len())),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Relational path (quantified over the population)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, PartialEq)]
+enum RVal {
+    B(bool),
+    S(String),
+    E(String),
+}
+impl RVal {
+    fn truthy(&self) -> bool {
+        matches!(self, RVal::B(true))
+    }
+}
+
+#[derive(Default, Clone)]
+struct EState {
+    bools: HashMap<String, bool>,
+    vals: HashMap<String, String>,
+}
+
+type Env = HashMap<String, String>;
+type Pop = HashMap<String, EState>;
+
+/// Relational forms this monitor cannot faithfully evaluate.
+fn rel_unsupported(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Unary { op: UnOp::Old, .. } => Some("`old` inside a quantifier (temporal+relational not supported)".into()),
+        Expr::Quant { body, .. } => rel_unsupported(body),
+        Expr::Binary { op: BinOp::And | BinOp::Or | BinOp::Implies | BinOp::Eq | BinOp::Ne, lhs, rhs } => {
+            rel_unsupported(lhs).or_else(|| rel_unsupported(rhs))
+        }
+        Expr::Binary { .. } => Some("arithmetic/inequality in a quantified invariant (not supported)".into()),
+        Expr::Unary { op: UnOp::Not, e } => rel_unsupported(e),
+        Expr::App { args, .. } if args.len() != 1 => Some(format!("relational atom of arity {}", args.len())),
+        _ => None,
+    }
+}
+
+fn eval_rel(e: &Expr, env: &Env, pop: &Pop) -> RVal {
+    match e {
+        Expr::Quant { q, vars, body, .. } => eval_quant(q, vars, body, env, pop),
+        Expr::Binary { op: BinOp::And, lhs, rhs } => RVal::B(eval_rel(lhs, env, pop).truthy() && eval_rel(rhs, env, pop).truthy()),
+        Expr::Binary { op: BinOp::Or, lhs, rhs } => RVal::B(eval_rel(lhs, env, pop).truthy() || eval_rel(rhs, env, pop).truthy()),
+        Expr::Binary { op: BinOp::Implies, lhs, rhs } => RVal::B(!eval_rel(lhs, env, pop).truthy() || eval_rel(rhs, env, pop).truthy()),
+        Expr::Binary { op: BinOp::Eq, lhs, rhs } => RVal::B(eval_rel(lhs, env, pop) == eval_rel(rhs, env, pop)),
+        Expr::Binary { op: BinOp::Ne, lhs, rhs } => RVal::B(eval_rel(lhs, env, pop) != eval_rel(rhs, env, pop)),
+        Expr::Unary { op: UnOp::Not, e } => RVal::B(!eval_rel(e, env, pop).truthy()),
+        // A unary atom: boolean predicate -> B, value field -> S, else absent.
+        app if atom_pred_var(app).is_some() => {
+            let (pred, var) = atom_pred_var(app).unwrap();
+            match env.get(&var).and_then(|ent| pop.get(ent)) {
+                Some(st) => {
+                    if let Some(b) = st.bools.get(&pred) {
+                        RVal::B(*b)
+                    } else if let Some(v) = st.vals.get(&pred) {
+                        RVal::S(v.clone())
+                    } else {
+                        RVal::B(false)
+                    }
+                }
+                None => RVal::B(false),
+            }
+        }
+        // A bare name is an entity variable reference (for `a = b` identity).
+        Expr::Name(v) => match env.get(v) {
+            Some(ent) => RVal::E(ent.clone()),
+            None => RVal::B(false),
+        },
+        _ => RVal::B(false),
+    }
+}
+
+fn eval_quant(q: &Quant, vars: &[String], body: &Expr, env: &Env, pop: &Pop) -> RVal {
+    if vars.is_empty() {
+        return eval_rel(body, env, pop);
+    }
+    let (v, rest) = vars.split_first().unwrap();
+    let mut n_true = 0usize;
+    let mut n = 0usize;
+    for ent in pop.keys() {
+        let mut env2 = env.clone();
+        env2.insert(v.clone(), ent.clone());
+        if eval_quant(q, rest, body, &env2, pop).truthy() {
+            n_true += 1;
+        }
+        n += 1;
+    }
+    RVal::B(match q {
+        Quant::Every => n_true == n,
+        Quant::Some => n_true >= 1,
+        Quant::No => n_true == 0,
+        Quant::ExistsOne => n_true == 1,
+    })
+}
+
+/// Best-effort witness for a violated universal (`every`) prefix: a binding that falsifies.
+fn find_witness(e: &Expr, env: &Env, pop: &Pop) -> Option<Vec<(String, String)>> {
+    if let Expr::Quant { q: Quant::Every, vars, body, .. } = e {
+        let (v, rest) = vars.split_first().unwrap();
+        for ent in pop.keys() {
+            let mut env2 = env.clone();
+            env2.insert(v.clone(), ent.clone());
+            let sub = if rest.is_empty() {
+                if !eval_rel(body, &env2, pop).truthy() {
+                    Some(vec![])
+                } else {
+                    None
+                }
+            } else {
+                find_witness(&Expr::Quant { q: Quant::Every, vars: rest.to_vec(), ty: None, body: body.clone() }, &env2, pop)
+            };
+            if let Some(mut w) = sub {
+                w.insert(0, (v.clone(), ent.clone()));
+                return Some(w);
+            }
+        }
+        None
+    } else if !eval_rel(e, env, pop).truthy() {
+        Some(vec![])
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trace + driver
+// ---------------------------------------------------------------------------
+
 struct Event {
     t: String,
     entity: String,
-    vals: HashMap<String, bool>,
+    st: EState,
+}
+
+fn is_bool_lit(v: &str) -> Option<bool> {
+    match v.to_ascii_lowercase().as_str() {
+        "t" | "true" | "1" => Some(true),
+        "f" | "false" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 fn parse_trace(trace: &str) -> Vec<Event> {
@@ -113,92 +269,109 @@ fn parse_trace(trace: &str) -> Vec<Event> {
         }
         let mut t = String::new();
         let mut entity = String::new();
-        let mut vals = HashMap::new();
+        let mut st = EState::default();
         for tok in line.split_whitespace() {
             let Some((k, v)) = tok.split_once('=') else { continue };
             match k {
                 "t" => t = v.to_string(),
                 "entity" => entity = v.to_string(),
-                _ => {
-                    vals.insert(k.to_string(), v.eq_ignore_ascii_case("t") || v == "1" || v.eq_ignore_ascii_case("true"));
-                }
+                _ => match is_bool_lit(v) {
+                    Some(b) => {
+                        st.bools.insert(k.to_string(), b);
+                    }
+                    None => {
+                        st.vals.insert(k.to_string(), v.to_string());
+                    }
+                },
             }
         }
-        events.push(Event { t, entity, vals });
+        events.push(Event { t, entity, st });
     }
     events
 }
 
-/// Run the monitor. Returns a JSON report `{events, violations:[...], ok}`.
+fn esc(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+enum Kind {
+    Point,
+    Temporal,
+    Relational,
+}
+
+/// Run the monitor. Returns a JSON report `{events, monitored, skipped, violations, ok}`.
 pub fn monitor(source: &str, trace: &str) -> String {
     let module = crate::check::check(source).module;
-    let invs: Vec<(String, Expr, bool)> = module
+    let raw: Vec<(String, Expr)> = module
         .decls
         .iter()
         .flat_map(|d| d.items.iter())
         .filter(|it| it.kind == ItemKind::Invariant)
-        .filter_map(|it| {
-            it.body.map(|sp| {
-                let e = crate::expr::parse_predicate(sp.slice(source)).0;
-                let temporal = uses_old(&e);
-                (it.name.clone().unwrap_or_else(|| "<anon>".into()), e, temporal)
-            })
-        })
+        .filter_map(|it| it.body.map(|sp| (it.name.clone().unwrap_or_else(|| "<anon>".into()), crate::expr::parse_predicate(sp.slice(source)).0)))
         .collect();
 
-    // Partition into monitorable invariants and honestly-skipped ones.
     let mut skipped: Vec<String> = Vec::new();
-    let invs: Vec<(String, Expr, bool)> = invs
-        .into_iter()
-        .filter(|(name, expr, _)| match unsupported(expr) {
-            Some(reason) => {
-                skipped.push(format!("{{\"invariant\":\"{}\",\"reason\":\"{}\"}}", esc(name), esc(&reason)));
-                false
-            }
-            None => true,
-        })
-        .collect();
+    let mut invs: Vec<(String, Expr, Kind)> = Vec::new();
+    for (name, e) in raw {
+        let reason = if has_quant(&e) { rel_unsupported(&e) } else { pt_unsupported(&e) };
+        if let Some(r) = reason {
+            skipped.push(format!("{{\"invariant\":\"{}\",\"reason\":\"{}\"}}", esc(&name), esc(&r)));
+            continue;
+        }
+        let kind = if has_quant(&e) {
+            Kind::Relational
+        } else if uses_old(&e) {
+            Kind::Temporal
+        } else {
+            Kind::Point
+        };
+        invs.push((name, e, kind));
+    }
 
     let events = parse_trace(trace);
     let mut prev: HashMap<String, HashMap<String, bool>> = HashMap::new();
+    let mut pop: Pop = HashMap::new();
+    let mut rel_reported: HashMap<String, ()> = HashMap::new();
     let mut violations: Vec<String> = Vec::new();
 
     for ev in &events {
-        let p = prev.get(&ev.entity);
-        for (name, expr, temporal) in &invs {
-            let holds = if *temporal {
-                match p {
-                    Some(prev_state) => eval_temporal(expr, &ev.vals, prev_state),
-                    None => true, // no history yet; the temporal property starts at the 2nd event
+        // Point / temporal invariants: bound to this event's entity.
+        for (name, expr, kind) in &invs {
+            match kind {
+                Kind::Point => {
+                    if !eval_state(expr, &ev.st.bools) {
+                        violations.push(point_violation(&ev.t, &ev.entity, name, "point", expr, &ev.st.bools, None));
+                    }
                 }
-            } else {
-                eval_state(expr, &ev.vals)
-            };
-            if !holds {
-                let kind = if *temporal { "temporal" } else { "point" };
-                // Focused witness: only the atoms this invariant reads, marking `old`.
-                let mut atoms = Vec::new();
-                atoms_of(expr, false, &mut atoms);
-                let witness = atoms
-                    .iter()
-                    .map(|(pred, is_old)| {
-                        let v = if *is_old {
-                            p.and_then(|s| s.get(pred)).copied()
-                        } else {
-                            ev.vals.get(pred).copied()
-                        };
-                        let label = if *is_old { format!("old {pred}") } else { pred.clone() };
-                        format!("{label}={}", v.map(|b| if b { "T" } else { "F" }).unwrap_or("?"))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                Kind::Temporal => {
+                    if let Some(p) = prev.get(&ev.entity) {
+                        if !eval_temporal(expr, &ev.st.bools, p) {
+                            violations.push(point_violation(&ev.t, &ev.entity, name, "temporal", expr, &ev.st.bools, Some(p)));
+                        }
+                    }
+                }
+                Kind::Relational => {}
+            }
+        }
+
+        // Update population, then check relational invariants over it.
+        pop.insert(ev.entity.clone(), ev.st.clone());
+        for (name, expr, kind) in &invs {
+            if !matches!(kind, Kind::Relational) || rel_reported.contains_key(name) {
+                continue;
+            }
+            if let Some(binding) = find_witness(expr, &HashMap::new(), &pop) {
+                rel_reported.insert(name.clone(), ());
+                let w = binding.iter().map(|(v, e)| format!("{v}={e}")).collect::<Vec<_>>().join(", ");
                 violations.push(format!(
-                    "{{\"t\":\"{}\",\"entity\":\"{}\",\"invariant\":\"{}\",\"kind\":\"{}\",\"witness\":\"{}\"}}",
-                    esc(&ev.t), esc(&ev.entity), esc(name), kind, esc(&witness)
+                    "{{\"t\":\"{}\",\"invariant\":\"{}\",\"kind\":\"relational\",\"witness\":\"{}\"}}",
+                    esc(&ev.t), esc(name), esc(&w)
                 ));
             }
         }
-        prev.insert(ev.entity.clone(), ev.vals.clone());
+
+        prev.insert(ev.entity.clone(), ev.st.bools.clone());
     }
 
     format!(
@@ -211,8 +384,22 @@ pub fn monitor(source: &str, trace: &str) -> String {
     )
 }
 
-fn esc(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+fn point_violation(t: &str, entity: &str, name: &str, kind: &str, expr: &Expr, cur: &HashMap<String, bool>, prev: Option<&HashMap<String, bool>>) -> String {
+    let mut atoms = Vec::new();
+    atoms_of(expr, false, &mut atoms);
+    let witness = atoms
+        .iter()
+        .map(|(pred, is_old)| {
+            let v = if *is_old { prev.and_then(|s| s.get(pred)).copied() } else { cur.get(pred).copied() };
+            let label = if *is_old { format!("old {pred}") } else { pred.clone() };
+            format!("{label}={}", v.map(|b| if b { "T" } else { "F" }).unwrap_or("?"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{{\"t\":\"{}\",\"entity\":\"{}\",\"invariant\":\"{}\",\"kind\":\"{}\",\"witness\":\"{}\"}}",
+        esc(t), esc(entity), esc(name), kind, esc(&witness)
+    )
 }
 
 #[cfg(test)]
@@ -227,15 +414,13 @@ mod tests {
 
     #[test]
     fn catches_point_violation() {
-        let trace = "t=1 entity=R1 collateralised=T has_code=F accepted=F rejected=F\n";
-        let r = monitor(SPEC, trace);
+        let r = monitor(SPEC, "t=1 entity=R1 collateralised=T has_code=F accepted=F rejected=F\n");
         assert!(count(&r, "collat_needs_code") == 1, "{r}");
         assert!(r.contains("\"ok\":false"));
     }
 
     #[test]
     fn catches_temporal_regression() {
-        // R2 accepted at t1, then rejected at t2 -> once_accepted fires at t2.
         let trace = "t=1 entity=R2 collateralised=F has_code=F accepted=T rejected=F\n\
                      t=2 entity=R2 collateralised=F has_code=F accepted=F rejected=T\n";
         let r = monitor(SPEC, trace);
@@ -243,20 +428,36 @@ mod tests {
     }
 
     #[test]
-    fn skips_unsupported_invariant_instead_of_misevaluating() {
-        // A value-comparison invariant the boolean monitor cannot evaluate.
+    fn skips_unsupported_point_invariant() {
         let spec = "-- allium: 4\ncomponent M\n  entity R\n  observable state bal(R) : bool\n  invariant keeps means bal(r) = old(bal(r))\nend\n";
         let r = monitor(spec, "t=1 entity=R1 bal=T\nt=2 entity=R1 bal=F\n");
         assert!(r.contains("\"monitored\":0"), "{r}");
         assert!(r.contains("keeps") && r.contains("boolean-only"), "{r}");
-        assert!(r.contains("\"ok\":true"), "{r}"); // nothing wrongly flagged
+        assert!(r.contains("\"ok\":true"), "{r}");
     }
 
     #[test]
-    fn clean_trace_has_no_violations() {
-        let trace = "t=1 entity=R3 collateralised=T has_code=T accepted=T rejected=F\n\
-                     t=2 entity=R3 collateralised=T has_code=T accepted=T rejected=F\n";
-        let r = monitor(SPEC, trace);
-        assert!(r.contains("\"ok\":true"), "{r}");
+    fn relational_uniqueness_violation() {
+        // no two reports share a uti
+        let spec = "-- allium: 4\ncomponent M\n  entity R\n  observable state uti(R) : bool\n  invariant unique_uti means every a :: every b :: (uti(a) = uti(b)) implies (a = b)\nend\n";
+        let clean = "t=1 entity=R1 uti=U1\nt=2 entity=R2 uti=U2\n";
+        assert!(monitor(spec, clean).contains("\"ok\":true"), "{}", monitor(spec, clean));
+        let dup = "t=1 entity=R1 uti=U1\nt=2 entity=R2 uti=U1\n";
+        let r = monitor(spec, dup);
+        assert!(r.contains("unique_uti") && r.contains("relational"), "{r}");
+        assert!(r.contains("\"ok\":false"), "{r}");
+    }
+
+    #[test]
+    fn relational_referential_integrity() {
+        // every allocation references an existing block uti
+        let spec = "-- allium: 4\ncomponent M\n  entity R\n  observable state allocation(R) : bool\n  observable state prior(R) : bool\n  observable state uti(R) : bool\n  invariant ref_ok means every a :: allocation(a) implies some b :: prior(a) = uti(b)\nend\n";
+        // R2 allocation refers to prior=U9 but no report has uti=U9 -> violation
+        let bad = "t=1 entity=R1 allocation=F prior=none uti=U1\nt=2 entity=R2 allocation=T prior=U9 uti=U2\n";
+        let r = monitor(spec, bad);
+        assert!(r.contains("ref_ok"), "{r}");
+        // when a block with uti=U9 exists, no violation
+        let good = "t=1 entity=R1 allocation=F prior=none uti=U9\nt=2 entity=R2 allocation=T prior=U9 uti=U2\n";
+        assert!(monitor(spec, good).contains("\"ok\":true"), "{}", monitor(spec, good));
     }
 }
