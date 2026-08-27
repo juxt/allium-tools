@@ -3,6 +3,7 @@
 //! v4 grammar can be reshaped freely. The CLI dispatches to this crate when a
 //! check-set is all v4.
 
+pub mod analyse;
 pub mod ast;
 pub mod check;
 pub mod diagnostic;
@@ -11,6 +12,7 @@ pub mod lexer;
 pub mod parser;
 pub mod span;
 
+pub use analyse::analyse;
 pub use ast::Module;
 pub use check::check;
 pub use diagnostic::{Diagnostic, Severity};

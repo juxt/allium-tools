@@ -158,7 +158,9 @@ impl<'s> ExprParser<'s> {
             }
             if k == "not" {
                 self.adv();
-                let e = self.expr(3); // binds tighter than and/or/implies
+                // `not` binds tighter than and(3)/or(2)/implies(1): its operand is a
+                // comparison/atom, so `not a and b` is `(not a) and b`, not `not (a and b)`.
+                let e = self.expr(4);
                 return Expr::Unary { op: UnOp::Not, e: Box::new(e) };
             }
             if k == "old" {
@@ -397,5 +399,16 @@ mod tests {
     #[test]
     fn old_and_call() {
         ok("balance(to) = old(balance(to)) + amt");
+    }
+
+    #[test]
+    fn not_binds_tighter_than_and() {
+        let e = ok("not cleared(t) and platform_confirmed(t)");
+        match e {
+            Expr::Binary { op: BinOp::And, lhs, .. } => {
+                assert!(matches!(*lhs, Expr::Unary { op: UnOp::Not, .. }), "lhs should be `not cleared(t)`");
+            }
+            other => panic!("expected And at top level, got {other:?}"),
+        }
     }
 }
