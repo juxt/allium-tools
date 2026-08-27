@@ -1,0 +1,20 @@
+-- allium: 3
+
+entity Job {
+    status: pending | done
+    transitions status { pending -> done  terminal: done }
+}
+
+rule R {
+    when: Go(flag)
+    if flag:
+        requires: ghost.status = pending
+        ensures: Job.created(status: pending)
+    else:
+        ensures: Job.created(status: pending)
+}
+
+surface S {
+    provides:
+        Go(flag)
+}

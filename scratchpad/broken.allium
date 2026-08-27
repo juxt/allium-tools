@@ -1,0 +1,6 @@
+-- allium: 3
+
+rule R {
+    when: Go()
+    ensures: Ghost.created(status: pending)
+}

@@ -1,0 +1,5 @@
+-- allium: 3
+
+use "./domain.allium" as dom
+
+rule W { when: dom/NoSuchEvent(x)  ensures: x.status = done }

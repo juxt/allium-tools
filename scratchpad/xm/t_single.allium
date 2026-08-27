@@ -1,0 +1,23 @@
+-- allium: 3
+
+entity Membership {
+    status: active | expired
+    expires_at: Timestamp
+    transitions status { active -> expired  terminal: expired }
+}
+
+rule Create {
+    when: NewMember()
+    ensures: Membership.created(status: active)
+}
+
+rule AutoExpire {
+    when: m: Membership.expires_at <= now
+    requires: m.status = active
+    ensures: m.status = expired
+}
+
+surface Desk {
+    provides:
+        NewMember()
+}

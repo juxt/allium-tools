@@ -1,0 +1,23 @@
+-- allium: 3
+
+entity Ent1 {
+    status: s0 | s1
+    transitions status { s0 -> s1  terminal: s1 }
+}
+
+rule CreateEnt1 {
+    when: CreateEnt1Requested()
+    ensures: Ent1.created(status: s0)
+}
+
+rule AdvanceEnt1 {
+    when: AdvanceEnt1(t, flag)
+    requires: t.status = s0
+    ensures: t.status = s1
+}
+
+surface Ent1Desk {
+    provides:
+        CreateEnt1Requested()
+        AdvanceEnt1(t: Ent1, flag)
+}

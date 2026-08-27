@@ -1,0 +1,16 @@
+-- allium: 3
+
+use "./domain.allium" as dom
+
+surface WDesk {
+    context b: dom/Job with status = pending
+    provides:
+        Ready(b)
+            when b.status = pending
+}
+
+rule Witness {
+    when: Ready(z)
+    requires: z.status = pending
+    ensures: z.status = done
+}

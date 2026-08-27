@@ -1,0 +1,17 @@
+-- allium: 3
+
+entity Job {
+    status: pending | done
+    due_at: Timestamp
+    transitions status { pending -> done  terminal: done }
+}
+
+rule CreateJob {
+    when: JobRequested()
+    ensures: Job.created(status: pending)
+}
+
+surface JobIntake {
+    provides:
+        JobRequested()
+}

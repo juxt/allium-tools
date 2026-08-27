@@ -1,0 +1,16 @@
+-- allium: 3
+
+use "./domain.allium" as dom
+
+rule Freeze {
+    when: FreezeReq(a: dom/Account)
+    requires:
+        a.status = open
+        a.balance > 0
+    ensures: a.status = frozen
+}
+
+surface Ops {
+    provides:
+        FreezeReq(a: dom/Account)
+}

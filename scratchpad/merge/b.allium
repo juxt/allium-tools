@@ -1,0 +1,8 @@
+-- allium: 3
+
+use "./domain.allium" as dom
+
+rule B {
+    when: b: dom/Job.status becomes active
+    ensures: b.status = done
+}

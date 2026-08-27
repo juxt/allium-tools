@@ -1,0 +1,16 @@
+-- allium: 3
+
+entity LeaveRequest {
+    status: pending | approved | denied
+    transitions status { pending -> approved  pending -> denied  terminal: approved, denied }
+}
+
+rule Create {
+    when: LeaveReq()
+    ensures: LeaveRequest.created(status: pending)
+}
+
+surface Intake {
+    provides:
+        LeaveReq()
+}

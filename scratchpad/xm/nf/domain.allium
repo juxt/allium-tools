@@ -1,0 +1,17 @@
+-- allium: 3
+
+entity Account {
+    status: open | frozen
+    balance: Money
+    transitions status { open -> frozen  terminal: frozen }
+}
+
+rule OpenAcct {
+    when: OpenRequested()
+    ensures: Account.created(status: open)
+}
+
+surface AcctIntake {
+    provides:
+        OpenRequested()
+}

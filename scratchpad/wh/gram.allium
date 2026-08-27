@@ -1,0 +1,12 @@
+-- allium: 3
+
+entity Job {
+    status: pending | done
+    transitions status { pending -> done  terminal: done }
+}
+
+surface W {
+    provides:
+        Ready(b: Job?)
+            when b.status = pending
+}

@@ -1,0 +1,7 @@
+-- allium: 3
+
+use "./domain.allium" as dom
+
+rule A { when: t: dom/Job.balance <= now  requires: t.status = pending  ensures: t.status = done }
+rule B { when: Ext(j: dom/Job)  requires: j.status = pending  ensures: j.status = done }
+surface X { provides: Ext(j: dom/Job) }

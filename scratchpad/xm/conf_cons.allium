@@ -1,0 +1,15 @@
+-- allium: 3
+
+use "./conf_dom.allium" as dom
+
+rule AutoExpire {
+    when: m: dom/Membership.expires_at <= now
+    requires: m.status = active
+    ensures: m.status = expired
+}
+
+rule ManualExtend {
+    when: AdminExtends(admin, membership)
+    requires: membership.status = active
+    ensures: membership.status = extended
+}

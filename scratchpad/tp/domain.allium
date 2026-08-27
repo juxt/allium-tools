@@ -1,0 +1,16 @@
+-- allium: 3
+
+entity Job {
+    status: s0 | s1 | s2
+    transitions status { s0 -> s1  s1 -> s2  terminal: s2 }
+}
+
+rule CreateJob {
+    when: JobReq()
+    ensures: Job.created(status: s0)
+}
+
+surface JobIntake {
+    provides:
+        JobReq()
+}

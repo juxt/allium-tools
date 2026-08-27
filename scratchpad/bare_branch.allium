@@ -1,0 +1,14 @@
+-- allium: 3
+
+entity Ticket {
+    status: open | closed
+    transitions status { open -> closed  terminal: closed }
+}
+
+rule R {
+    when: state: Ticket
+    if true:
+        ensures: state.status = closed
+    else:
+        ensures: state.status = closed
+}

@@ -1,0 +1,21 @@
+-- allium: 3
+
+use "./domain.allium" as dom
+
+rule Approve {
+    when: ManagerApproves(m, r)
+    requires: r.status = pending
+    ensures: r.status = approved
+}
+
+rule Deny {
+    when: ManagerDenies(m, r)
+    requires: r.status = pending
+    ensures: r.status = denied
+}
+
+surface Ops {
+    provides:
+        ManagerApproves(m, r: dom/LeaveRequest)
+        ManagerDenies(m, r: dom/LeaveRequest)
+}

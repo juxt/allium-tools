@@ -1,0 +1,9 @@
+-- allium: 3
+
+use "./domain.allium" as dom
+
+rule Witness {
+    when: m: dom/Job.due_at <= now
+    requires: m.status = pending
+    ensures: m.status = done
+}

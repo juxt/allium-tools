@@ -1,0 +1,17 @@
+-- allium: 3
+
+entity Task {
+    status: open | done
+    transitions status { open -> done  terminal: done }
+}
+
+rule R {
+    when: DailyCheck()
+    for t in Task where t.status = open:
+        ensures: OverdueAlert.created(task: t)
+}
+
+surface S {
+    provides:
+        DailyCheck()
+}

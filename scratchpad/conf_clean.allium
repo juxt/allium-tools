@@ -1,0 +1,30 @@
+-- allium: 3
+
+entity Job {
+    status: pending | expired | extended
+    deadline: Timestamp
+    transitions status { pending -> expired  pending -> extended  terminal: expired, extended }
+}
+
+rule Create {
+    when: JobReq()
+    ensures: Job.created(status: pending)
+}
+
+rule AutoExpire {
+    when: t: Job.deadline <= now
+    requires: t.status = pending
+    ensures: t.status = expired
+}
+
+rule ManualExtend {
+    when: Extend(j: Job)
+    requires: j.status = pending
+    ensures: j.status = extended
+}
+
+surface Desk {
+    provides:
+        JobReq()
+        Extend(j: Job)
+}

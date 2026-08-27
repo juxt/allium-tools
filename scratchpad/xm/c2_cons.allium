@@ -1,0 +1,26 @@
+-- allium: 3
+
+use "./c2_dom.allium" as dom
+
+rule Create {
+    when: NewMember()
+    ensures: dom/Membership.created(status: active)
+}
+
+rule AutoExpire {
+    when: m: dom/Membership.expires_at <= now
+    requires: m.status = active
+    ensures: m.status = expired
+}
+
+rule ManualExtend {
+    when: AdminExtends(admin, membership: dom/Membership)
+    requires: membership.status = active
+    ensures: membership.status = extended
+}
+
+surface Desk {
+    provides:
+        NewMember()
+        AdminExtends(admin, membership: dom/Membership)
+}

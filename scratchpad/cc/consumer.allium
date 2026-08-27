@@ -1,0 +1,20 @@
+-- allium: 3
+
+use "./domain.allium" as dom
+
+rule AutoExpire {
+    when: t: dom/Job.deadline <= now
+    requires: t.status = pending
+    ensures: t.status = expired
+}
+
+rule ManualExtend {
+    when: Extend(j)
+    requires: j.status = pending
+    ensures: j.status = extended
+}
+
+surface Ops {
+    provides:
+        Extend(j: dom/Job)
+}

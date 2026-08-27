@@ -1,0 +1,27 @@
+-- allium: 3
+
+entity Job {
+    status: pending | done
+    transitions status { pending -> done  terminal: done }
+}
+
+rule CreateJob {
+    when: JobRequested()
+    ensures: Job.created(status: pending)
+}
+
+surface JobIntake {
+    provides:
+        JobRequested()
+}
+
+surface WDesk {
+    provides:
+        Ready(b: Job where status = pending)
+            when b.status = pending
+}
+rule Witness {
+    when: Ready(z)
+    requires: z.status = pending
+    ensures: z.status = done
+}

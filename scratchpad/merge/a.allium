@@ -1,0 +1,8 @@
+-- allium: 3
+
+use "./domain.allium" as dom
+
+rule A {
+    when: b: dom/Job.status becomes pending
+    ensures: b.status = active
+}

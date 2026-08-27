@@ -1,0 +1,8 @@
+-- allium: 3
+
+use "./domain.allium" as dom
+
+rule Backwards {
+    when: b: dom/Job.status becomes done
+    ensures: b.status = pending
+}

@@ -155,58 +155,50 @@ pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
             continue;
         }
 
-        // DISJOINTNESS — SOUND. Two conjunctive guards are mutually exclusive if they
-        // share a contradicting condition (an atom asserted true in one, false in the
-        // other). This holds regardless of domain, so it needs no enumeration and
-        // yields no false positives. A pair with no contradicting condition MAY overlap.
+        // Sound disjointness shortcut: two conjunctive guards are mutually exclusive if
+        // they share a contradicting condition, and that holds regardless of domain.
         let lits: Vec<Option<Vec<(String, bool)>>> = guards.iter().map(literals).collect();
-        let mut may_overlap: Vec<(usize, usize)> = Vec::new();
-        let mut undetermined = 0usize;
-        for i in 0..guards.len() {
-            for j in (i + 1)..guards.len() {
-                match (&lits[i], &lits[j]) {
-                    (Some(a), Some(b)) => {
-                        if !contradict(a, b) {
-                            may_overlap.push((i, j));
-                        }
-                    }
-                    _ => undetermined += 1,
-                }
+        let all_pairwise_contradict = (0..guards.len()).all(|i| {
+            (i + 1..guards.len()).all(|j| matches!((&lits[i], &lits[j]), (Some(a), Some(b)) if contradict(a, b)))
+        });
+
+        // Bounded enumeration over the atom space: uncovered (gap) and multiply-covered
+        // (overlap) combinations, each with a witness. EXACT for independent boolean
+        // atoms (the decision-table case); OVER-APPROXIMATE where atoms are enum-exclusive
+        // or relational, which is why exhaustiveness is reported as axiom-relative.
+        let mut gaps = 0u64;
+        let mut overlaps = 0u64;
+        let mut gap_eg = None;
+        let mut over_eg = None;
+        for mask in 0u64..(1u64 << n) {
+            let assign: HashMap<String, bool> =
+                atoms.iter().enumerate().map(|(i, a)| (a.clone(), (mask >> i) & 1 == 1)).collect();
+            let matched = guards.iter().filter(|g| eval(g, &assign)).count();
+            if matched == 0 {
+                gaps += 1;
+                gap_eg.get_or_insert_with(|| describe(&atoms, mask));
+            } else if matched >= 2 {
+                overlaps += 1;
+                over_eg.get_or_insert_with(|| describe(&atoms, mask));
             }
         }
-        if may_overlap.is_empty() && undetermined == 0 {
+        let combos = 1u64 << n;
+
+        if all_pairwise_contradict {
             out.push(Diagnostic::warning(
                 d.span,
                 format!("case-split in `{}` is DISJOINT (sound: every guard pair shares a contradicting condition).", d.name),
             ));
-        } else if !may_overlap.is_empty() {
+        } else if overlaps > 0 {
             out.push(Diagnostic::warning(
                 d.span,
-                format!("case-split in `{}`: {} guard-pair(s) share no contradicting condition and MAY overlap — verify mutual exclusivity or state a domain axiom.", d.name, may_overlap.len()),
+                format!("case-split in `{}` is NOT disjoint: {overlaps}/{combos} condition-combinations match more than one guard (e.g. {}). Two actions fire in the same state — an ambiguous classification.", d.name, over_eg.unwrap()),
             ));
-        }
-
-        // EXHAUSTIVENESS — bounded atom enumeration, honest about its limit: it is
-        // RELATIVE to domain axioms it does not model (e.g. "every cleared trade has a
-        // CCP"). A reported gap is a prompt to state the missing axiom, which is the
-        // design-time value; a sound verdict is the typed quantified analysis (4c).
-        let mut gaps = 0u64;
-        let mut gap_eg = None;
-        for mask in 0u64..(1u64 << n) {
-            let assign: HashMap<String, bool> =
-                atoms.iter().enumerate().map(|(i, a)| (a.clone(), (mask >> i) & 1 == 1)).collect();
-            if guards.iter().all(|g| !eval(g, &assign)) {
-                gaps += 1;
-                gap_eg.get_or_insert_with(|| describe(&atoms, mask));
-            }
         }
         if gaps > 0 {
             out.push(Diagnostic::warning(
                 d.span,
-                format!(
-                    "case-split in `{}` may leave {gaps}/{} atom-combinations uncovered (e.g. {}) — a subject in that state matches no action. RELATIVE to domain axioms not modelled; state them (e.g. every cleared trade has a CCP) for a sound verdict, which is the typed quantified analysis (4c).",
-                    d.name, 1u64 << n, gap_eg.unwrap()
-                ),
+                format!("case-split in `{}` may leave {gaps}/{combos} atom-combinations uncovered (e.g. {}) — a subject in that state matches no action. Bounded/axiom-relative: state the domain axioms (e.g. every cleared trade has a CCP) for a sound verdict.", d.name, gap_eg.unwrap()),
             ));
         }
     }

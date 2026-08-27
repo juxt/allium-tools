@@ -1,0 +1,19 @@
+-- allium: 3
+
+use "./stuck_dom.allium" as dom
+
+rule Create {
+    when: NewMember()
+    ensures: dom/Membership.created(status: active)
+}
+
+rule Peek {
+    when: m: dom/Membership.expires_at <= now
+    requires: m.status = active
+    ensures: m.status = active
+}
+
+surface Desk {
+    provides:
+        NewMember()
+}

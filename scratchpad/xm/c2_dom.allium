@@ -1,0 +1,7 @@
+-- allium: 3
+
+entity Membership {
+    status: active | expired | extended
+    expires_at: Timestamp
+    transitions status { active -> expired  active -> extended  terminal: expired, extended }
+}

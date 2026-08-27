@@ -1,0 +1,21 @@
+-- allium: 3
+
+entity Job {
+    status: pending | done
+    balance: Money
+    transitions status { pending -> done  terminal: done }
+}
+
+rule CreateJob {
+    when: JobReq()
+    ensures: Job.created(status: pending)
+}
+
+surface JobIntake {
+    provides:
+        JobReq()
+}
+
+rule A { when: t: Job.balance <= now  requires: t.status = pending  ensures: t.status = done }
+rule B { when: Ext(j: Job)  requires: j.status = pending  ensures: j.status = done }
+surface X { provides: Ext(j: Job) }
