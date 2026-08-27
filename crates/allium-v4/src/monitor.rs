@@ -37,6 +37,25 @@ fn uses_old(e: &Expr) -> bool {
     }
 }
 
+/// The atoms an invariant reads, each tagged as `old` (previous state) or not, for a
+/// focused violation witness. `in_old` propagates through a surrounding `old(...)`.
+fn atoms_of(e: &Expr, in_old: bool, out: &mut Vec<(String, bool)>) {
+    match e {
+        Expr::Binary { op: BinOp::And | BinOp::Or | BinOp::Implies, lhs, rhs } => {
+            atoms_of(lhs, in_old, out);
+            atoms_of(rhs, in_old, out);
+        }
+        Expr::Unary { op: UnOp::Not, e } => atoms_of(e, in_old, out),
+        Expr::Unary { op: UnOp::Old, e } => atoms_of(e, true, out),
+        atom => {
+            let key = (pred_name(atom), in_old);
+            if !out.contains(&key) {
+                out.push(key);
+            }
+        }
+    }
+}
+
 /// Evaluate a boolean expression in a single state (no temporal operators inside).
 fn eval_state(e: &Expr, s: &HashMap<String, bool>) -> bool {
     match e {
@@ -125,9 +144,25 @@ pub fn monitor(source: &str, trace: &str) -> String {
             };
             if !holds {
                 let kind = if *temporal { "temporal" } else { "point" };
+                // Focused witness: only the atoms this invariant reads, marking `old`.
+                let mut atoms = Vec::new();
+                atoms_of(expr, false, &mut atoms);
+                let witness = atoms
+                    .iter()
+                    .map(|(pred, is_old)| {
+                        let v = if *is_old {
+                            p.and_then(|s| s.get(pred)).copied()
+                        } else {
+                            ev.vals.get(pred).copied()
+                        };
+                        let label = if *is_old { format!("old {pred}") } else { pred.clone() };
+                        format!("{label}={}", v.map(|b| if b { "T" } else { "F" }).unwrap_or("?"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 violations.push(format!(
-                    "{{\"t\":\"{}\",\"entity\":\"{}\",\"invariant\":\"{}\",\"kind\":\"{}\",\"state\":\"{}\"}}",
-                    esc(&ev.t), esc(&ev.entity), esc(name), kind, esc(&show_state(&ev.vals))
+                    "{{\"t\":\"{}\",\"entity\":\"{}\",\"invariant\":\"{}\",\"kind\":\"{}\",\"witness\":\"{}\"}}",
+                    esc(&ev.t), esc(&ev.entity), esc(name), kind, esc(&witness)
                 ));
             }
         }
@@ -140,12 +175,6 @@ pub fn monitor(source: &str, trace: &str) -> String {
         violations.join(","),
         violations.is_empty()
     )
-}
-
-fn show_state(s: &HashMap<String, bool>) -> String {
-    let mut kv: Vec<(&String, &bool)> = s.iter().collect();
-    kv.sort();
-    kv.iter().map(|(k, v)| format!("{k}={}", if **v { "T" } else { "F" })).collect::<Vec<_>>().join(" ")
 }
 
 fn esc(s: &str) -> String {
