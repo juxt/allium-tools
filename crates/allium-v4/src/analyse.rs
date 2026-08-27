@@ -289,3 +289,56 @@ pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::analyse;
+
+    fn msgs(src: &str) -> Vec<String> {
+        analyse(src).diagnostics.into_iter().map(|d| d.message).collect()
+    }
+    fn any(src: &str, needle: &str) -> bool {
+        msgs(src).iter().any(|m| m.contains(needle))
+    }
+
+    const HDR: &str = "-- allium: 4\ncomponent R\n  entity T\n  observable state a(T) : bool\n  observable state b(T) : bool\n  observable state c(T) : bool\n";
+
+    #[test]
+    fn consistency_flags_contradiction_with_minimal_core() {
+        let src = format!(
+            "{HDR}  invariant r1 means a(t) implies b(t)\n  invariant r2 means b(t) implies not c(t)\n  invariant r3 means a(t) and c(t)\n  invariant r4 means a(t) implies a(t)\nend\n"
+        );
+        assert!(any(&src, "is CONTRADICTORY"));
+        // core is the three interacting rules, not the tautology r4
+        let core = msgs(&src).into_iter().find(|m| m.contains("CONTRADICTORY")).unwrap();
+        assert!(core.contains("r1") && core.contains("r2") && core.contains("r3"));
+        assert!(!core.contains("r4"));
+    }
+
+    #[test]
+    fn consistency_accepts_satisfiable_rule_set() {
+        let src = format!(
+            "{HDR}  invariant r1 means a(t) implies b(t)\n  invariant r2 means b(t) implies not c(t)\n  invariant r3 means a(t) implies c(t)\nend\n"
+        );
+        assert!(any(&src, "jointly satisfiable"));
+        assert!(!any(&src, "is CONTRADICTORY"));
+    }
+
+    #[test]
+    fn coverage_disjoint_exhaustive_split_is_clean() {
+        let src = format!(
+            "{HDR}  action x(t : T) requires a(t) ; ensures done(t)\n  action y(t : T) requires not a(t) ; ensures done(t)\nend\n"
+        );
+        assert!(any(&src, "is DISJOINT (sound"));
+        assert!(any(&src, "is exhaustive"));
+    }
+
+    #[test]
+    fn coverage_flags_overlap_and_gap() {
+        let src = format!(
+            "{HDR}  action x(t : T) requires a(t) ; ensures done(t)\n  action y(t : T) requires b(t) ; ensures done(t)\nend\n"
+        );
+        assert!(any(&src, "is NOT disjoint"));
+        assert!(any(&src, "uncovered"));
+    }
+}
