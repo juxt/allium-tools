@@ -23,10 +23,11 @@ use crate::parser::ParseResult;
 
 const MAX_ATOMS: usize = 16;
 
-/// Parse + well-formedness + name resolution + case-split analysis.
+/// Parse + well-formedness + name resolution + case-split + rule-set consistency.
 pub fn analyse(source: &str) -> ParseResult {
     let mut r = crate::check::check(source);
     r.diagnostics.append(&mut coverage(&r.module, source));
+    r.diagnostics.append(&mut consistency(&r.module, source));
     r
 }
 
@@ -125,6 +126,78 @@ fn literals(e: &Expr) -> Option<Vec<(String, bool)>> {
 /// Two literal-sets contradict if some atom appears with opposite polarity in each.
 fn contradict(a: &[(String, bool)], b: &[(String, bool)]) -> bool {
     a.iter().any(|(name, pol)| b.iter().any(|(n2, p2)| n2 == name && p2 != pol))
+}
+
+/// Joint satisfiability of a component's stated constraints (invariant/requirement/axiom).
+/// A rule set that NO state satisfies is contradictory: the rules cannot hold together.
+/// This is a bug that emerges from rule INTERACTION and is invisible in any single rule,
+/// which is why reading a dozen rules cannot settle it and enumeration can. Bounded, so
+/// exact for independent boolean atoms; a `means` body using quantifiers is treated as an
+/// opaque atom (imprecise but never a false alarm). On UNSAT, a minimal conflicting core
+/// is reported by greedy removal so the operator sees exactly which rules clash.
+pub fn consistency(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let rules: Vec<(String, Expr)> = d
+            .items
+            .iter()
+            .filter(|it| matches!(it.kind, ItemKind::Invariant | ItemKind::Requirement | ItemKind::Axiom))
+            .filter_map(|it| {
+                it.body
+                    .map(|sp| (it.name.clone().unwrap_or_else(|| "<anon>".into()), crate::expr::parse_predicate(sp.slice(src)).0))
+            })
+            .collect();
+        if rules.len() < 2 {
+            continue;
+        }
+
+        let mut set = BTreeSet::new();
+        for (_, e) in &rules {
+            collect_atoms(e, &mut set);
+        }
+        let atoms: Vec<String> = set.into_iter().collect();
+        let n = atoms.len();
+        if n == 0 || n > MAX_ATOMS {
+            out.push(Diagnostic::warning(
+                d.span,
+                format!("rule set in `{}` not checked for consistency: {n} atoms (bounded needs 1..={MAX_ATOMS})", d.name),
+            ));
+            continue;
+        }
+
+        // SAT over the currently-active rules: return a satisfying assignment if one exists.
+        let sat = |active: &[bool]| -> Option<u64> {
+            (0u64..(1u64 << n)).find(|&mask| {
+                let assign: HashMap<String, bool> =
+                    atoms.iter().enumerate().map(|(i, a)| (a.clone(), (mask >> i) & 1 == 1)).collect();
+                rules.iter().enumerate().all(|(k, (_, e))| !active[k] || eval(e, &assign))
+            })
+        };
+
+        match sat(&vec![true; rules.len()]) {
+            Some(mask) => out.push(Diagnostic::warning(
+                d.span,
+                format!("rule set in `{}` is jointly satisfiable over the bounded atom space (e.g. {}).", d.name, describe(&atoms, mask)),
+            )),
+            None => {
+                // Minimal UNSAT core: drop each rule; keep it only if its removal restores SAT.
+                let mut active = vec![true; rules.len()];
+                for k in 0..rules.len() {
+                    active[k] = false;
+                    if sat(&active).is_some() {
+                        active[k] = true;
+                    }
+                }
+                let core: Vec<String> =
+                    rules.iter().enumerate().filter(|(k, _)| active[*k]).map(|(_, (nm, _))| nm.clone()).collect();
+                out.push(Diagnostic::warning(
+                    d.span,
+                    format!("rule set in `{}` is CONTRADICTORY: no state satisfies all constraints. Minimal conflicting core: {}. These rules cannot hold together.", d.name, core.join(", ")),
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// Case-split exhaustiveness + disjointness over each declaration's guarded actions.
