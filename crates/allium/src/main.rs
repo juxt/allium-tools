@@ -139,6 +139,7 @@ fn main() -> ExitCode {
             }
         }
         "route" => cmd_route(rest),
+        "monitor" => cmd_monitor(rest),
         other => {
             eprintln!("allium: unknown command `{other}`");
             eprintln!("Run `allium --help` for available commands.");
@@ -165,6 +166,37 @@ fn cmd_route(args: &[String]) -> ExitCode {
             eprintln!("route: {path}: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// v4-only runtime monitor: `allium monitor <spec.allium> <trace>`.
+fn cmd_monitor(args: &[String]) -> ExitCode {
+    let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+    if files.len() != 2 {
+        eprintln!("monitor: need <spec.allium> <trace>");
+        return ExitCode::from(2);
+    }
+    let source = match std::fs::read_to_string(files[0]) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("monitor: {}: {e}", files[0]);
+            return ExitCode::from(2);
+        }
+    };
+    let trace = match std::fs::read_to_string(files[1]) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("monitor: {}: {e}", files[1]);
+            return ExitCode::from(2);
+        }
+    };
+    let report = allium_v4::monitor::monitor(&source, &trace);
+    println!("{report}");
+    // Exit non-zero when a violation is found, so it composes in a pipeline / CI.
+    if report.contains("\"ok\":false") {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 

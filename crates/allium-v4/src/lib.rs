@@ -9,6 +9,7 @@ pub mod check;
 pub mod diagnostic;
 pub mod expr;
 pub mod lexer;
+pub mod monitor;
 pub mod parser;
 pub mod sat;
 pub mod span;
