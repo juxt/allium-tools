@@ -214,32 +214,28 @@ fn eval_quant(q: &Quant, vars: &[String], body: &Expr, env: &Env, pop: &Pop) -> 
 }
 
 /// Best-effort witness for a violated universal (`every`) prefix: a binding that falsifies.
+/// Descends both a quantifier's variable list and nested `every` quantifiers in the body.
 fn find_witness(e: &Expr, env: &Env, pop: &Pop) -> Option<Vec<(String, String)>> {
-    if let Expr::Quant { q: Quant::Every, vars, body, .. } = e {
-        let (v, rest) = vars.split_first().unwrap();
-        for ent in pop.keys() {
-            let mut env2 = env.clone();
-            env2.insert(v.clone(), ent.clone());
-            let sub = if rest.is_empty() {
-                if !eval_rel(body, &env2, pop).truthy() {
-                    Some(vec![])
-                } else {
-                    None
-                }
-            } else {
-                find_witness(&Expr::Quant { q: Quant::Every, vars: rest.to_vec(), ty: None, body: body.clone() }, &env2, pop)
-            };
-            if let Some(mut w) = sub {
-                w.insert(0, (v.clone(), ent.clone()));
-                return Some(w);
-            }
-        }
-        None
-    } else if !eval_rel(e, env, pop).truthy() {
-        Some(vec![])
-    } else {
-        None
+    match e {
+        Expr::Quant { q: Quant::Every, vars, body, .. } => find_over(vars, body, env, pop),
+        _ if !eval_rel(e, env, pop).truthy() => Some(vec![]),
+        _ => None,
     }
+}
+
+fn find_over(vars: &[String], body: &Expr, env: &Env, pop: &Pop) -> Option<Vec<(String, String)>> {
+    let Some((v, rest)) = vars.split_first() else {
+        return find_witness(body, env, pop); // body may be a nested `every` or a leaf
+    };
+    for ent in pop.keys() {
+        let mut env2 = env.clone();
+        env2.insert(v.clone(), ent.clone());
+        if let Some(mut w) = find_over(rest, body, &env2, pop) {
+            w.insert(0, (v.clone(), ent.clone()));
+            return Some(w);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
