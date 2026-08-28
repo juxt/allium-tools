@@ -140,6 +140,7 @@ fn main() -> ExitCode {
         }
         "route" => cmd_route(rest),
         "monitor" => cmd_monitor(rest),
+        "monitor-schedule" => cmd_monitor_schedule(rest),
         other => {
             eprintln!("allium: unknown command `{other}`");
             eprintln!("Run `allium --help` for available commands.");
@@ -166,6 +167,43 @@ fn cmd_route(args: &[String]) -> ExitCode {
             eprintln!("route: {path}: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// v4-only arithmetic schedule monitor: `allium monitor-schedule <spec> <trace> [--tol N]`.
+/// Evaluates arithmetic/quantified invariants over a concrete numeric schedule trace.
+fn cmd_monitor_schedule(args: &[String]) -> ExitCode {
+    let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+    if files.len() != 2 {
+        eprintln!("monitor-schedule: need <spec.allium> <trace> [--tol N]");
+        return ExitCode::from(2);
+    }
+    let tol = args
+        .iter()
+        .position(|a| a == "--tol")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.005);
+    let source = match std::fs::read_to_string(files[0]) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("monitor-schedule: {}: {e}", files[0]);
+            return ExitCode::from(2);
+        }
+    };
+    let trace = match std::fs::read_to_string(files[1]) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("monitor-schedule: {}: {e}", files[1]);
+            return ExitCode::from(2);
+        }
+    };
+    let report = allium_v4::monitor::monitor_schedule(&source, &trace, tol);
+    println!("{report}");
+    if report.contains("\"ok\":false") {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 

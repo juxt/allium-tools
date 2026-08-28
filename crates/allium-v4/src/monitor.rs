@@ -398,6 +398,355 @@ fn point_violation(t: &str, entity: &str, name: &str, kind: &str, expr: &Expr, c
     )
 }
 
+// ---------------------------------------------------------------------------
+// Arithmetic schedule monitor: evaluate arithmetic/quantified invariants over a
+// concrete numeric trace (one schedule). Where the relational path above skips
+// arithmetic honestly, this path evaluates it against real values and reports, per
+// invariant, whether it holds and the WORST residual — so an exact law (residual 0)
+// is distinguishable from one that only holds up to rounding (residual ~ half a unit).
+// ---------------------------------------------------------------------------
+
+/// One period's concrete values.
+#[derive(Default, Clone)]
+struct SPeriod {
+    num: HashMap<String, f64>,
+    boolean: HashMap<String, bool>,
+}
+
+/// A concrete schedule: ordered periods plus 0-ary givens (e.g. `disbursed`).
+struct SModel {
+    periods: Vec<SPeriod>,
+    givens: HashMap<String, f64>,
+}
+impl SModel {
+    fn n(&self) -> usize {
+        self.periods.len()
+    }
+}
+
+fn parse_schedule(trace: &str) -> SModel {
+    let mut by_idx: std::collections::BTreeMap<usize, SPeriod> = std::collections::BTreeMap::new();
+    let mut givens = HashMap::new();
+    for line in trace.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        let is_given = toks.iter().any(|t| *t == "given" || t.starts_with("given="));
+        if is_given {
+            for tok in &toks {
+                if let Some((k, v)) = tok.split_once('=') {
+                    if k != "given" {
+                        if let Ok(f) = v.parse::<f64>() {
+                            givens.insert(k.to_string(), f);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        // A period row: needs `period=<i>`.
+        let idx = toks.iter().find_map(|t| t.strip_prefix("period=").and_then(|v| v.parse::<usize>().ok()));
+        let Some(idx) = idx else { continue };
+        let mut p = SPeriod::default();
+        for tok in &toks {
+            if let Some((k, v)) = tok.split_once('=') {
+                if k == "period" {
+                    continue;
+                }
+                match is_bool_lit(v) {
+                    Some(b) => {
+                        p.boolean.insert(k.to_string(), b);
+                    }
+                    None => {
+                        if let Ok(f) = v.parse::<f64>() {
+                            p.num.insert(k.to_string(), f);
+                        }
+                    }
+                }
+            }
+        }
+        by_idx.insert(idx, p);
+    }
+    SModel { periods: by_idx.into_values().collect(), givens }
+}
+
+fn s_idx(a: &Expr, env: &HashMap<String, usize>) -> Option<usize> {
+    match a {
+        Expr::Name(v) => env.get(v).copied(),
+        Expr::Int(n) if *n >= 0 => Some(*n as usize),
+        _ => None,
+    }
+}
+
+/// Evaluate a numeric term against the schedule, or `None` if it cannot.
+fn eval_num(e: &Expr, env: &HashMap<String, usize>, m: &SModel) -> Option<f64> {
+    match e {
+        Expr::Int(n) => Some(*n as f64),
+        Expr::Name(s) => m.givens.get(s).copied(),
+        Expr::App { head, args } => {
+            let name = match head.as_ref() {
+                Expr::Name(s) => s,
+                _ => return None,
+            };
+            if args.len() == 1 {
+                let i = s_idx(&args[0], env)?;
+                return m.periods.get(i).and_then(|p| p.num.get(name).copied());
+            }
+            m.givens.get(name).copied()
+        }
+        Expr::Unary { op: UnOp::Old, .. } => None,
+        Expr::Binary { op: BinOp::Add, lhs, rhs } => Some(eval_num(lhs, env, m)? + eval_num(rhs, env, m)?),
+        Expr::Binary { op: BinOp::Sub, lhs, rhs } => Some(eval_num(lhs, env, m)? - eval_num(rhs, env, m)?),
+        Expr::Binary { op: BinOp::Mul, lhs, rhs } => Some(eval_num(lhs, env, m)? * eval_num(rhs, env, m)?),
+        Expr::Sum { vars, body, .. } => {
+            let mut acc = 0.0;
+            let mut env2 = env.clone();
+            let ok = sum_num(vars, 0, &mut env2, m, body, &mut acc);
+            ok.then_some(acc)
+        }
+        _ => None,
+    }
+}
+
+fn sum_num(
+    vars: &[String],
+    from: usize,
+    env: &mut HashMap<String, usize>,
+    m: &SModel,
+    body: &Expr,
+    acc: &mut f64,
+) -> bool {
+    if from == vars.len() {
+        return match eval_num(body, env, m) {
+            Some(v) => {
+                *acc += v;
+                true
+            }
+            None => false,
+        };
+    }
+    for i in 0..m.n() {
+        env.insert(vars[from].clone(), i);
+        if !sum_num(vars, from + 1, env, m, body, acc) {
+            return false;
+        }
+    }
+    env.remove(&vars[from]);
+    true
+}
+
+/// Evaluate a boolean/guard term against the schedule.
+fn eval_sbool(e: &Expr, env: &HashMap<String, usize>, m: &SModel, tol: f64) -> Option<bool> {
+    match e {
+        Expr::Name(s) if s == "true" => Some(true),
+        Expr::Name(s) if s == "false" => Some(false),
+        Expr::Unary { op: UnOp::Not, e } => eval_sbool(e, env, m, tol).map(|b| !b),
+        Expr::Binary { op: BinOp::And, lhs, rhs } => Some(eval_sbool(lhs, env, m, tol)? && eval_sbool(rhs, env, m, tol)?),
+        Expr::Binary { op: BinOp::Or, lhs, rhs } => Some(eval_sbool(lhs, env, m, tol)? || eval_sbool(rhs, env, m, tol)?),
+        Expr::Binary { op: BinOp::Implies, lhs, rhs } => Some(!eval_sbool(lhs, env, m, tol)? || eval_sbool(rhs, env, m, tol)?),
+        Expr::Binary { op: op @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), lhs, rhs } => {
+            let (l, r) = (eval_num(lhs, env, m)?, eval_num(rhs, env, m)?);
+            Some(cmp_holds(op, l, r, tol))
+        }
+        Expr::App { head, args } => {
+            let name = match head.as_ref() {
+                Expr::Name(s) => s.as_str(),
+                _ => return None,
+            };
+            let idx: Option<Vec<usize>> = args.iter().map(|a| s_idx(a, env)).collect();
+            let idx = idx?;
+            match (name, idx.as_slice()) {
+                ("follows" | "succ" | "successor" | "next", [a, b]) => Some(*a == b + 1),
+                ("precedes" | "before", [a, b]) => Some(a < b),
+                ("after", [a, b]) => Some(a > b),
+                ("is_last" | "last" | "final", [a]) => Some(
+                    m.periods.get(*a).and_then(|p| p.boolean.get("is_last").copied()).unwrap_or(*a + 1 == m.n()),
+                ),
+                ("is_first" | "first", [a]) => Some(*a == 0),
+                // A per-period boolean field.
+                (field, [a]) => m.periods.get(*a).and_then(|p| p.boolean.get(field).copied()),
+                _ => None,
+            }
+        }
+        Expr::Quant { q, vars, body, .. } => {
+            let (mut t, mut total) = (0usize, 0usize);
+            let mut env2 = env.clone();
+            quant_count(vars, 0, &mut env2, m, body, tol, &mut t, &mut total);
+            Some(match q {
+                Quant::Every => t == total,
+                Quant::Some => t >= 1,
+                Quant::No => t == 0,
+                Quant::ExistsOne => t == 1,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn quant_count(
+    vars: &[String],
+    from: usize,
+    env: &mut HashMap<String, usize>,
+    m: &SModel,
+    body: &Expr,
+    tol: f64,
+    t: &mut usize,
+    total: &mut usize,
+) {
+    if from == vars.len() {
+        *total += 1;
+        if eval_sbool(body, env, m, tol).unwrap_or(false) {
+            *t += 1;
+        }
+        return;
+    }
+    for i in 0..m.n() {
+        env.insert(vars[from].clone(), i);
+        quant_count(vars, from + 1, env, m, body, tol, t, total);
+    }
+    env.remove(&vars[from]);
+}
+
+fn cmp_holds(op: &BinOp, l: f64, r: f64, tol: f64) -> bool {
+    match op {
+        BinOp::Eq => (l - r).abs() <= tol,
+        BinOp::Ne => (l - r).abs() > tol,
+        BinOp::Le => l <= r + tol,
+        BinOp::Lt => l < r + tol,
+        BinOp::Ge => l >= r - tol,
+        BinOp::Gt => l > r - tol,
+        _ => false,
+    }
+}
+
+fn cmp_residual(op: &BinOp, l: f64, r: f64) -> f64 {
+    match op {
+        BinOp::Eq | BinOp::Ne => (l - r).abs(),
+        BinOp::Le | BinOp::Lt => (l - r).max(0.0),
+        BinOp::Ge | BinOp::Gt => (r - l).max(0.0),
+        _ => 0.0,
+    }
+}
+
+/// A single ground check produced by instantiating an invariant.
+struct Inst {
+    holds: bool,
+    residual: f64,
+    desc: String,
+}
+
+fn env_str(env: &HashMap<String, usize>) -> String {
+    let mut v: Vec<(String, usize)> = env.iter().map(|(k, i)| (k.clone(), *i)).collect();
+    v.sort();
+    v.into_iter().map(|(k, i)| format!("{k}=p{i}")).collect::<Vec<_>>().join(", ")
+}
+
+/// Instantiate an invariant over the schedule into ground checks (respecting `every`,
+/// `and`, and `implies` guards). Arithmetic leaves record their residual.
+fn collect(e: &Expr, env: &mut HashMap<String, usize>, m: &SModel, tol: f64, out: &mut Vec<Inst>) {
+    match e {
+        Expr::Quant { q: Quant::Every, vars, body, .. } => {
+            collect_bind(vars, 0, env, m, tol, body, out);
+        }
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            collect(lhs, env, m, tol, out);
+            collect(rhs, env, m, tol, out);
+        }
+        Expr::Binary { op: BinOp::Implies, lhs, rhs } => match eval_sbool(lhs, env, m, tol) {
+            Some(true) => collect(rhs, env, m, tol, out),
+            _ => {}
+        },
+        Expr::Binary { op: op @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), lhs, rhs } => {
+            if let (Some(l), Some(r)) = (eval_num(lhs, env, m), eval_num(rhs, env, m)) {
+                let holds = cmp_holds(op, l, r, tol);
+                out.push(Inst {
+                    holds,
+                    residual: cmp_residual(op, l, r),
+                    desc: format!("[{}] {} ({:.4} vs {:.4})", env_str(env), canon(e), l, r),
+                });
+            }
+        }
+        // A non-arithmetic leaf (a bare boolean guard).
+        other => {
+            if let Some(b) = eval_sbool(other, env, m, tol) {
+                out.push(Inst { holds: b, residual: 0.0, desc: format!("[{}] {}", env_str(env), canon(other)) });
+            }
+        }
+    }
+}
+
+fn collect_bind(
+    vars: &[String],
+    from: usize,
+    env: &mut HashMap<String, usize>,
+    m: &SModel,
+    tol: f64,
+    body: &Expr,
+    out: &mut Vec<Inst>,
+) {
+    if from == vars.len() {
+        collect(body, env, m, tol, out);
+        return;
+    }
+    for i in 0..m.n() {
+        env.insert(vars[from].clone(), i);
+        collect_bind(vars, from + 1, env, m, tol, body, out);
+    }
+    env.remove(&vars[from]);
+}
+
+/// Monitor arithmetic invariants over one concrete schedule trace. `tol` is the
+/// tolerance for equalities/inequalities (e.g. 0.005 to allow currency rounding).
+/// JSON: `{periods, monitored, results:[{invariant,holds,checks,max_residual,witness}], ok}`.
+pub fn monitor_schedule(source: &str, trace: &str, tol: f64) -> String {
+    let module = crate::check::check(source).module;
+    let invs: Vec<(String, Expr)> = module
+        .decls
+        .iter()
+        .flat_map(|d| d.items.iter())
+        .filter(|it| it.kind == ItemKind::Invariant)
+        .filter_map(|it| it.body.map(|sp| (it.name.clone().unwrap_or_else(|| "<anon>".into()), crate::expr::parse_predicate(sp.slice(source)).0)))
+        .collect();
+    let m = parse_schedule(trace);
+
+    let mut results = Vec::new();
+    let mut all_ok = true;
+    let mut monitored = 0usize;
+    for (name, e) in &invs {
+        let mut insts = Vec::new();
+        let mut env = HashMap::new();
+        collect(e, &mut env, &m, tol, &mut insts);
+        if insts.is_empty() {
+            continue; // nothing to check (non-arithmetic / no instances)
+        }
+        monitored += 1;
+        let holds = insts.iter().all(|i| i.holds);
+        let max_res = insts.iter().map(|i| i.residual).fold(0.0f64, f64::max);
+        let witness = insts.iter().find(|i| !i.holds).map(|i| i.desc.clone()).unwrap_or_default();
+        if !holds {
+            all_ok = false;
+        }
+        results.push(format!(
+            "{{\"invariant\":\"{}\",\"holds\":{},\"checks\":{},\"max_residual\":{:.6},\"witness\":\"{}\"}}",
+            esc(name),
+            holds,
+            insts.len(),
+            max_res,
+            esc(&witness)
+        ));
+    }
+    format!(
+        "{{\"periods\":{},\"monitored\":{},\"tol\":{},\"results\":[{}],\"ok\":{}}}",
+        m.n(),
+        monitored,
+        tol,
+        results.join(","),
+        all_ok
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,6 +791,47 @@ mod tests {
         let r = monitor(spec, dup);
         assert!(r.contains("unique_uti") && r.contains("relational"), "{r}");
         assert!(r.contains("\"ok\":false"), "{r}");
+    }
+
+    // A schedule spec fragment: the load-bearing arithmetic loan invariants.
+    const LOAN: &str = "-- allium: 4\ncomponent LoanSchedule\n  entity Period\n  given disbursed : Money\n  observable state emi(Period) : Money\n  observable state interest(Period) : Money\n  observable state principal(Period) : Money\n  observable state outstanding_start(Period) : Money\n  observable state is_last(Period) : bool\n  invariant principal_split means every p :: principal(p) = emi(p) - interest(p)\n  invariant balance_rolls means every p :: every next :: follows(next, p) implies (outstanding_start(next) = outstanding_start(p) - principal(p))\n  invariant balance_monotonic means every p :: every next :: follows(next, p) implies (outstanding_start(next) <= outstanding_start(p))\n  invariant conservation means sum p :: principal(p) = disbursed\n  invariant closes_to_zero means every p :: is_last(p) implies (outstanding_start(p) - principal(p) = 0)\nend\n";
+
+    // A correct 3-period schedule: disbursed 1000, principals 300/330/370, roll-forward exact.
+    const GOOD: &str = "period=0 emi=400 interest=100 principal=300 outstanding_start=1000 is_last=F\nperiod=1 emi=400 interest=70 principal=330 outstanding_start=700 is_last=F\nperiod=2 emi=400 interest=0 principal=370 outstanding_start=370 is_last=T\ngiven disbursed=1000\n";
+
+    #[test]
+    fn schedule_monitor_passes_a_correct_schedule() {
+        let r = monitor_schedule(LOAN, GOOD, 0.005);
+        assert!(r.contains("\"ok\":true"), "{r}");
+        assert!(r.contains("\"invariant\":\"conservation\",\"holds\":true"), "{r}");
+        assert!(r.contains("\"invariant\":\"principal_split\",\"holds\":true"), "{r}");
+    }
+
+    #[test]
+    fn schedule_monitor_catches_a_broken_conservation() {
+        // principals 300/330/360 sum to 990, not the disbursed 1000.
+        let bad = "period=0 emi=400 interest=100 principal=300 outstanding_start=1000 is_last=F\nperiod=1 emi=400 interest=70 principal=330 outstanding_start=700 is_last=F\nperiod=2 emi=400 interest=10 principal=360 outstanding_start=370 is_last=T\ngiven disbursed=1000\n";
+        let r = monitor_schedule(LOAN, bad, 0.005);
+        assert!(r.contains("\"invariant\":\"conservation\",\"holds\":false"), "{r}");
+        assert!(r.contains("\"ok\":false"), "{r}");
+    }
+
+    #[test]
+    fn schedule_monitor_catches_a_balance_increase() {
+        // outstanding goes UP from p1 to p2 (negative amortisation): monotonicity breaks.
+        let bad = "period=0 emi=400 interest=100 principal=300 outstanding_start=1000 is_last=F\nperiod=1 emi=50 interest=70 principal=-20 outstanding_start=700 is_last=F\nperiod=2 emi=400 interest=0 principal=720 outstanding_start=720 is_last=T\ngiven disbursed=1000\n";
+        let r = monitor_schedule(LOAN, bad, 0.005);
+        assert!(r.contains("\"invariant\":\"balance_monotonic\",\"holds\":false"), "{r}");
+    }
+
+    #[test]
+    fn schedule_monitor_reports_residual_for_near_misses() {
+        // conservation off by 0.01 (a penny): should FAIL at tol 0.005 with residual ~0.01.
+        let bad = "period=0 emi=400 interest=100 principal=300 outstanding_start=1000 is_last=F\nperiod=1 emi=400 interest=70 principal=330 outstanding_start=700 is_last=F\nperiod=2 emi=400 interest=0 principal=369.99 outstanding_start=370 is_last=T\ngiven disbursed=1000\n";
+        let r = monitor_schedule(LOAN, bad, 0.005);
+        assert!(r.contains("\"invariant\":\"conservation\",\"holds\":false"), "{r}");
+        // and PASS at a looser tol of 0.05
+        assert!(monitor_schedule(LOAN, bad, 0.05).contains("\"invariant\":\"conservation\",\"holds\":true"));
     }
 
     #[test]

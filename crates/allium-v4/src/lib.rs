@@ -19,6 +19,7 @@ pub mod types;
 
 pub use analyse::{analyse, route_json};
 pub use ast::Module;
+pub use monitor::{monitor, monitor_schedule};
 pub use check::check;
 pub use diagnostic::{Diagnostic, Severity};
 pub use expr::{parse_predicate, Expr};
