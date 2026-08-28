@@ -30,6 +30,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut coverage(&r.module, source));
     r.diagnostics.append(&mut consistency(&r.module, source));
     r.diagnostics.append(&mut feasibility(&r.module, source));
+    r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source));
     r
 }
 
@@ -49,6 +50,7 @@ pub(crate) fn canon(e: &Expr) -> String {
         },
         Expr::Binary { op, lhs, rhs } => format!("{} {} {}", canon(lhs), binop_str(op), canon(rhs)),
         Expr::Quant { .. } => "<quantified>".to_string(),
+        Expr::Sum { body, .. } => format!("sum({})", canon(body)),
         Expr::Error => "<error>".to_string(),
     }
 }

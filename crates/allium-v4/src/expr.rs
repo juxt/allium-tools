@@ -47,6 +47,10 @@ pub enum UnOp {
 pub enum Expr {
     /// `<q> x[, y] [: T] :: body`
     Quant { q: Quant, vars: Vec<String>, ty: Option<String>, body: Box<Expr> },
+    /// `sum x[, y] [: T] :: term` — a bounded aggregate (SD-3). A numeric TERM, not a
+    /// formula: its body binds tighter than any comparison, so `sum p :: f(p) = k`
+    /// reads as `(sum p :: f(p)) = k`.
+    Sum { vars: Vec<String>, ty: Option<String>, body: Box<Expr> },
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
     Unary { op: UnOp, e: Box<Expr> },
     /// `head(args)`
@@ -156,6 +160,9 @@ impl<'s> ExprParser<'s> {
             if let Some(q) = quant {
                 return self.quantifier(q);
             }
+            if (k == "sum" || k == "total") && self.binder_follows() {
+                return self.aggregate();
+            }
             if k == "not" {
                 self.adv();
                 // `not` binds tighter than and(3)/or(2)/implies(1): its operand is a
@@ -210,6 +217,47 @@ impl<'s> ExprParser<'s> {
         }
         let body = self.expr(0);
         Expr::Quant { q, vars, ty, body: Box::new(body) }
+    }
+
+    /// A `sum`/`total` is an aggregate (not a plain name) when an identifier binder
+    /// and a `::` follow it.
+    fn binder_follows(&self) -> bool {
+        matches!(self.tokens.get(self.pos + 1).map(|t| &t.tok), Some(Tok::Ident(_)))
+            && self.has_double_colon_ahead()
+    }
+
+    /// `sum x[, y] [: T] :: term`. The body parses at arithmetic precedence (bp 5), so
+    /// it stops before a comparison: `sum p :: f(p) = k` is `(sum p :: f(p)) = k`.
+    fn aggregate(&mut self) -> Expr {
+        self.adv(); // 'sum' / 'total'
+        let mut vars = Vec::new();
+        loop {
+            if let Tok::Ident(v) = &self.cur().tok {
+                vars.push(v.clone());
+                self.adv();
+            }
+            if matches!(self.cur().tok, Tok::Comma) {
+                self.adv();
+                continue;
+            }
+            break;
+        }
+        let mut ty = None;
+        if matches!(self.cur().tok, Tok::Colon) && self.has_double_colon_ahead() {
+            self.adv();
+            let start = self.cur().span.start;
+            let mut end = start;
+            while !matches!(self.cur().tok, Tok::ColonColon | Tok::Eof) {
+                end = self.cur().span.end;
+                self.adv();
+            }
+            ty = Some(self.src.get(start..end).unwrap_or("").trim().to_string());
+        }
+        if matches!(self.cur().tok, Tok::ColonColon | Tok::Colon) {
+            self.adv();
+        }
+        let body = self.expr(5);
+        Expr::Sum { vars, ty, body: Box::new(body) }
     }
 
     fn has_double_colon_ahead(&self) -> bool {
@@ -329,7 +377,7 @@ impl<'s> ExprParser<'s> {
 /// variables). Used by 4b name resolution. Field accessors and call heads count.
 pub fn free_names(e: &Expr, bound: &mut Vec<String>, out: &mut Vec<(String, Span)>) {
     match e {
-        Expr::Quant { vars, body, .. } => {
+        Expr::Quant { vars, body, .. } | Expr::Sum { vars, body, .. } => {
             let n = vars.len();
             for v in vars {
                 bound.push(v.clone());
@@ -399,6 +447,26 @@ mod tests {
     #[test]
     fn old_and_call() {
         ok("balance(to) = old(balance(to)) + amt");
+    }
+
+    #[test]
+    fn sum_aggregate_binds_below_comparison() {
+        // `sum p :: f(p) = k` must read as `(sum p :: f(p)) = k`, i.e. Eq at the top
+        // with a Sum on the left, not a sum of a boolean.
+        let e = ok("sum p :: principal(p) = disbursed");
+        match e {
+            Expr::Binary { op: BinOp::Eq, lhs, .. } => {
+                assert!(matches!(*lhs, Expr::Sum { .. }), "lhs should be a Sum, got {lhs:?}");
+            }
+            other => panic!("expected Eq at top, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sum_as_bare_name_is_still_a_name() {
+        // `sum` without a binder is an ordinary identifier, not an aggregate.
+        let e = ok("sum = 0");
+        assert!(matches!(e, Expr::Binary { op: BinOp::Eq, .. }));
     }
 
     #[test]

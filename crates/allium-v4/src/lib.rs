@@ -4,15 +4,18 @@
 //! check-set is all v4.
 
 pub mod analyse;
+pub mod arith;
 pub mod ast;
 pub mod check;
 pub mod diagnostic;
 pub mod expr;
 pub mod lexer;
 pub mod monitor;
+pub mod lra;
 pub mod parser;
 pub mod sat;
 pub mod span;
+pub mod types;
 
 pub use analyse::{analyse, route_json};
 pub use ast::Module;

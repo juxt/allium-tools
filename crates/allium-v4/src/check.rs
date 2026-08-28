@@ -21,6 +21,7 @@ pub fn check(source: &str) -> ParseResult {
     let mut r = parse(source);
     r.diagnostics.append(&mut wellformedness(&r.module));
     r.diagnostics.append(&mut resolve_names(&r.module, source));
+    r.diagnostics.append(&mut crate::types::typecheck(&r.module, source));
     r
 }
 
