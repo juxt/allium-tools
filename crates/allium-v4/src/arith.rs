@@ -622,6 +622,10 @@ mod tests {
     fn any(msgs: &[String], needle: &str) -> bool {
         msgs.iter().any(|m| m.contains(needle))
     }
+    fn reach(src: &str) -> Vec<String> {
+        let m = crate::parser::parse(src).module;
+        super::reachability(&m, src).into_iter().map(|d| d.message).collect()
+    }
 
     const HDR: &str = "-- allium: 4\ncomponent Loan\n  entity Period\n  given disbursed : Money\n  observable state emi(Period) : Money\n  observable state rate_factor(Period) : Rate\n  observable state interest(Period) : Money\n  observable state principal(Period) : Money\n  observable state outstanding_start(Period) : Money\n  observable state is_last(Period) : bool\n";
 
@@ -652,7 +656,7 @@ mod tests {
         let src = format!(
             "{FEE}  invariant cap means every i :: active(i) implies fee(i) <= 10\n  invariant floor means every i :: active(i) implies fee(i) >= 20\nend\n"
         );
-        let m = run(&src);
+        let m = reach(&src);
         assert!(any(&m, "VACUOUSLY") && any(&m, "cap") && any(&m, "floor"), "{m:#?}");
     }
 
@@ -661,7 +665,7 @@ mod tests {
         let src = format!(
             "{FEE}  invariant cap means every i :: active(i) implies fee(i) <= 100\n  invariant floor means every i :: active(i) implies fee(i) >= 20\nend\n"
         );
-        let m = run(&src);
+        let m = reach(&src);
         assert!(!any(&m, "VACUOUSLY"), "{m:#?}");
     }
 
