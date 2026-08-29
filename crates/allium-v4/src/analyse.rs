@@ -32,7 +32,28 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut feasibility(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source));
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
+    // The boolean consistency check treats arithmetic as opaque, so it can report a component
+    // "jointly satisfiable" while the (stronger) arithmetic tier reports it CONTRADICTORY or
+    // VACUOUSLY. That dual message is misleading and the elicit gate reads it. The arithmetic
+    // verdict wins: drop the boolean reassurance for any component it overrules.
+    let overruled: std::collections::HashSet<String> = r
+        .diagnostics
+        .iter()
+        .filter(|d| d.message.contains("CONTRADICTORY") || d.message.contains("VACUOUSLY"))
+        .filter_map(|d| first_backtick(&d.message))
+        .collect();
+    r.diagnostics.retain(|d| {
+        !(d.message.contains("is jointly satisfiable")
+            && first_backtick(&d.message).map_or(false, |n| overruled.contains(&n)))
+    });
     r
+}
+
+/// The token inside the first pair of backticks in a message (a component name in our diagnostics).
+fn first_backtick(msg: &str) -> Option<String> {
+    let a = msg.find('`')? + 1;
+    let b = msg[a..].find('`')? + a;
+    Some(msg[a..b].to_string())
 }
 
 pub(crate) fn canon(e: &Expr) -> String {
@@ -417,6 +438,15 @@ mod tests {
         let core = msgs(&src).into_iter().find(|m| m.contains("CONTRADICTORY")).unwrap();
         assert!(core.contains("r1") && core.contains("r2") && core.contains("r3"));
         assert!(!core.contains("r4"));
+    }
+
+    #[test]
+    fn boolean_satisfiable_suppressed_when_arithmetic_overrules() {
+        // Guarded floor-above-cap: boolean consistency (opaque) would say "jointly satisfiable",
+        // but the arithmetic tier reports VACUOUSLY. The misleading boolean line must be dropped.
+        let src = "-- allium: 4\ncomponent F\n  entity I\n  observable state fee(I) : Money\n  observable state on(I) : bool\n  invariant cap means every i :: on(i) implies fee(i) <= 10\n  invariant floor means every i :: on(i) implies fee(i) >= 20\nend\n";
+        assert!(any(src, "VACUO"), "{:?}", msgs(src));
+        assert!(!any(src, "jointly satisfiable"), "{:?}", msgs(src));
     }
 
     #[test]
