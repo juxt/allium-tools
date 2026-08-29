@@ -39,6 +39,7 @@ pub(crate) fn canon(e: &Expr) -> String {
     match e {
         Expr::Name(s) => s.clone(),
         Expr::Int(n) => n.to_string(),
+        Expr::Dec(num, den) => format!("{num}/{den}"),
         Expr::SetLit(s) => s.clone(),
         Expr::Field { base, name } => format!("{}.{}", canon(base), name),
         Expr::App { head, args } => {

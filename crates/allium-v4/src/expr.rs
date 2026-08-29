@@ -59,6 +59,8 @@ pub enum Expr {
     Field { base: Box<Expr>, name: String },
     Name(String),
     Int(i64),
+    /// A decimal literal as an exact rational (numerator, denominator), e.g. `0.02` = (2, 100).
+    Dec(i64, i64),
     /// `{ a | b | c }` enum/set literal — kept as source text for now.
     SetLit(String),
     Error,
@@ -353,6 +355,10 @@ impl<'s> ExprParser<'s> {
             Tok::Int(n) => {
                 self.adv();
                 Expr::Int(n)
+            }
+            Tok::Dec(num, den) => {
+                self.adv();
+                Expr::Dec(num, den)
             }
             _ => {
                 let sp = self.cur().span;

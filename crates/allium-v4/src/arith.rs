@@ -515,6 +515,7 @@ fn arg_idx(a: &Expr, env: &HashMap<String, usize>) -> Option<usize> {
 fn lower(e: &Expr, env: &HashMap<String, usize>, st: &HashMap<String, String>) -> Option<Lin> {
     match e {
         Expr::Int(n) => Some(Lin::konst(Rat::int(*n))),
+        Expr::Dec(num, den) => Some(Lin::konst(Rat::new(*num as i128, *den as i128))),
         Expr::Name(s) => {
             if st.get(s).map(|t| numeric(t)).unwrap_or(false) {
                 Some(Lin::var(s)) // a 0-ary numeric given, e.g. `disbursed`
@@ -658,6 +659,17 @@ mod tests {
         );
         let m = reach(&src);
         assert!(any(&m, "VACUOUSLY") && any(&m, "cap") && any(&m, "floor"), "{m:#?}");
+    }
+
+    #[test]
+    fn decimal_rate_literal_is_feasible_not_vacuous() {
+        // `0.02 * base` must lower as the rational 2/100, not collapse to 0. With fee=2% of a free
+        // base and a floor of 5, the active case is feasible (base >= 250) — never flag it vacuous.
+        let src = format!(
+            "{FEE}  observable state base(Item) : Money\n  invariant basis means every i :: active(i) implies fee(i) = 0.02 * base(i)\n  invariant floor means every i :: active(i) implies fee(i) >= 5\nend\n"
+        );
+        let m = reach(&src);
+        assert!(!any(&m, "VACUOUSLY"), "{m:#?}");
     }
 
     #[test]

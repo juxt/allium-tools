@@ -129,7 +129,7 @@ pub fn typecheck(module: &Module, src: &str) -> Vec<Diagnostic> {
 /// combination. Errors attach to `at` (predicate sub-expressions carry no span).
 fn infer(e: &Expr, env: &HashMap<String, Ty>, at: Span, out: &mut Vec<Diagnostic>) -> Ty {
     match e {
-        Expr::Int(_) => Ty::Lit,
+        Expr::Int(_) | Expr::Dec(_, _) => Ty::Lit,
         Expr::Name(s) => match s.as_str() {
             "true" | "false" => Ty::Bool,
             _ => env.get(s).cloned().unwrap_or(Ty::Unknown),

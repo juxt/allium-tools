@@ -8,6 +8,9 @@ use crate::span::Span;
 pub enum Tok {
     Ident(String),
     Int(i64),
+    /// A decimal literal `2.5`/`0.02`, kept as an exact rational (numerator, denominator),
+    /// so rates and percentages don't silently collapse to an integer.
+    Dec(i64, i64),
     Str(String),
     LParen,
     RParen,
@@ -86,14 +89,28 @@ pub fn lex(src: &str) -> Vec<Token> {
             continue;
         }
 
-        // Integer.
+        // Number: integer, or a decimal `d.d` kept as an exact rational.
         if c.is_ascii_digit() {
             let start = i;
             while i < n && (bytes[i] as char).is_ascii_digit() {
                 i += 1;
             }
-            let val: i64 = src[start..i].parse().unwrap_or(0);
-            push(&mut out, Tok::Int(val), start, i);
+            // A fractional part `.d+` (but not `..`, the range token).
+            if i + 1 < n && bytes[i] == b'.' && (bytes[i + 1] as char).is_ascii_digit() {
+                let int_part: i64 = src[start..i].parse().unwrap_or(0);
+                i += 1; // dot
+                let frac_start = i;
+                while i < n && (bytes[i] as char).is_ascii_digit() {
+                    i += 1;
+                }
+                let frac_digits = i - frac_start;
+                let den = 10i64.pow(frac_digits.min(18) as u32);
+                let frac: i64 = src[frac_start..i].parse().unwrap_or(0);
+                push(&mut out, Tok::Dec(int_part * den + frac, den), start, i);
+            } else {
+                let val: i64 = src[start..i].parse().unwrap_or(0);
+                push(&mut out, Tok::Int(val), start, i);
+            }
             continue;
         }
 

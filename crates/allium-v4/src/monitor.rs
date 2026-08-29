@@ -481,6 +481,7 @@ fn s_idx(a: &Expr, env: &HashMap<String, usize>) -> Option<usize> {
 fn eval_num(e: &Expr, env: &HashMap<String, usize>, m: &SModel) -> Option<f64> {
     match e {
         Expr::Int(n) => Some(*n as f64),
+        Expr::Dec(num, den) => Some(*num as f64 / *den as f64),
         Expr::Name(s) => m.givens.get(s).copied(),
         Expr::App { head, args } => {
             let name = match head.as_ref() {
