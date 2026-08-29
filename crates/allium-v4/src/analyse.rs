@@ -31,6 +31,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut consistency(&r.module, source));
     r.diagnostics.append(&mut feasibility(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source));
+    r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
     r
 }
 

@@ -262,6 +262,201 @@ fn emit(
     }
 }
 
+/// Non-vacuity / reachability. An invariant `guard implies C` passes vacuously whenever the
+/// guard never holds, so a clean `analyse` can be meaningless. For each guard, force it true and
+/// check its consequents (with the unconditional constraints) are feasible. If not, the spec is
+/// satisfiable only when that guard is false — a hidden conflict or dead scenario — and we say so
+/// deterministically. This is the general backstop against an AI encoding a green-but-toothless
+/// spec: the floor-above-cap clash, guarded by `fee_applicable`, is caught regardless of phrasing.
+pub fn reachability(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let mut st: HashMap<String, String> = HashMap::new();
+        for it in &d.items {
+            if matches!(it.kind, ItemKind::State | ItemKind::Given) {
+                if let (Some(n), Some(b)) = (&it.name, it.body) {
+                    st.insert(n.clone(), b.slice(src).trim().to_string());
+                }
+            }
+        }
+        let mut uncond: Vec<Con> = Vec::new();
+        let mut guarded: std::collections::BTreeMap<String, Vec<Con>> = std::collections::BTreeMap::new();
+        for it in &d.items {
+            if it.kind != ItemKind::Invariant {
+                continue;
+            }
+            let (name, body) = match (&it.name, it.body) {
+                (Some(n), Some(b)) => (n.clone(), b),
+                _ => continue,
+            };
+            let (e, _) = parse_predicate(body.slice(src));
+            let (vars, inner) = binder_vars(&e, &st);
+            let mut env = HashMap::new();
+            reach_bind(&vars, 0, &mut env, &st, &name, inner, &mut uncond, &mut guarded);
+        }
+        if guarded.is_empty() {
+            continue;
+        }
+        for (g, cons) in &guarded {
+            if cons.is_empty() {
+                continue;
+            }
+            let mut active = uncond.clone();
+            active.extend(cons.clone());
+            if let Outcome::Unsat = solve(&active) {
+                let core = unsat_core(&active);
+                out.push(Diagnostic::warning(
+                    d.span,
+                    format!(
+                        "invariants in `{}` hold only VACUOUSLY: when `{}` is true, no value satisfies them (conflicting core: {}). A guarded constraint that can never be active is a hidden conflict or dead scenario, not a clean spec.",
+                        d.name, g, core.join(", ")
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Peel `every` quantifiers to get the binder variables and the body; for an un-quantified
+/// invariant, treat the free entity-argument variables as the binders (grounded over the domain).
+fn binder_vars<'a>(e: &'a Expr, st: &HashMap<String, String>) -> (Vec<String>, &'a Expr) {
+    let mut vars = Vec::new();
+    let mut cur = e;
+    while let Expr::Quant { q: Quant::Every, vars: vs, body, .. } = cur {
+        vars.extend(vs.clone());
+        cur = body;
+    }
+    if vars.is_empty() {
+        free_entity_vars(cur, st, &mut vars);
+    }
+    (vars, cur)
+}
+
+/// Free names used as the argument of a state application that are not themselves declared
+/// states/givens — i.e. entity instance variables written without an explicit quantifier.
+fn free_entity_vars(e: &Expr, st: &HashMap<String, String>, out: &mut Vec<String>) {
+    match e {
+        Expr::App { head, args } => {
+            if let Expr::Name(_) = head.as_ref() {
+                for a in args {
+                    if let Expr::Name(v) = a {
+                        if !st.contains_key(v) && !out.contains(v) {
+                            out.push(v.clone());
+                        }
+                    }
+                }
+            }
+            for a in args {
+                free_entity_vars(a, st, out);
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            free_entity_vars(lhs, st, out);
+            free_entity_vars(rhs, st, out);
+        }
+        Expr::Unary { e, .. } => free_entity_vars(e, st, out),
+        Expr::Quant { body, .. } | Expr::Sum { body, .. } => free_entity_vars(body, st, out),
+        _ => {}
+    }
+}
+
+fn reach_bind(
+    vars: &[String],
+    from: usize,
+    env: &mut HashMap<String, usize>,
+    st: &HashMap<String, String>,
+    label: &str,
+    body: &Expr,
+    uncond: &mut Vec<Con>,
+    guarded: &mut std::collections::BTreeMap<String, Vec<Con>>,
+) {
+    if from == vars.len() {
+        reach_walk(body, env, st, label, uncond, guarded);
+        return;
+    }
+    for i in 0..N {
+        env.insert(vars[from].clone(), i);
+        reach_bind(vars, from + 1, env, st, label, body, uncond, guarded);
+    }
+    env.remove(&vars[from]);
+}
+
+/// Walk a (ground) invariant body, sorting arithmetic into unconditional constraints and
+/// guard-conditioned constraints keyed by the grounded guard atom.
+fn reach_walk(
+    e: &Expr,
+    env: &HashMap<String, usize>,
+    st: &HashMap<String, String>,
+    label: &str,
+    uncond: &mut Vec<Con>,
+    guarded: &mut std::collections::BTreeMap<String, Vec<Con>>,
+) {
+    match e {
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            reach_walk(lhs, env, st, label, uncond, guarded);
+            reach_walk(rhs, env, st, label, uncond, guarded);
+        }
+        Expr::Binary { op: BinOp::Implies, lhs, rhs } => match eval_guard(lhs, env) {
+            Some(true) => reach_walk(rhs, env, st, label, uncond, guarded),
+            Some(false) => {}
+            None => {
+                let key = ground_atom(lhs, env);
+                let mut cons = Vec::new();
+                cons_of(rhs, env, st, label, &mut cons);
+                guarded.entry(key).or_default().extend(cons);
+            }
+        },
+        _ => cons_of(e, env, st, label, uncond),
+    }
+}
+
+/// Lower the comparisons in a consequent into constraints (unconditional within the consequent).
+fn cons_of(e: &Expr, env: &HashMap<String, usize>, st: &HashMap<String, String>, label: &str, out: &mut Vec<Con>) {
+    match e {
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            cons_of(lhs, env, st, label, out);
+            cons_of(rhs, env, st, label, out);
+        }
+        Expr::Binary { op: BinOp::Implies, lhs, rhs } => {
+            if let Some(true) = eval_guard(lhs, env) {
+                cons_of(rhs, env, st, label, out);
+            }
+        }
+        Expr::Binary { op: op @ (BinOp::Eq | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), lhs, rhs } => {
+            if let (Some(l), Some(r)) = (lower(lhs, env, st), lower(rhs, env, st)) {
+                match op {
+                    BinOp::Eq => out.push(Con::new(l.sub(&r), Rel::Eq, label)),
+                    BinOp::Le => out.push(Con::new(l.sub(&r), Rel::Le, label)),
+                    BinOp::Lt => out.push(Con::new(l.sub(&r), Rel::Lt, label)),
+                    BinOp::Ge => out.push(Con::new(r.sub(&l), Rel::Le, label)),
+                    BinOp::Gt => out.push(Con::new(r.sub(&l), Rel::Lt, label)),
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The grounded canonical string of a guard atom, e.g. `fee_applicable(p0)`.
+fn ground_atom(e: &Expr, env: &HashMap<String, usize>) -> String {
+    match e {
+        Expr::App { head, args } => {
+            let name = match head.as_ref() {
+                Expr::Name(s) => s.clone(),
+                _ => crate::analyse::canon(head),
+            };
+            let parts: Vec<String> = args.iter().map(|a| match a {
+                Expr::Name(v) => env.get(v).map(|i| format!("p{i}")).unwrap_or_else(|| v.clone()),
+                other => crate::analyse::canon(other),
+            }).collect();
+            format!("{name}({})", parts.join(", "))
+        }
+        _ => crate::analyse::canon(e),
+    }
+}
+
 /// Apply `f` for every assignment of `vars[from..]` to a period index.
 fn bind(
     vars: &[String],
@@ -446,6 +641,28 @@ mod tests {
         );
         let m = run(&src);
         assert!(any(&m, "`monotone`") && any(&m, "NOT entailed"), "{m:#?}");
+    }
+
+    const FEE: &str = "-- allium: 4\ncomponent Fee\n  entity Item\n  observable state fee(Item) : Money\n  observable state active(Item) : bool\n";
+
+    #[test]
+    fn reachability_catches_guarded_floor_above_cap() {
+        // Both constraints guarded by the same predicate; vacuously satisfiable (active=false),
+        // but infeasible when active — the emergent conflict a green consistency check misses.
+        let src = format!(
+            "{FEE}  invariant cap means every i :: active(i) implies fee(i) <= 10\n  invariant floor means every i :: active(i) implies fee(i) >= 20\nend\n"
+        );
+        let m = run(&src);
+        assert!(any(&m, "VACUOUSLY") && any(&m, "cap") && any(&m, "floor"), "{m:#?}");
+    }
+
+    #[test]
+    fn reachability_no_false_alarm_when_active_case_is_feasible() {
+        let src = format!(
+            "{FEE}  invariant cap means every i :: active(i) implies fee(i) <= 100\n  invariant floor means every i :: active(i) implies fee(i) >= 20\nend\n"
+        );
+        let m = run(&src);
+        assert!(!any(&m, "VACUOUSLY"), "{m:#?}");
     }
 
     #[test]
