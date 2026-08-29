@@ -455,15 +455,12 @@ fn parse_schedule(trace: &str) -> SModel {
                 if k == "period" {
                     continue;
                 }
-                match is_bool_lit(v) {
-                    Some(b) => {
-                        p.boolean.insert(k.to_string(), b);
-                    }
-                    None => {
-                        if let Ok(f) = v.parse::<f64>() {
-                            p.num.insert(k.to_string(), f);
-                        }
-                    }
+                // Numbers first, so a numeric field of `0`/`1` is a number, not a boolean;
+                // only genuine T/F/true/false become boolean predicates.
+                if let Ok(f) = v.parse::<f64>() {
+                    p.num.insert(k.to_string(), f);
+                } else if let Some(b) = is_bool_lit(v) {
+                    p.boolean.insert(k.to_string(), b);
                 }
             }
         }
@@ -797,7 +794,9 @@ mod tests {
     const LOAN: &str = "-- allium: 4\ncomponent LoanSchedule\n  entity Period\n  given disbursed : Money\n  observable state emi(Period) : Money\n  observable state interest(Period) : Money\n  observable state principal(Period) : Money\n  observable state outstanding_start(Period) : Money\n  observable state is_last(Period) : bool\n  invariant principal_split means every p :: principal(p) = emi(p) - interest(p)\n  invariant balance_rolls means every p :: every next :: follows(next, p) implies (outstanding_start(next) = outstanding_start(p) - principal(p))\n  invariant balance_monotonic means every p :: every next :: follows(next, p) implies (outstanding_start(next) <= outstanding_start(p))\n  invariant conservation means sum p :: principal(p) = disbursed\n  invariant closes_to_zero means every p :: is_last(p) implies (outstanding_start(p) - principal(p) = 0)\nend\n";
 
     // A correct 3-period schedule: disbursed 1000, principals 300/330/370, roll-forward exact.
-    const GOOD: &str = "period=0 emi=400 interest=100 principal=300 outstanding_start=1000 is_last=F\nperiod=1 emi=400 interest=70 principal=330 outstanding_start=700 is_last=F\nperiod=2 emi=400 interest=0 principal=370 outstanding_start=370 is_last=T\ngiven disbursed=1000\n";
+    // Last period's instalment equals its principal+interest (370+0); emi_constant only
+    // constrains non-final periods, so the final instalment may differ.
+    const GOOD: &str = "period=0 emi=400 interest=100 principal=300 outstanding_start=1000 is_last=F\nperiod=1 emi=400 interest=70 principal=330 outstanding_start=700 is_last=F\nperiod=2 emi=370 interest=0 principal=370 outstanding_start=370 is_last=T\ngiven disbursed=1000\n";
 
     #[test]
     fn schedule_monitor_passes_a_correct_schedule() {
