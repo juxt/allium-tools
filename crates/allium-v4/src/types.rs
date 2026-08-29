@@ -51,8 +51,12 @@ enum Ty {
     /// An entity/opaque sort (equality-comparable, not arithmetic).
     Ent(String),
     Num(Dim),
-    /// The literal `0`: additive identity of every family, compatible with any `Num`.
-    Zero,
+    /// A numeric literal. Dimension-polymorphic: it takes its dimension from the operand it
+    /// combines with (`fee <= 10` reads `10` as money; `days <= 10` as days), and acts as a
+    /// dimensionless scalar under multiplication (`0.02 * balance`). Generalises the old
+    /// `0`-is-polymorphic rule to every literal, so a dimensioned constant needs no special
+    /// syntax and works for every scalar family, not just money.
+    Lit,
     /// Undeclared / unresolved: suppresses all dimension errors involving it.
     Unknown,
 }
@@ -125,8 +129,7 @@ pub fn typecheck(module: &Module, src: &str) -> Vec<Diagnostic> {
 /// combination. Errors attach to `at` (predicate sub-expressions carry no span).
 fn infer(e: &Expr, env: &HashMap<String, Ty>, at: Span, out: &mut Vec<Diagnostic>) -> Ty {
     match e {
-        Expr::Int(0) => Ty::Zero,
-        Expr::Int(_) => Ty::Num(Dim::Scalar),
+        Expr::Int(_) => Ty::Lit,
         Expr::Name(s) => match s.as_str() {
             "true" | "false" => Ty::Bool,
             _ => env.get(s).cloned().unwrap_or(Ty::Unknown),
@@ -179,7 +182,7 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>, at: Span, out: &mut Vec<Diagnostic
     }
 }
 
-/// The dimension of a type, if it is a definite numeric family (`Zero`/`Unknown` → None:
+/// The dimension of a type, if it is a definite numeric family (`Lit`/`Unknown` → None:
 /// they are compatible with anything and never trigger an error on their own).
 fn dim(t: &Ty) -> Option<&Dim> {
     match t {
@@ -190,8 +193,8 @@ fn dim(t: &Ty) -> Option<&Dim> {
 
 fn additive(l: &Ty, r: &Ty, op: &BinOp, at: Span, out: &mut Vec<Diagnostic>) -> Ty {
     match (l, r) {
-        (Ty::Zero, Ty::Zero) => Ty::Zero,
-        (Ty::Num(d), Ty::Zero) | (Ty::Zero, Ty::Num(d)) => Ty::Num(d.clone()),
+        (Ty::Lit, Ty::Lit) => Ty::Lit,
+        (Ty::Num(d), Ty::Lit) | (Ty::Lit, Ty::Num(d)) => Ty::Num(d.clone()),
         (Ty::Num(a), Ty::Num(b)) => {
             if a != b {
                 let verb = if matches!(op, BinOp::Add) { "add" } else { "subtract" };
@@ -215,6 +218,9 @@ fn additive(l: &Ty, r: &Ty, op: &BinOp, at: Span, out: &mut Vec<Diagnostic>) -> 
 fn multiplicative(l: &Ty, r: &Ty, at: Span, out: &mut Vec<Diagnostic>) -> Ty {
     match (l, r) {
         (Ty::Num(Dim::Scalar), Ty::Num(d)) | (Ty::Num(d), Ty::Num(Dim::Scalar)) => Ty::Num(d.clone()),
+        // A literal acts as a dimensionless scalar multiplier: `0.02 * balance` keeps money.
+        (Ty::Lit, Ty::Num(d)) | (Ty::Num(d), Ty::Lit) => Ty::Num(d.clone()),
+        (Ty::Lit, Ty::Lit) => Ty::Lit,
         (Ty::Num(a), Ty::Num(b)) => {
             // Two genuinely dimensioned operands: the multiplicative dimension algebra
             // is deferred (SD-1), so this is ill-formed rather than silently opaque.
@@ -228,7 +234,6 @@ fn multiplicative(l: &Ty, r: &Ty, at: Span, out: &mut Vec<Diagnostic>) -> Ty {
             ));
             Ty::Unknown
         }
-        (Ty::Zero, _) | (_, Ty::Zero) => Ty::Zero,
         _ => Ty::Unknown,
     }
 }
@@ -282,6 +287,25 @@ mod tests {
             "{HDR}  observable state bal(Acct) : Money(gbp)\n  invariant i means every a :: bal(a) = bal(a) * bal(a)\nend\n"
         );
         assert!(errors(&bad).iter().any(|m| m.contains("cannot multiply two dimensioned")), "{:?}", errors(&bad));
+    }
+
+    #[test]
+    fn dimensioned_quantity_compares_to_any_literal() {
+        // The general fix: a literal takes the operand's dimension, so a money cap and a mass
+        // threshold are both well-formed — not just the special `0` case, and not money-specific.
+        let money = format!(
+            "{HDR}  observable state fee(Acct) : Money(gbp)\n  invariant cap means every a :: fee(a) <= 10\nend\n"
+        );
+        assert!(errors(&money).iter().all(|m| !m.contains("dimensions")), "{:?}", errors(&money));
+        let mass = format!(
+            "{HDR}  observable state w(Acct) : Mass(hectogram)\n  invariant lim means every a :: w(a) <= 5\nend\n"
+        );
+        assert!(errors(&mass).iter().all(|m| !m.contains("dimensions")), "{:?}", errors(&mass));
+        // but a literal scaling still keeps dimension, and cross-dimension still errors
+        let bad = format!(
+            "{HDR}  observable state gbp(Acct) : Money(gbp)\n  observable state usd(Acct) : Money(usd)\n  invariant x means every a :: gbp(a) <= usd(a)\nend\n"
+        );
+        assert!(errors(&bad).iter().any(|m| m.contains("different dimensions")), "{:?}", errors(&bad));
     }
 
     #[test]
