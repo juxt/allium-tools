@@ -67,16 +67,16 @@ pub fn arithmetic(module: &Module, src: &str) -> Vec<Diagnostic> {
             continue; // not an arithmetic component
         }
 
-        feasibility_probe(&d.name, &grounded, &st, &mut out);
+        let mut uniq: Vec<String> = notes.clone();
+        uniq.sort();
+        uniq.dedup();
+        feasibility_probe(&d.name, &grounded, &st, uniq.len(), &mut out);
         entailment_probe(&d.name, &grounded, &st, &mut out);
         requirement_probe(&d.name, &grounded, &d.items, &st, src, &mut out);
-        if !notes.is_empty() {
-            let mut uniq: Vec<String> = notes.clone();
-            uniq.sort();
-            uniq.dedup();
+        if !uniq.is_empty() {
             out.push(Diagnostic::warning(
                 d.span,
-                format!("arithmetic tier in `{}`: {} term(s) not linearisable and skipped: {}", d.name, uniq.len(), uniq.join("; ")),
+                format!("arithmetic tier in `{}`: {} term(s) not linearisable and NOT CHECKED (nonlinear): {}. The satisfiability verdict is PARTIAL — these constraints are outside the decidable fragment.", d.name, uniq.len(), uniq.join("; ")),
             ));
         }
     }
@@ -89,8 +89,16 @@ fn feasibility_probe(
     comp: &str,
     grounded: &[(String, Vec<Con>)],
     st: &HashMap<String, String>,
+    skipped: usize,
     out: &mut Vec<Diagnostic>,
 ) {
+    // If any load-bearing arithmetic was skipped as nonlinear, a "satisfiable" verdict is only over
+    // the checkable subset — say so, so a clean result is not mistaken for a full guarantee.
+    let partial = if skipped > 0 {
+        format!(" PARTIAL: {skipped} nonlinear constraint(s) were not checked, so this is not a full guarantee.")
+    } else {
+        String::new()
+    };
     let mut cons: Vec<Con> = grounded.iter().flat_map(|(_, c)| c.clone()).collect();
     // Harness pins (not part of the spec; labelled as such): a positive disbursed
     // principal, and the opening balance equal to it.
@@ -104,7 +112,7 @@ fn feasibility_probe(
         Outcome::Sat(m) => out.push(Diagnostic::warning(
             comp_span(),
             format!(
-                "arithmetic invariants in `{comp}` are JOINTLY SATISFIABLE over {N} periods (rate {}). Witness schedule: {}",
+                "arithmetic invariants in `{comp}` are JOINTLY SATISFIABLE over {N} periods (rate {}).{partial} Witness schedule: {}",
                 rate().show(),
                 schedule(&m, st)
             ),
@@ -716,6 +724,15 @@ mod tests {
         );
         let m = reach(&src);
         assert!(any(&m, "VACUOUSLY") && any(&m, "cap") && any(&m, "floor"), "{m:#?}");
+    }
+
+    #[test]
+    fn nonlinear_constraint_marks_verdict_partial() {
+        // a = b*c (product of two variables) is outside the linear fragment; the satisfiable verdict
+        // must be flagged PARTIAL so a clean result isn't mistaken for a full guarantee.
+        let src = "-- allium: 4\ncomponent NL\n  entity P\n  observable state a(P) : Rate\n  observable state b(P) : Rate\n  observable state c(P) : Rate\n  invariant prod means every p :: a(p) = b(p) * c(p)\n  invariant lin means every p :: a(p) <= 10\nend\n";
+        let m = run(src);
+        assert!(any(&m, "PARTIAL"), "{m:#?}");
     }
 
     #[test]
