@@ -69,6 +69,7 @@ pub fn arithmetic(module: &Module, src: &str) -> Vec<Diagnostic> {
 
         feasibility_probe(&d.name, &grounded, &st, &mut out);
         entailment_probe(&d.name, &grounded, &st, &mut out);
+        requirement_probe(&d.name, &grounded, &d.items, &st, src, &mut out);
         if !notes.is_empty() {
             let mut uniq: Vec<String> = notes.clone();
             uniq.sort();
@@ -259,6 +260,62 @@ fn emit(
             }
         }
         _ => {}
+    }
+}
+
+/// Requirement feasibility (arithmetic). A `requirement some x :: C` asserts that a scenario
+/// really occurs; the arithmetic invariants must be satisfiable WITH it. If not, the requirement
+/// is infeasible — e.g. a chain of definitions that forces the fee to 7% and 4% at once is
+/// "satisfiable" only by the fee never applying, which the requirement rules out.
+fn requirement_probe(
+    comp: &str,
+    inv_cons: &[(String, Vec<Con>)],
+    items: &[crate::ast::Item],
+    st: &HashMap<String, String>,
+    src: &str,
+    out: &mut Vec<Diagnostic>,
+) {
+    let flat: Vec<Con> = inv_cons.iter().flat_map(|(_, c)| c.clone()).collect();
+    for it in items {
+        if it.kind != ItemKind::Requirement {
+            continue;
+        }
+        let (name, body) = match (&it.name, it.body) {
+            (Some(n), Some(b)) => (n.clone(), b),
+            _ => continue,
+        };
+        let (e, _) = parse_predicate(body.slice(src));
+        // Peel a `some`/`exists` quantifier and bind its vars (plus any free entity vars) to one
+        // instance; the requirement means "there is an instance where this holds".
+        let (vars, inner) = match &e {
+            Expr::Quant { q: Quant::Some | Quant::ExistsOne, vars, body, .. } => (vars.clone(), body.as_ref()),
+            _ => {
+                let mut v = Vec::new();
+                free_entity_vars(&e, st, &mut v);
+                (v, &e)
+            }
+        };
+        let mut env = HashMap::new();
+        for v in &vars {
+            env.insert(v.clone(), 0usize);
+        }
+        let mut cons = Vec::new();
+        cons_of(inner, &env, st, &name, &mut cons);
+        if cons.is_empty() {
+            continue;
+        }
+        let mut all = flat.clone();
+        all.extend(cons);
+        if let Outcome::Unsat = solve(&all) {
+            let core = unsat_core(&all);
+            out.push(Diagnostic::warning(
+                comp_span(),
+                format!(
+                    "requirement `{name}` in `{comp}` is INFEASIBLE against the invariants (arithmetic): no model has it hold together with them (core: {}). The invariants are satisfiable only by this scenario never occurring.",
+                    core.join(", ")
+                ),
+            ));
+        }
     }
 }
 
@@ -659,6 +716,15 @@ mod tests {
         );
         let m = reach(&src);
         assert!(any(&m, "VACUOUSLY") && any(&m, "cap") && any(&m, "floor"), "{m:#?}");
+    }
+
+    #[test]
+    fn requirement_infeasible_against_invariants_is_caught() {
+        // x = 2y and x = 3y force y = 0 (satisfiable only vacuously); a requirement that y can be
+        // >= 1 makes the fee-applies scenario infeasible — the chain-conflict shape.
+        let src = "-- allium: 4\ncomponent C\n  entity L\n  observable state x(L) : Money\n  observable state y(L) : Money\n  invariant a means every l :: x(l) = 2 * y(l)\n  invariant b means every l :: x(l) = 3 * y(l)\n  requirement r means some l :: y(l) >= 1\nend\n";
+        let m = run(src);
+        assert!(any(&m, "INFEASIBLE") && any(&m, "`r`"), "{m:#?}");
     }
 
     #[test]
