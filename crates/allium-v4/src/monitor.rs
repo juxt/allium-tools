@@ -516,6 +516,12 @@ fn eval_num(e: &Expr, env: &HashMap<String, usize>, m: &SModel) -> Option<f64> {
                 Expr::Name(s) => s,
                 _ => return None,
             };
+            // built-in numeric functions: min/max of two values (caps and floors).
+            if args.len() == 2 && (name == "min" || name == "max") {
+                let a = eval_num(&args[0], env, m)?;
+                let b = eval_num(&args[1], env, m)?;
+                return Some(if name == "min" { a.min(b) } else { a.max(b) });
+            }
             if args.len() == 1 {
                 let i = s_idx(&args[0], env)?;
                 return m.periods.get(i).and_then(|p| p.num.get(name).copied());
@@ -874,6 +880,17 @@ mod tests {
         let r = monitor(SPEC, "t=1 entity=R1 collateralised=T has_code=F accepted=F rejected=F\n");
         assert!(count(&r, "collat_needs_code") == 1, "{r}");
         assert!(r.contains("\"ok\":false"));
+    }
+
+    #[test]
+    fn min_max_caps_and_floors() {
+        // min/max express fee caps and floors (pervasive in banking); monitored on concrete traces.
+        let spec = "-- allium: 4\ncomponent Fees\n  entity Loan\n  given cap : Money\n  observable state computed_fee(Loan) : Money\n  observable state fee(Loan) : Money\n  invariant capped means every l :: fee(l) = min(computed_fee(l), cap)\nend\n";
+        let ok = "period=0 computed_fee=30.00 fee=25.00\ngiven cap=25.00\n"; // min(30,25)=25
+        assert!(monitor_schedule(spec, ok, 0.01).contains("\"ok\":true"), "cap correct should hold: {}", monitor_schedule(spec, ok, 0.01));
+        let bad = "period=0 computed_fee=30.00 fee=30.00\ngiven cap=25.00\n"; // fee exceeds cap
+        let r = monitor_schedule(spec, bad, 0.01);
+        assert!(r.contains("capped") && r.contains("\"ok\":false"), "cap violation should be caught: {r}");
     }
 
     #[test]

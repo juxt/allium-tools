@@ -135,10 +135,15 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>, at: Span, out: &mut Vec<Diagnostic
             _ => env.get(s).cloned().unwrap_or(Ty::Unknown),
         },
         Expr::App { head, args } => {
-            for a in args {
-                infer(a, env, at, out);
-            }
+            let arg_tys: Vec<Ty> = args.iter().map(|a| infer(a, env, at, out)).collect();
             match head.as_ref() {
+                // min/max return the (shared) dimension of their arguments: min(money,money)=money.
+                Expr::Name(h) if (h == "min" || h == "max") && arg_tys.len() == 2 => {
+                    match (&arg_tys[0], &arg_tys[1]) {
+                        (Ty::Num(d), _) | (_, Ty::Num(d)) => Ty::Num(d.clone()),
+                        _ => Ty::Lit,
+                    }
+                }
                 Expr::Name(h) => env.get(h).cloned().unwrap_or(Ty::Unknown),
                 _ => Ty::Unknown,
             }
