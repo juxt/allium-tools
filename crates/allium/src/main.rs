@@ -385,7 +385,16 @@ fn run_multi_file(
                 "analyse" => allium_v4::analyse(&source),
                 _ => allium_v4::parse(&source),
             };
-            if result.diagnostics.iter().any(|d| d.is_error()) {
+            // Exit non-zero on an error, and on a semantic verdict a gate must not pass:
+            // CONTRADICTORY / VACUOUSLY / INFEASIBLE. These are warnings (so they don't lower the
+            // conformance score) but they are hard failures for CI and the elicit done-gate.
+            if result.diagnostics.iter().any(|d| {
+                d.is_error()
+                    || (command == "analyse"
+                        && (d.message.contains("CONTRADICTORY")
+                            || d.message.contains("VACUOUSLY")
+                            || d.message.contains("INFEASIBLE")))
+            }) {
                 any_issues = true;
             }
             let output = serde_json::json!({
