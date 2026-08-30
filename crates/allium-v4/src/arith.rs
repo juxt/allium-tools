@@ -730,7 +730,7 @@ mod tests {
     fn nonlinear_constraint_marks_verdict_partial() {
         // a = b*c (product of two variables) is outside the linear fragment; the satisfiable verdict
         // must be flagged PARTIAL so a clean result isn't mistaken for a full guarantee.
-        let src = "-- allium: 4\ncomponent NL\n  entity P\n  observable state a(P) : Rate\n  observable state b(P) : Rate\n  observable state c(P) : Rate\n  invariant prod means every p :: a(p) = b(p) * c(p)\n  invariant lin means every p :: a(p) <= 10\n  invariant lin2 means every p :: a(p) >= 0\nend\n";
+        let src = "-- allium: 4\ncomponent NL\n  entity P\n  observable state a(P) : Int\n  observable state b(P) : Int\n  observable state c(P) : Int\n  invariant prod means every p :: a(p) = b(p) * c(p)\n  invariant lin means every p :: a(p) <= 10\n  invariant lin2 means every p :: a(p) >= 0\nend\n";
         let m = run(src);
         assert!(any(&m, "PARTIAL"), "{m:#?}");
     }
