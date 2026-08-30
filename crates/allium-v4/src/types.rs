@@ -309,6 +309,21 @@ mod tests {
     }
 
     #[test]
+    fn literal_does_not_launder_incompatible_dimensions() {
+        // Polymorphic literals must adopt a *neighbouring* dimension without becoming a bridge that
+        // launders two genuinely incompatible ones. `fee + 0` is money; `fee + w` (money + mass) is
+        // still a category error even with a literal-0 elsewhere in the expression.
+        let ok = format!(
+            "{HDR}  observable state fee(Acct) : Money(gbp)\n  observable state cap(Acct) : Money(gbp)\n  invariant c means every a :: fee(a) <= cap(a) + 0\nend\n"
+        );
+        assert!(errors(&ok).iter().all(|m| !m.contains("dimensions")), "{:?}", errors(&ok));
+        let launder = format!(
+            "{HDR}  observable state fee(Acct) : Money(gbp)\n  observable state w(Acct) : Mass(kg)\n  observable state t(Acct) : Money(gbp)\n  invariant l means every a :: t(a) <= fee(a) + w(a)\nend\n"
+        );
+        assert!(errors(&launder).iter().any(|m| m.contains("cannot add money(gbp) and mass(kg)")), "{:?}", errors(&launder));
+    }
+
+    #[test]
     fn compare_money_with_rate_is_an_error() {
         let src = format!(
             "{HDR}  observable state bal(Acct) : Money(gbp)\n  observable state r(Acct) : Rate\n  invariant bad means every a :: bal(a) = r(a)\nend\n"
