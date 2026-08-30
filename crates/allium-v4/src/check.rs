@@ -111,7 +111,7 @@ fn resolve_names(module: &Module, src: &str) -> Vec<Diagnostic> {
                 let mut names = Vec::new();
                 free_names(&e, &mut bound, &mut names);
                 for (n, _sp) in names {
-                    if !scope.contains(&n) && !it.params.contains(&n) {
+                    if !scope.contains(&n) && !it.params.contains(&n) && !is_builtin_pred(&n) {
                         out.push(Diagnostic::warning(
                             it.span,
                             format!("`{n}` is not declared (name resolution, in `{}`)", d.name),
@@ -171,4 +171,14 @@ pub fn wellformedness(module: &Module) -> Vec<Diagnostic> {
     }
 
     out
+}
+
+/// Built-in ordering/sequential predicates the checkers understand over the event/period timeline;
+/// excluded from name-resolution so specs may use them without an explicit declaration.
+fn is_builtin_pred(n: &str) -> bool {
+    matches!(
+        n,
+        "before" | "precedes" | "after" | "follows" | "succ" | "successor" | "next" | "is_last" | "last"
+            | "final" | "is_first" | "first"
+    )
 }
