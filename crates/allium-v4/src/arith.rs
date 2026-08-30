@@ -25,10 +25,6 @@ use crate::lra::{solve, unsat_core, Con, Lin, Outcome, Rat, Rel};
 
 /// Periods p0..p{N-1} of the bounded model.
 const N: usize = 3;
-/// The pinned per-period rate factor of the bounded model (10%).
-fn rate() -> Rat {
-    Rat::new(1, 10)
-}
 
 /// Entry point: arithmetic feasibility + entailment over each component.
 pub fn arithmetic(module: &Module, src: &str) -> Vec<Diagnostic> {
@@ -112,8 +108,7 @@ fn feasibility_probe(
         Outcome::Sat(m) => out.push(Diagnostic::warning(
             comp_span(),
             format!(
-                "arithmetic invariants in `{comp}` are JOINTLY SATISFIABLE over {N} periods (rate {}).{partial} Witness schedule: {}",
-                rate().show(),
+                "arithmetic invariants in `{comp}` are JOINTLY SATISFIABLE over {N} periods.{partial} Witness schedule: {}",
                 schedule(&m, st)
             ),
         )),
@@ -594,7 +589,8 @@ fn lower(e: &Expr, env: &HashMap<String, usize>, st: &HashMap<String, String>) -
                 _ => return None,
             };
             match st.get(&name) {
-                Some(t) if is_rate(t) => Some(Lin::konst(rate())),
+                // A rate/numeric state is a variable; `rate * balance` (two variables) is nonlinear
+                // and is honestly skipped (PARTIAL), rather than faked linear by pinning the rate.
                 Some(t) if numeric(t) => Some(Lin::var(&ground_name(&name, args, env))),
                 _ => None,
             }
