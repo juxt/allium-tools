@@ -54,6 +54,8 @@ pub enum Expr {
     Sum { vars: Vec<String>, ty: Option<String>, body: Box<Expr> },
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
     Unary { op: UnOp, e: Box<Expr> },
+    /// `if <cond> then <a> else <b>` — a conditional value (tiered rates, grace conditionals).
+    Cond { cond: Box<Expr>, then_: Box<Expr>, els: Box<Expr> },
     /// `head(args)`
     App { head: Box<Expr>, args: Vec<Expr> },
     /// `base.name`
@@ -178,6 +180,15 @@ impl<'s> ExprParser<'s> {
                 self.adv();
                 let e = self.postfix_from_atom();
                 return Expr::Unary { op: UnOp::Old, e: Box::new(e) };
+            }
+            if k == "if" {
+                self.adv();
+                let cond = self.expr(1);
+                self.is_kw("then").then(|| self.adv());
+                let then_ = self.expr(1);
+                self.is_kw("else").then(|| self.adv());
+                let els = self.expr(1);
+                return Expr::Cond { cond: Box::new(cond), then_: Box::new(then_), els: Box::new(els) };
             }
         }
         // Unary minus: `-1000`, `-x`. Desugar to `0 - operand` so it reuses subtraction everywhere
@@ -415,6 +426,11 @@ pub fn free_names(e: &Expr, bound: &mut Vec<String>, out: &mut Vec<(String, Span
             }
         }
         Expr::Field { base, .. } => free_names(base, bound, out),
+        Expr::Cond { cond, then_, els } => {
+            free_names(cond, bound, out);
+            free_names(then_, bound, out);
+            free_names(els, bound, out);
+        }
         Expr::Name(s) => {
             if !bound.contains(s) {
                 out.push((s.clone(), Span::new(0, 0)));

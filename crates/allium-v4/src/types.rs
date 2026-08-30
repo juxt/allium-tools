@@ -148,6 +148,7 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>, at: Span, out: &mut Vec<Diagnostic
                 _ => Ty::Unknown,
             }
         }
+        Expr::Cond { cond, then_, els } => { infer(cond, env, at, out); let t = infer(then_, env, at, out); infer(els, env, at, out); t }
         Expr::Field { .. } | Expr::SetLit(_) | Expr::Error => Ty::Unknown,
         Expr::Unary { op: UnOp::Not, e } => {
             infer(e, env, at, out);

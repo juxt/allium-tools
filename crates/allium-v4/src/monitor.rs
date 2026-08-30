@@ -506,6 +506,21 @@ fn s_idx(a: &Expr, env: &HashMap<String, usize>) -> Option<usize> {
 }
 
 /// Evaluate a numeric term against the schedule, or `None` if it cannot.
+/// Evaluate a boolean CONDITION for an `if`-expression over a schedule (comparisons + and/or/not).
+fn eval_num_cond(e: &Expr, env: &HashMap<String, usize>, m: &SModel) -> Option<bool> {
+    match e {
+        Expr::Binary { op: BinOp::And, lhs, rhs } => Some(eval_num_cond(lhs, env, m)? && eval_num_cond(rhs, env, m)?),
+        Expr::Binary { op: BinOp::Or, lhs, rhs } => Some(eval_num_cond(lhs, env, m)? || eval_num_cond(rhs, env, m)?),
+        Expr::Unary { op: UnOp::Not, e } => Some(!eval_num_cond(e, env, m)?),
+        Expr::Binary { op, lhs, rhs } => {
+            let a = eval_num(lhs, env, m)?; let b = eval_num(rhs, env, m)?;
+            Some(match op { BinOp::Lt => a < b, BinOp::Le => a <= b, BinOp::Gt => a > b, BinOp::Ge => a >= b,
+                            BinOp::Eq => (a - b).abs() < 1e-9, BinOp::Ne => (a - b).abs() >= 1e-9, _ => return None })
+        }
+        _ => None,
+    }
+}
+
 fn eval_num(e: &Expr, env: &HashMap<String, usize>, m: &SModel) -> Option<f64> {
     match e {
         Expr::Int(n) => Some(*n as f64),
@@ -533,6 +548,7 @@ fn eval_num(e: &Expr, env: &HashMap<String, usize>, m: &SModel) -> Option<f64> {
         Expr::Binary { op: BinOp::Sub, lhs, rhs } => Some(eval_num(lhs, env, m)? - eval_num(rhs, env, m)?),
         Expr::Binary { op: BinOp::Mul, lhs, rhs } => Some(eval_num(lhs, env, m)? * eval_num(rhs, env, m)?),
         Expr::Binary { op: BinOp::Div, lhs, rhs } => { let d = eval_num(rhs, env, m)?; if d == 0.0 { None } else { Some(eval_num(lhs, env, m)? / d) } }
+        Expr::Cond { cond, then_, els } => { if eval_num_cond(cond, env, m)? { eval_num(then_, env, m) } else { eval_num(els, env, m) } }
         Expr::Sum { vars, body, .. } => {
             let mut acc = 0.0;
             let mut env2 = env.clone();
@@ -751,6 +767,7 @@ fn substitute(e: &Expr, map: &HashMap<String, Expr>) -> Expr {
         Expr::Binary { op, lhs, rhs } => Expr::Binary { op: op.clone(), lhs: Box::new(substitute(lhs, map)), rhs: Box::new(substitute(rhs, map)) },
         Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(substitute(e, map)) },
         Expr::Field { base, name } => Expr::Field { base: Box::new(substitute(base, map)), name: name.clone() },
+        Expr::Cond { cond, then_, els } => Expr::Cond { cond: Box::new(substitute(cond, map)), then_: Box::new(substitute(then_, map)), els: Box::new(substitute(els, map)) },
         other => other.clone(),
     }
 }
@@ -777,6 +794,7 @@ fn inline_defs(e: &Expr, defs: &HashMap<String, (Vec<String>, Expr)>) -> Expr {
         Expr::Binary { op, lhs, rhs } => Expr::Binary { op: op.clone(), lhs: Box::new(inline_defs(lhs, defs)), rhs: Box::new(inline_defs(rhs, defs)) },
         Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(inline_defs(e, defs)) },
         Expr::Field { base, name } => Expr::Field { base: Box::new(inline_defs(base, defs)), name: name.clone() },
+        Expr::Cond { cond, then_, els } => Expr::Cond { cond: Box::new(inline_defs(cond, defs)), then_: Box::new(inline_defs(then_, defs)), els: Box::new(inline_defs(els, defs)) },
         // A bare name referring to a 0-ary defined constant (`given k means <expr>`) inlines to its body.
         Expr::Name(n) => match defs.get(n) {
             Some((params, body)) if params.is_empty() => inline_defs(body, defs),
@@ -880,6 +898,16 @@ mod tests {
         let r = monitor(SPEC, "t=1 entity=R1 collateralised=T has_code=F accepted=F rejected=F\n");
         assert!(count(&r, "collat_needs_code") == 1, "{r}");
         assert!(r.contains("\"ok\":false"));
+    }
+
+    #[test]
+    fn conditional_tiered_value() {
+        // if/then/else expresses tiered rates / conditional values; monitored on traces.
+        let spec = "-- allium: 4\ncomponent Tier\n  entity Loan\n  observable state bal(Loan) : Money\n  observable state rate(Loan) : Rate\n  invariant tiered means every l :: rate(l) = (if bal(l) > 10000 then 5 else 10)\nend\n";
+        let ok = "period=0 bal=20000.00 rate=5.00\nperiod=1 bal=8000.00 rate=10.00\n";
+        assert!(monitor_schedule(spec, ok, 0.01).contains("\"ok\":true"), "tiered correct should hold: {}", monitor_schedule(spec, ok, 0.01));
+        let bad = "period=0 bal=20000.00 rate=10.00\n";
+        assert!(monitor_schedule(spec, bad, 0.01).contains("\"ok\":false"), "tiered violation should be caught");
     }
 
     #[test]

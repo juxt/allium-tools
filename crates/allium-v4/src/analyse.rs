@@ -74,6 +74,7 @@ pub(crate) fn canon(e: &Expr) -> String {
         Expr::Binary { op, lhs, rhs } => format!("{} {} {}", canon(lhs), binop_str(op), canon(rhs)),
         Expr::Quant { .. } => "<quantified>".to_string(),
         Expr::Sum { body, .. } => format!("sum({})", canon(body)),
+        Expr::Cond { cond, then_, els } => format!("if {} then {} else {}", canon(cond), canon(then_), canon(els)),
         Expr::Error => "<error>".to_string(),
     }
 }
