@@ -531,11 +531,17 @@ fn eval_num(e: &Expr, env: &HashMap<String, usize>, m: &SModel) -> Option<f64> {
                 Expr::Name(s) => s,
                 _ => return None,
             };
-            // built-in numeric functions: min/max of two values (caps and floors).
+            // built-in numeric functions: min/max (caps/floors) and round (banker's, HALF_EVEN).
             if args.len() == 2 && (name == "min" || name == "max") {
                 let a = eval_num(&args[0], env, m)?;
                 let b = eval_num(&args[1], env, m)?;
                 return Some(if name == "min" { a.min(b) } else { a.max(b) });
+            }
+            if args.len() == 2 && name == "round" {
+                let x = eval_num(&args[0], env, m)?;
+                let places = eval_num(&args[1], env, m)? as i32;
+                let f = 10f64.powi(places);
+                return Some((x * f).round_ties_even() / f);
             }
             if args.len() == 1 {
                 let i = s_idx(&args[0], env)?;
@@ -898,6 +904,17 @@ mod tests {
         let r = monitor(SPEC, "t=1 entity=R1 collateralised=T has_code=F accepted=F rejected=F\n");
         assert!(count(&r, "collat_needs_code") == 1, "{r}");
         assert!(r.contains("\"ok\":false"));
+    }
+
+    #[test]
+    fn round_builtin() {
+        // round(x,n): banker's rounding to pin monetary precision (non-tie cases; exact decimal
+        // tie-breaking needs rational arithmetic — a documented f64 limit).
+        let spec = "-- allium: 4\ncomponent R\n  entity P\n  given rate : Rate\n  observable state bal(P) : Money\n  observable state interest(P) : Money\n  invariant exact means every p :: interest(p) = round(bal(p) * rate, 2)\nend\n";
+        let ok = "period=0 bal=1000.00 interest=8.34\ngiven rate=0.008342\n"; // 8.342 -> 8.34
+        assert!(monitor_schedule(spec, ok, 0.001).contains("\"ok\":true"), "rounded correct should hold: {}", monitor_schedule(spec, ok, 0.001));
+        let bad = "period=0 bal=1000.00 interest=8.35\ngiven rate=0.008342\n";
+        assert!(monitor_schedule(spec, bad, 0.001).contains("\"ok\":false"), "wrong rounding should be caught");
     }
 
     #[test]

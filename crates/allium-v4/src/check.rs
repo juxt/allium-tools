@@ -179,6 +179,6 @@ fn is_builtin_pred(n: &str) -> bool {
     matches!(
         n,
         "before" | "precedes" | "after" | "follows" | "succ" | "successor" | "next" | "is_last" | "last"
-            | "final" | "is_first" | "first" | "min" | "max"
+            | "final" | "is_first" | "first" | "min" | "max" | "round"
     )
 }

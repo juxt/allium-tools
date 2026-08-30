@@ -144,6 +144,7 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>, at: Span, out: &mut Vec<Diagnostic
                         _ => Ty::Lit,
                     }
                 }
+                Expr::Name(h) if h == "round" && !arg_tys.is_empty() => arg_tys[0].clone(),
                 Expr::Name(h) => env.get(h).cloned().unwrap_or(Ty::Unknown),
                 _ => Ty::Unknown,
             }
