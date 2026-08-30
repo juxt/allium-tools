@@ -136,6 +136,12 @@ impl RVal {
 struct EState {
     bools: HashMap<String, bool>,
     vals: HashMap<String, String>,
+    order: usize, // arrival index of this entity's event; enables ordering predicates before/precedes/after
+}
+
+/// Built-in ordering predicates over the event timeline (arity 2).
+fn is_order_pred(h: &str) -> bool {
+    matches!(h, "before" | "precedes" | "after" | "follows" | "succ" | "successor" | "next")
 }
 
 type Env = HashMap<String, String>;
@@ -151,6 +157,7 @@ fn rel_unsupported(e: &Expr) -> Option<String> {
         }
         Expr::Binary { .. } => Some("arithmetic/inequality in a quantified invariant (not supported)".into()),
         Expr::Unary { op: UnOp::Not, e } => rel_unsupported(e),
+        Expr::App { head, args } if args.len() == 2 && matches!(head.as_ref(), Expr::Name(h) if is_order_pred(h)) => None,
         Expr::App { args, .. } if args.len() != 1 => Some(format!("relational atom of arity {}", args.len())),
         _ => None,
     }
@@ -165,6 +172,24 @@ fn eval_rel(e: &Expr, env: &Env, pop: &Pop) -> RVal {
         Expr::Binary { op: BinOp::Eq, lhs, rhs } => RVal::B(eval_rel(lhs, env, pop) == eval_rel(rhs, env, pop)),
         Expr::Binary { op: BinOp::Ne, lhs, rhs } => RVal::B(eval_rel(lhs, env, pop) != eval_rel(rhs, env, pop)),
         Expr::Unary { op: UnOp::Not, e } => RVal::B(!eval_rel(e, env, pop).truthy()),
+        // Ordering predicate over the event timeline: before/precedes/after/follows(a, b).
+        Expr::App { head, args } if args.len() == 2 && matches!(head.as_ref(), Expr::Name(h) if is_order_pred(h)) => {
+            let ord = |e: &Expr| -> Option<usize> {
+                match eval_rel(e, env, pop) {
+                    RVal::E(ent) => pop.get(&ent).map(|s| s.order),
+                    _ => None,
+                }
+            };
+            let h = if let Expr::Name(h) = head.as_ref() { h.as_str() } else { "" };
+            match (ord(&args[0]), ord(&args[1])) {
+                (Some(a), Some(b)) => RVal::B(match h {
+                    "after" => a > b,
+                    "follows" | "succ" | "successor" | "next" => a == b + 1,
+                    _ => a < b, // before / precedes
+                }),
+                _ => RVal::B(false),
+            }
+        }
         // A unary atom: boolean predicate -> B, value field -> S, else absent.
         app if atom_pred_var(app).is_some() => {
             let (pred, var) = atom_pred_var(app).unwrap();
@@ -331,7 +356,7 @@ pub fn monitor(source: &str, trace: &str) -> String {
     let mut rel_reported: HashMap<String, ()> = HashMap::new();
     let mut violations: Vec<String> = Vec::new();
 
-    for ev in &events {
+    for (idx, ev) in events.iter().enumerate() {
         // Point / temporal invariants: bound to this event's entity.
         for (name, expr, kind) in &invs {
             match kind {
@@ -351,8 +376,10 @@ pub fn monitor(source: &str, trace: &str) -> String {
             }
         }
 
-        // Update population, then check relational invariants over it.
-        pop.insert(ev.entity.clone(), ev.st.clone());
+        // Update population (recording arrival order), then check relational invariants over it.
+        let mut st = ev.st.clone();
+        st.order = idx;
+        pop.insert(ev.entity.clone(), st);
         for (name, expr, kind) in &invs {
             if !matches!(kind, Kind::Relational) || rel_reported.contains_key(name) {
                 continue;
@@ -760,6 +787,27 @@ mod tests {
         let r = monitor(SPEC, "t=1 entity=R1 collateralised=T has_code=F accepted=F rejected=F\n");
         assert!(count(&r, "collat_needs_code") == 1, "{r}");
         assert!(r.contains("\"ok\":false"));
+    }
+
+    #[test]
+    fn multistep_ordering_before() {
+        // before(a,c): a capture must have some authorize earlier in the event timeline.
+        let spec = "-- allium: 4\ncomponent Payments\n  entity Event\n  observable state is_auth(Event) : bool\n  observable state is_capture(Event) : bool\n  invariant capture_needs_prior_auth means every c :: is_capture(c) implies some a :: (is_auth(a) and before(a, c))\nend\n";
+        let ok = "entity=e1 is_auth=T is_capture=F\nentity=e2 is_auth=F is_capture=T\n";
+        assert!(monitor(spec, ok).contains("\"ok\":true"), "auth before capture should hold: {}", monitor(spec, ok));
+        let bad = "entity=e1 is_auth=F is_capture=T\nentity=e2 is_auth=T is_capture=F\n";
+        let r = monitor(spec, bad);
+        assert!(r.contains("capture_needs_prior_auth") && r.contains("\"ok\":false"), "auth after capture should violate: {r}");
+    }
+
+    #[test]
+    fn relational_quantified_forms_correct() {
+        // Locks in that some / at-most-one / entity-identity evaluate correctly (guards the D8 retraction).
+        let spec = "-- allium: 4\ncomponent S\n  entity E\n  observable state is_open(E) : bool\n  invariant at_most_one means every a :: every b :: (is_open(a) and is_open(b)) implies (a = b)\n  invariant some_open means some a :: is_open(a)\nend\n";
+        assert!(monitor(spec, "entity=a is_open=T\nentity=b is_open=T\n").contains("at_most_one"), "at_most_one must catch two open");
+        assert!(!monitor(spec, "entity=a is_open=T\nentity=b is_open=F\n").contains("at_most_one"), "at_most_one must hold with one open");
+        assert!(monitor(spec, "entity=a is_open=F\nentity=b is_open=F\n").contains("some_open"), "some_open must violate when none open");
+        assert!(!monitor(spec, "entity=a is_open=T\nentity=b is_open=F\n").contains("some_open"), "some_open must hold when one open");
     }
 
     #[test]

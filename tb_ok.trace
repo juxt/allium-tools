@@ -1,0 +1,2 @@
+entity=e1 is_auth=T is_capture=F
+entity=e2 is_auth=F is_capture=T
