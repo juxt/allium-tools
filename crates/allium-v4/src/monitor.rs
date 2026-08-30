@@ -324,12 +324,13 @@ enum Kind {
 /// Run the monitor. Returns a JSON report `{events, monitored, skipped, violations, ok}`.
 pub fn monitor(source: &str, trace: &str) -> String {
     let module = crate::check::check(source).module;
+    let defs = collect_defs(&module, source);
     let raw: Vec<(String, Expr)> = module
         .decls
         .iter()
         .flat_map(|d| d.items.iter())
         .filter(|it| it.kind == ItemKind::Invariant)
-        .filter_map(|it| it.body.map(|sp| (it.name.clone().unwrap_or_else(|| "<anon>".into()), crate::expr::parse_predicate(sp.slice(source)).0)))
+        .filter_map(|it| it.body.map(|sp| (it.name.clone().unwrap_or_else(|| "<anon>".into()), inline_defs(&crate::expr::parse_predicate(sp.slice(source)).0, &defs))))
         .collect();
 
     let mut skipped: Vec<String> = Vec::new();
@@ -722,17 +723,84 @@ fn collect_bind(
     env.remove(&vars[from]);
 }
 
+/// Substitute `map` (param name -> argument expr) through `e`, respecting quantifier shadowing.
+fn substitute(e: &Expr, map: &HashMap<String, Expr>) -> Expr {
+    match e {
+        Expr::Name(n) => map.get(n).cloned().unwrap_or_else(|| e.clone()),
+        Expr::App { head, args } => Expr::App {
+            head: Box::new(substitute(head, map)),
+            args: args.iter().map(|a| substitute(a, map)).collect(),
+        },
+        Expr::Quant { q, vars, ty, body } => {
+            let mut inner = map.clone();
+            for v in vars { inner.remove(v); }
+            Expr::Quant { q: q.clone(), vars: vars.clone(), ty: ty.clone(), body: Box::new(substitute(body, &inner)) }
+        }
+        Expr::Sum { vars, ty, body } => {
+            let mut inner = map.clone();
+            for v in vars { inner.remove(v); }
+            Expr::Sum { vars: vars.clone(), ty: ty.clone(), body: Box::new(substitute(body, &inner)) }
+        }
+        Expr::Binary { op, lhs, rhs } => Expr::Binary { op: op.clone(), lhs: Box::new(substitute(lhs, map)), rhs: Box::new(substitute(rhs, map)) },
+        Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(substitute(e, map)) },
+        Expr::Field { base, name } => Expr::Field { base: Box::new(substitute(base, map)), name: name.clone() },
+        other => other.clone(),
+    }
+}
+
+/// Inline calls to defined givens (`f(params) means body`, an OCaml-style pure reference function) by
+/// substituting arguments into the body. Lets invariants use reference-oracle definitions; nested
+/// definition calls resolve by re-inlining the substituted body.
+fn inline_defs(e: &Expr, defs: &HashMap<String, (Vec<String>, Expr)>) -> Expr {
+    match e {
+        Expr::App { head, args } => {
+            let iargs: Vec<Expr> = args.iter().map(|a| inline_defs(a, defs)).collect();
+            if let Expr::Name(f) = head.as_ref() {
+                if let Some((params, body)) = defs.get(f) {
+                    if params.len() == iargs.len() {
+                        let map: HashMap<String, Expr> = params.iter().cloned().zip(iargs).collect();
+                        return inline_defs(&substitute(body, &map), defs);
+                    }
+                }
+            }
+            Expr::App { head: Box::new(inline_defs(head, defs)), args: iargs }
+        }
+        Expr::Quant { q, vars, ty, body } => Expr::Quant { q: q.clone(), vars: vars.clone(), ty: ty.clone(), body: Box::new(inline_defs(body, defs)) },
+        Expr::Sum { vars, ty, body } => Expr::Sum { vars: vars.clone(), ty: ty.clone(), body: Box::new(inline_defs(body, defs)) },
+        Expr::Binary { op, lhs, rhs } => Expr::Binary { op: op.clone(), lhs: Box::new(inline_defs(lhs, defs)), rhs: Box::new(inline_defs(rhs, defs)) },
+        Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(inline_defs(e, defs)) },
+        Expr::Field { base, name } => Expr::Field { base: Box::new(inline_defs(base, defs)), name: name.clone() },
+        other => other.clone(),
+    }
+}
+
+/// Defined givens with parameters: `given f(params) means body` -> (name, (params, body-expr)).
+fn collect_defs(module: &crate::ast::Module, source: &str) -> HashMap<String, (Vec<String>, Expr)> {
+    module
+        .decls
+        .iter()
+        .flat_map(|d| d.items.iter())
+        .filter(|it| it.kind == ItemKind::Given && !it.params.is_empty() && it.body.is_some())
+        .filter_map(|it| {
+            let name = it.name.clone()?;
+            let body = crate::expr::parse_predicate(it.body?.slice(source)).0;
+            Some((name, (it.params.clone(), body)))
+        })
+        .collect()
+}
+
 /// Monitor arithmetic invariants over one concrete schedule trace. `tol` is the
 /// tolerance for equalities/inequalities (e.g. 0.005 to allow currency rounding).
 /// JSON: `{periods, monitored, results:[{invariant,holds,checks,max_residual,witness}], ok}`.
 pub fn monitor_schedule(source: &str, trace: &str, tol: f64) -> String {
     let module = crate::check::check(source).module;
+    let defs = collect_defs(&module, source);
     let invs: Vec<(String, Expr)> = module
         .decls
         .iter()
         .flat_map(|d| d.items.iter())
         .filter(|it| it.kind == ItemKind::Invariant)
-        .filter_map(|it| it.body.map(|sp| (it.name.clone().unwrap_or_else(|| "<anon>".into()), crate::expr::parse_predicate(sp.slice(source)).0)))
+        .filter_map(|it| it.body.map(|sp| (it.name.clone().unwrap_or_else(|| "<anon>".into()), inline_defs(&crate::expr::parse_predicate(sp.slice(source)).0, &defs))))
         .collect();
     let m = parse_schedule(trace);
 
@@ -787,6 +855,17 @@ mod tests {
         let r = monitor(SPEC, "t=1 entity=R1 collateralised=T has_code=F accepted=F rejected=F\n");
         assert!(count(&r, "collat_needs_code") == 1, "{r}");
         assert!(r.contains("\"ok\":false"));
+    }
+
+    #[test]
+    fn reference_oracle_defined_given() {
+        // OCaml-style pure reference function via `given f(params) means body`, inlined and checked.
+        let spec = "-- allium: 4\ncomponent S\n  entity Period\n  given rate : Rate\n  given expected_interest(bal) means rate * bal\n  observable state interest(Period) : Money\n  observable state outstanding_start(Period) : Money\n  invariant interest_ok means every p :: interest(p) = expected_interest(outstanding_start(p))\nend\n";
+        let ok = "period=0 interest=100.00 outstanding_start=1000.00\ngiven rate=0.10\n";
+        assert!(monitor_schedule(spec, ok, 0.005).contains("\"ok\":true"), "correct interest should hold: {}", monitor_schedule(spec, ok, 0.005));
+        let bad = "period=0 interest=90.00 outstanding_start=1000.00\ngiven rate=0.10\n";
+        let r = monitor_schedule(spec, bad, 0.005);
+        assert!(r.contains("interest_ok") && r.contains("\"ok\":false"), "wrong interest should be caught: {r}");
     }
 
     #[test]
