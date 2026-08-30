@@ -178,6 +178,14 @@ impl<'s> ExprParser<'s> {
                 return Expr::Unary { op: UnOp::Old, e: Box::new(e) };
             }
         }
+        // Unary minus: `-1000`, `-x`. Desugar to `0 - operand` so it reuses subtraction everywhere
+        // (types/arith/monitor) with no new node. The operand binds at multiplication level, so
+        // `-a * b` is `-(a*b)` and `-a + b` is `(-a) + b`.
+        if matches!(self.cur().tok, Tok::Minus) {
+            self.adv();
+            let e = self.expr(6);
+            return Expr::Binary { op: BinOp::Sub, lhs: Box::new(Expr::Int(0)), rhs: Box::new(e) };
+        }
         self.postfix_from_atom()
     }
 

@@ -723,6 +723,16 @@ mod tests {
     }
 
     #[test]
+    fn negative_literals_lower_correctly() {
+        // `x >= -1000` and `x <= -2000` compose to an (empty) interval -> CONTRADICTORY. Verifies
+        // unary minus lowers to the real negative constant, not an error term.
+        let src = "-- allium: 4\ncomponent N\n  entity A\n  observable state x(A) : Money\n  invariant lo means every a :: x(a) >= -1000\n  invariant hi means every a :: x(a) <= -2000\nend\n";
+        let m = run(src);
+        assert!(any(&m, "CONTRADICTORY"), "{m:#?}");
+        assert!(!any(&m, "linearis"), "negative literal must not be an unchecked error: {m:#?}");
+    }
+
+    #[test]
     fn nonlinear_constraint_marks_verdict_partial() {
         // a = b*c (product of two variables) is outside the linear fragment; the satisfiable verdict
         // must be flagged PARTIAL so a clean result isn't mistaken for a full guarantee.
