@@ -35,6 +35,7 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
+    Div,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -143,6 +144,7 @@ impl<'s> ExprParser<'s> {
             Tok::Plus => (BinOp::Add, 5, false),
             Tok::Minus => (BinOp::Sub, 5, false),
             Tok::Star => (BinOp::Mul, 6, false),
+            Tok::Slash => (BinOp::Div, 6, false),
             _ => return None,
         };
         Some(op)

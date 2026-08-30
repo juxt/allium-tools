@@ -177,6 +177,7 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>, at: Span, out: &mut Vec<Diagnostic
                 }
                 BinOp::Add | BinOp::Sub => additive(&l, &r, op, at, out),
                 BinOp::Mul => multiplicative(&l, &r, at, out),
+                BinOp::Div => divisive(&l, &r, at, out),
             }
         }
     }
@@ -210,6 +211,24 @@ fn additive(l: &Ty, r: &Ty, op: &BinOp, at: Span, out: &mut Vec<Diagnostic>) -> 
             } else {
                 Ty::Num(a.clone())
             }
+        }
+        _ => Ty::Unknown,
+    }
+}
+
+fn divisive(l: &Ty, r: &Ty, at: Span, out: &mut Vec<Diagnostic>) -> Ty {
+    match (l, r) {
+        // X / scalar keeps X's dimension; money/1200 stays money.
+        (Ty::Num(d), Ty::Num(Dim::Scalar)) | (Ty::Num(d), Ty::Lit) => Ty::Num(d.clone()),
+        (Ty::Lit, Ty::Num(Dim::Scalar)) | (Ty::Lit, Ty::Lit) => Ty::Lit,
+        // same dimension divided out -> dimensionless ratio (money/money = scalar).
+        (Ty::Num(a), Ty::Num(b)) if a == b => Ty::Num(Dim::Scalar),
+        (Ty::Num(a), Ty::Num(b)) => {
+            out.push(Diagnostic::error(
+                at,
+                format!("cannot divide {} by {}: incompatible dimensions", a.desc(), b.desc()),
+            ));
+            Ty::Unknown
         }
         _ => Ty::Unknown,
     }

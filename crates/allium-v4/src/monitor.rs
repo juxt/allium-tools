@@ -526,6 +526,7 @@ fn eval_num(e: &Expr, env: &HashMap<String, usize>, m: &SModel) -> Option<f64> {
         Expr::Binary { op: BinOp::Add, lhs, rhs } => Some(eval_num(lhs, env, m)? + eval_num(rhs, env, m)?),
         Expr::Binary { op: BinOp::Sub, lhs, rhs } => Some(eval_num(lhs, env, m)? - eval_num(rhs, env, m)?),
         Expr::Binary { op: BinOp::Mul, lhs, rhs } => Some(eval_num(lhs, env, m)? * eval_num(rhs, env, m)?),
+        Expr::Binary { op: BinOp::Div, lhs, rhs } => { let d = eval_num(rhs, env, m)?; if d == 0.0 { None } else { Some(eval_num(lhs, env, m)? / d) } }
         Expr::Sum { vars, body, .. } => {
             let mut acc = 0.0;
             let mut env2 = env.clone();
@@ -770,20 +771,38 @@ fn inline_defs(e: &Expr, defs: &HashMap<String, (Vec<String>, Expr)>) -> Expr {
         Expr::Binary { op, lhs, rhs } => Expr::Binary { op: op.clone(), lhs: Box::new(inline_defs(lhs, defs)), rhs: Box::new(inline_defs(rhs, defs)) },
         Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(inline_defs(e, defs)) },
         Expr::Field { base, name } => Expr::Field { base: Box::new(inline_defs(base, defs)), name: name.clone() },
+        // A bare name referring to a 0-ary defined constant (`given k means <expr>`) inlines to its body.
+        Expr::Name(n) => match defs.get(n) {
+            Some((params, body)) if params.is_empty() => inline_defs(body, defs),
+            _ => e.clone(),
+        },
         other => other.clone(),
     }
 }
 
-/// Defined givens with parameters: `given f(params) means body` -> (name, (params, body-expr)).
+/// True when a parsed given-body is a COMPUTATION (a reference definition) rather than a type
+/// annotation. `given x : Money` parses to a bare Name/App (type); `given x means a*b/c` parses to an
+/// arithmetic expression. Lets us inline 0-ary reference constants without mistaking `: T` for a def.
+fn is_computation(e: &Expr) -> bool {
+    matches!(e, Expr::Binary { .. } | Expr::Unary { .. } | Expr::Int(_) | Expr::Dec(_, _) | Expr::Sum { .. })
+}
+
+/// Defined givens usable as inline reference functions/constants:
+///   `given f(params) means body` (parameterised) or `given k means <arithmetic>` (0-ary constant).
+/// Excludes plain type declarations `given x : T` (body parses to a bare type name/app).
 fn collect_defs(module: &crate::ast::Module, source: &str) -> HashMap<String, (Vec<String>, Expr)> {
     module
         .decls
         .iter()
         .flat_map(|d| d.items.iter())
-        .filter(|it| it.kind == ItemKind::Given && !it.params.is_empty() && it.body.is_some())
+        .filter(|it| it.kind == ItemKind::Given && it.body.is_some())
         .filter_map(|it| {
             let name = it.name.clone()?;
             let body = crate::expr::parse_predicate(it.body?.slice(source)).0;
+            // parameterised -> a reference function; 0-ary -> only if the body is a computation.
+            if it.params.is_empty() && !is_computation(&body) {
+                return None; // a type declaration, not a definition
+            }
             Some((name, (it.params.clone(), body)))
         })
         .collect()
@@ -855,6 +874,18 @@ mod tests {
         let r = monitor(SPEC, "t=1 entity=R1 collateralised=T has_code=F accepted=F rejected=F\n");
         assert!(count(&r, "collat_needs_code") == 1, "{r}");
         assert!(r.contains("\"ok\":false"));
+    }
+
+    #[test]
+    fn division_and_zeroary_reference_constant() {
+        // Division operator + 0-ary reference constant (`given k means <arith>`) inline and evaluate.
+        let spec = "-- allium: 4\ncomponent S\n  entity Period\n  given disbursed : Money\n  given annual_rate_pct : Rate\n  given flat_interest means disbursed * annual_rate_pct / 1200\n  observable state interest(Period) : Money\n  invariant interest_flat means every p :: interest(p) = flat_interest\nend\n";
+        let ok = "period=0 interest=8.33\ngiven disbursed=1000.00 annual_rate_pct=9.99\n";       // 1000*9.99/1200=8.325
+        let r_ok = monitor_schedule(spec, ok, 0.01);
+        assert!(r_ok.contains("\"ok\":true"), "correct flat interest should hold: {r_ok}");
+        let bad = "period=0 interest=10.00\ngiven disbursed=1000.00 annual_rate_pct=9.99\n";
+        let r_bad = monitor_schedule(spec, bad, 0.01);
+        assert!(r_bad.contains("interest_flat") && r_bad.contains("\"ok\":false"), "wrong interest should be caught: {r_bad}");
     }
 
     #[test]

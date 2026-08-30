@@ -93,6 +93,7 @@ fn binop_str(op: &BinOp) -> &'static str {
         BinOp::Add => "+",
         BinOp::Sub => "-",
         BinOp::Mul => "*",
+        BinOp::Div => "/",
     }
 }
 

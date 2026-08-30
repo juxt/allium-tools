@@ -624,6 +624,15 @@ fn lower(e: &Expr, env: &HashMap<String, usize>, st: &HashMap<String, String>) -
                 None // product of two variables — nonlinear
             }
         }
+        Expr::Binary { op: BinOp::Div, lhs, rhs } => {
+            let l = lower(lhs, env, st)?;
+            let r = lower(rhs, env, st)?;
+            if r.terms.is_empty() && !r.c.is_zero() {
+                Some(l.scale(Rat::int(1).div(r.c))) // division by a constant is linear
+            } else {
+                None // division by a variable — nonlinear
+            }
+        }
         _ => None,
     }
 }
