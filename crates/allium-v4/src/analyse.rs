@@ -32,6 +32,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut consistency(&r.module, source));
     r.diagnostics.append(&mut feasibility(&r.module, source));
     r.diagnostics.append(&mut preservation(&r.module, source));
+    r.diagnostics.append(&mut relational_preservation(&r.module, source));
     r.diagnostics.append(&mut bmc(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source));
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
@@ -418,6 +419,195 @@ fn as_literals(e: &Expr, state: &HashSet<String>, out: &mut Vec<(Expr, bool)>) -
             true
         }
         _ => false,
+    }
+}
+
+/// A second canonical entity, distinct from `ENT`, for relational (two-entity) invariants.
+const ENT2: &str = "_f";
+
+/// Leading universally-quantified variables of `inv` and the quantifier-free body beneath them, or `None`
+/// if `inv` is not a run of `every`s over a QF body. Handles both `every a, b :: …` and nested `every a ::
+/// every b :: …`.
+fn universal_body(inv: &Expr) -> Option<(Vec<String>, Expr)> {
+    match inv {
+        Expr::Quant { q: Quant::Every, vars, body, .. } => {
+            let mut vs = vars.clone();
+            match universal_body(body) {
+                Some((mut more, inner)) => {
+                    vs.append(&mut more);
+                    Some((vs, inner))
+                }
+                None if !has_quant(body) => Some((vs, (**body).clone())),
+                None => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Rename bare variable names via `map`.
+fn rename_vars(e: &Expr, map: &HashMap<String, String>) -> Expr {
+    match e {
+        Expr::Name(n) => Expr::Name(map.get(n).cloned().unwrap_or_else(|| n.clone())),
+        Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(rename_vars(e, map)) },
+        Expr::Binary { op, lhs, rhs } => Expr::Binary { op: op.clone(), lhs: Box::new(rename_vars(lhs, map)), rhs: Box::new(rename_vars(rhs, map)) },
+        Expr::App { head, args } => Expr::App { head: Box::new(rename_vars(head, map)), args: args.iter().map(|a| rename_vars(a, map)).collect() },
+        Expr::Field { base, name } => Expr::Field { base: Box::new(rename_vars(base, map)), name: name.clone() },
+        Expr::Cond { cond, then_, els } => Expr::Cond { cond: Box::new(rename_vars(cond, map)), then_: Box::new(rename_vars(then_, map)), els: Box::new(rename_vars(els, map)) },
+        other => other.clone(),
+    }
+}
+
+/// Resolve entity equality between the two symbolic entities: `_e = _f` (distinct) becomes `false`,
+/// `_e = _e` becomes `true`; likewise `<>`. Leaves boolean-state equalities untouched.
+fn resolve_entity_eq(e: &Expr) -> Expr {
+    let is_ent = |x: &Expr| matches!(x, Expr::Name(n) if n == ENT || n == ENT2);
+    match e {
+        Expr::Binary { op: op @ (BinOp::Eq | BinOp::Ne), lhs, rhs } if is_ent(lhs) && is_ent(rhs) => {
+            let same = matches!((&**lhs, &**rhs), (Expr::Name(a), Expr::Name(b)) if a == b);
+            let val = if matches!(op, BinOp::Eq) { same } else { !same };
+            Expr::Name(if val { "true" } else { "false" }.into())
+        }
+        Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(resolve_entity_eq(e)) },
+        Expr::Binary { op, lhs, rhs } => Expr::Binary { op: op.clone(), lhs: Box::new(resolve_entity_eq(lhs)), rhs: Box::new(resolve_entity_eq(rhs)) },
+        Expr::Cond { cond, then_, els } => Expr::Cond { cond: Box::new(resolve_entity_eq(cond)), then_: Box::new(resolve_entity_eq(then_)), els: Box::new(resolve_entity_eq(els)) },
+        other => other.clone(),
+    }
+}
+
+/// Post-state rewrite for a two-entity check: a modified state observable applied to the MODIFIED entity
+/// `_e` (outside `old`) is primed; the same observable applied to the framed other entity `_f`, and every
+/// unmodified observable, is left at its pre value. `old(X)` reads pre.
+fn to_post(e: &Expr, modified: &HashSet<String>, in_old: bool) -> Expr {
+    let is_e = |args: &[Expr]| args.len() == 1 && matches!(&args[0], Expr::Name(n) if n == ENT);
+    match e {
+        Expr::Unary { op: UnOp::Old, e } => to_post(e, modified, true),
+        Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(to_post(e, modified, in_old)) },
+        Expr::App { head, args } => {
+            let head = match &**head {
+                Expr::Name(h) if !in_old && modified.contains(h) && is_e(args) => Box::new(Expr::Name(format!("{h}'"))),
+                other => Box::new(to_post(other, modified, in_old)),
+            };
+            Expr::App { head, args: args.iter().map(|a| to_post(a, modified, in_old)).collect() }
+        }
+        Expr::Binary { op, lhs, rhs } => Expr::Binary { op: op.clone(), lhs: Box::new(to_post(lhs, modified, in_old)), rhs: Box::new(to_post(rhs, modified, in_old)) },
+        Expr::Cond { cond, then_, els } => Expr::Cond { cond: Box::new(to_post(cond, modified, in_old)), then_: Box::new(to_post(then_, modified, in_old)), els: Box::new(to_post(els, modified, in_old)) },
+        other => other.clone(),
+    }
+}
+
+/// Relational (two-entity) safety preservation. For a universal invariant over two entities — uniqueness,
+/// mutual exclusion, segregation (`every a :: every b :: (active(a) and active(b)) implies a = b`) — an
+/// action that modifies one entity `_e` can break it against some OTHER entity `_f`. We instantiate the
+/// invariant at the pairs `(_e, _f)` and `(_f, _e)` with `_f` a distinct symbolic other (its state framed),
+/// assume both held pre, and check whether the action's effect on `_e` can make either fail. Sound bounded
+/// two-entity instantiation (the action touches only `_e`, so pairs not involving `_e` are unaffected).
+/// Boolean fragment only; single-entity invariants are handled by [`preservation`].
+pub fn relational_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let state_names: HashSet<String> =
+            d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
+        let all_obs: HashSet<String> =
+            d.items.iter().filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given)).filter_map(|it| it.name.clone()).collect();
+        let bool_base = bool_names_of(d, src);
+        let mut bnames = bool_base.clone();
+        for n in bool_base.clone() {
+            bnames.insert(format!("{n}'"));
+        }
+
+        // Two-entity universal invariants, each as its two ordered instances (pre and unprimed).
+        let mut invs: Vec<(String, Expr, Expr)> = Vec::new(); // (name, inst_ef, inst_fe)
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
+            let (name, body) = match (&it.name, it.body) {
+                (Some(n), Some(b)) => (n.clone(), parse_predicate(b.slice(src)).0),
+                _ => continue,
+            };
+            let (vars, qf) = match universal_body(&body) {
+                Some(x) => x,
+                None => continue,
+            };
+            if vars.len() != 2 {
+                continue; // single-entity handled elsewhere; 3+ out of scope
+            }
+            if !boolean_fragment_rel(&qf, &bool_base, &all_obs) {
+                continue;
+            }
+            let map_ef: HashMap<String, String> = [(vars[0].clone(), ENT.into()), (vars[1].clone(), ENT2.into())].into();
+            let map_fe: HashMap<String, String> = [(vars[0].clone(), ENT2.into()), (vars[1].clone(), ENT.into())].into();
+            let inst_ef = simplify(&resolve_entity_eq(&rename_vars(&qf, &map_ef)));
+            let inst_fe = simplify(&resolve_entity_eq(&rename_vars(&qf, &map_fe)));
+            invs.push((name, inst_ef, inst_fe));
+        }
+        if invs.is_empty() {
+            continue;
+        }
+
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
+            let ens_raw = match it.ensures {
+                Some(sp) => parse_predicate(sp.slice(src)).0,
+                None => continue,
+            };
+            let grd_raw = it.requires.map(|sp| parse_predicate(sp.slice(src)).0);
+            // The action subject is one entity, mapped to _e.
+            let mut ev = HashSet::new();
+            collect_entity_vars(&ens_raw, &mut ev);
+            if let Some(g) = &grd_raw {
+                collect_entity_vars(g, &mut ev);
+            }
+            if ev.len() > 1 {
+                continue;
+            }
+            let subj: HashMap<String, String> = ev.iter().map(|v| (v.clone(), ENT.to_string())).collect();
+            let ensures = rename_vars(&ens_raw, &subj);
+            let guard = grd_raw.map(|g| rename_vars(&g, &subj));
+            let mut modified = HashSet::new();
+            collect_writes(&ensures, false, &state_names, &mut modified);
+            if modified.is_empty() {
+                continue;
+            }
+            let effect = to_post(&ensures, &modified, false);
+
+            for (iname, inst_ef, inst_fe) in &invs {
+                // Only relevant if the action's writes can affect the pair.
+                if !mentions_any(inst_ef, &modified) && !mentions_any(inst_fe, &modified) {
+                    continue;
+                }
+                let post_ef = to_post(inst_ef, &modified, false);
+                let post_fe = to_post(inst_fe, &modified, false);
+                let mut broke = false;
+                for post in [&post_ef, &post_fe] {
+                    let violation = Expr::Unary { op: UnOp::Not, e: Box::new(post.clone()) };
+                    let mut es: Vec<&Expr> = vec![inst_ef, inst_fe, &effect, &violation];
+                    if let Some(g) = &guard {
+                        es.push(g);
+                    }
+                    if crate::sat::satisfiable(&es, &bnames).is_some() {
+                        broke = true;
+                        break;
+                    }
+                }
+                if broke {
+                    let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
+                    out.push(Diagnostic::warning(
+                        it.span,
+                        format!("action `{aname}` in `{}` can break relational invariant `{iname}`: acting on one entity can violate it against another entity. Guard the action so the relation is preserved.", d.name),
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Boolean fragment test that additionally allows entity equality (`a = b` between the two bound
+/// variables), which relational invariants use and which is resolved to a constant before solving.
+fn boolean_fragment_rel(e: &Expr, bool_names: &HashSet<String>, obs: &HashSet<String>) -> bool {
+    match e {
+        Expr::Binary { op: BinOp::Eq | BinOp::Ne, lhs, rhs } if matches!(&**lhs, Expr::Name(_)) && matches!(&**rhs, Expr::Name(_)) => true,
+        Expr::Binary { op: BinOp::And | BinOp::Or | BinOp::Implies, lhs, rhs } => boolean_fragment_rel(lhs, bool_names, obs) && boolean_fragment_rel(rhs, bool_names, obs),
+        Expr::Unary { op: UnOp::Not, e } => boolean_fragment_rel(e, bool_names, obs),
+        _ => boolean_fragment(e, bool_names, obs),
     }
 }
 
@@ -1304,6 +1494,16 @@ mod tests {
         assert!(any(src, "SAFE (proved by 2-induction)"), "{:?}", msgs(src));
         assert!(!any(src, "can break invariant `r_implies_p`"), "the 1-step break must be superseded: {:?}", msgs(src));
         assert!(!any(src, "REACHABLY VIOLATED"), "no reachable counterexample exists: {:?}", msgs(src));
+    }
+
+    #[test]
+    fn relational_preservation_catches_uniqueness_break() {
+        // "at most one active": an unguarded acquire that sets `active` can make two distinct holders both
+        // active, violating the relation. A deactivating action cannot, and an unrelated write cannot.
+        let bad = "-- allium: 4\ncomponent L\n  entity H\n  observable state active(H) : bool\n  action acquire\n    ensures active(h)\n  invariant at_most_one means every a :: every b :: (active(a) and active(b)) implies a = b\nend\n";
+        assert!(any(bad, "can break relational invariant `at_most_one`"), "{:?}", msgs(bad));
+        let release = "-- allium: 4\ncomponent L\n  entity H\n  observable state active(H) : bool\n  action release\n    requires active(h)\n    ensures not active(h)\n  invariant at_most_one means every a :: every b :: (active(a) and active(b)) implies a = b\nend\n";
+        assert!(!any(release, "can break relational"), "deactivation cannot break at-most-one: {:?}", msgs(release));
     }
 
     #[test]
