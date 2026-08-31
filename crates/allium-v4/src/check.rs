@@ -70,6 +70,10 @@ fn resolve_names(module: &Module, src: &str) -> Vec<Diagnostic> {
         .filter(|d| d.kind == DeclKind::Import)
         .filter_map(|d| d.alias.as_deref())
         .collect();
+    // Names brought in by `use "<path>"` — a stdlib of `given`/`state` definitions. Loading them here
+    // makes the extensibility model usable at CHECK time (not only in the monitor): imported functions
+    // resolve instead of false-flagging. Resolves paths as given (absolute or relative to CWD).
+    let imported = imported_names(module);
 
     for d in &module.decls {
         if d.kind == DeclKind::Import {
@@ -80,6 +84,7 @@ fn resolve_names(module: &Module, src: &str) -> Vec<Diagnostic> {
         scope.extend(BUILTINS.iter().map(|s| s.to_string()));
         scope.extend(enums.iter().cloned());
         scope.extend(aliases.iter().map(|s| s.to_string()));
+        scope.extend(imported.iter().cloned());
         for p in d.params.iter().chain(d.satisfies.iter()) {
             scope.insert(p.name.clone());
         }
@@ -181,4 +186,27 @@ fn is_builtin_pred(n: &str) -> bool {
         "before" | "precedes" | "after" | "follows" | "succ" | "successor" | "next" | "is_last" | "last"
             | "final" | "is_first" | "first" | "min" | "max" | "round"
     )
+}
+
+/// Names (given/state item names) brought in by `use "<path>"` imports, for name resolution.
+/// Reads each imported file (path as given, or with a `.allium` suffix) and collects its item names.
+fn imported_names(module: &Module) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for d in module.decls.iter().filter(|d| d.kind == DeclKind::Import) {
+        if d.name.is_empty() {
+            continue;
+        }
+        for cand in [d.name.clone(), format!("{}.allium", d.name)] {
+            if let Ok(src) = std::fs::read_to_string(&cand) {
+                let m = parse(&src).module;
+                for it in m.decls.iter().flat_map(|dd| dd.items.iter()) {
+                    if let Some(n) = &it.name {
+                        out.insert(n.clone());
+                    }
+                }
+                break;
+            }
+        }
+    }
+    out
 }
