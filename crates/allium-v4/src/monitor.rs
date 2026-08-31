@@ -19,6 +19,7 @@
 //! entity seen so far.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use crate::analyse::canon;
 use crate::ast::ItemKind;
@@ -398,11 +399,31 @@ pub fn monitor(source: &str, trace: &str) -> String {
         prev.insert(ev.entity.clone(), ev.st.bools.clone());
     }
 
+    // Vacuity guard. A relational invariant like `every a :: every b :: …` ranges over the DISTINCT
+    // entities in the trace. If events carry no per-instance identity (`entity=<id>`), they all collapse
+    // to one anonymous entity: the quantifier is vacuously true AND earlier state is overwritten. This
+    // is a silent false-confidence trap (an idempotency spec "holds" against a trace that never
+    // exercised it). Surface it as a warning so a passing gate is trustworthy.
+    let has_relational = invs.iter().any(|(_, _, k)| matches!(k, Kind::Relational));
+    let empty_ident = events.iter().filter(|e| e.entity.is_empty()).count();
+    let distinct: HashSet<&str> = events.iter().map(|e| e.entity.as_str()).collect();
+    let mut warnings: Vec<String> = Vec::new();
+    if has_relational && empty_ident > 0 {
+        warnings.push(format!(
+            "{} event(s) have no `entity=` identity and collapse to one anonymous entity (earlier state overwritten); relational quantifiers over them are vacuous. Set `entity=<id>` per event.",
+            empty_ident));
+    } else if has_relational && events.len() >= 2 && distinct.len() < 2 {
+        warnings.push(format!(
+            "relational invariant(s) ranged over {} distinct entity; `every a :: every b ::` checks are vacuously true. Give events distinct `entity=<id>` values to exercise them.",
+            distinct.len()));
+    }
+
     format!(
-        "{{\"events\":{},\"monitored\":{},\"skipped\":[{}],\"violations\":[{}],\"ok\":{}}}",
+        "{{\"events\":{},\"monitored\":{},\"skipped\":[{}],\"warnings\":[{}],\"violations\":[{}],\"ok\":{}}}",
         events.len(),
         invs.len(),
         skipped.join(","),
+        warnings.iter().map(|w| format!("\"{}\"", esc(w))).collect::<Vec<_>>().join(","),
         violations.join(","),
         violations.is_empty()
     )
@@ -940,6 +961,21 @@ mod tests {
         let spec = "-- allium: 4\ncomponent C\n  entity P\n  observable state bal(P) : Money\n  observable state interest(P) : Money\n  invariant x means each p : interest(p) = bal(p)\nend\n";
         assert!(monitor_schedule(spec, "period=0 bal=100.00 interest=100.00\n", 0.01).contains("\"ok\":true"));
         assert!(monitor_schedule(spec, "period=0 bal=100.00 interest=90.00\n", 0.01).contains("\"ok\":false"));
+    }
+
+    #[test]
+    fn vacuity_warning_on_collapsed_entities() {
+        // A relational uniqueness/idempotency invariant over events with NO `entity=` identity is
+        // vacuously true (all events collapse to one anonymous entity). The monitor must WARN rather
+        // than report a clean pass — else a spec "holds" against a trace that never exercised it.
+        let spec = "-- allium: 4\ncomponent L\n  entity P\n  observable state txn(P) : Rate\n  invariant no_replay means every a :: every b :: txn(a) = txn(b) implies a = b\nend\n";
+        let collapsed = monitor(spec, "txn=1\ntxn=1\n");
+        assert!(collapsed.contains("\"ok\":true"), "vacuously holds: {collapsed}");
+        assert!(collapsed.contains("no `entity=` identity"), "must warn about collapse: {collapsed}");
+        // With distinct identity, the duplicate is caught and there is no warning.
+        let proper = monitor(spec, "entity=p1 txn=1\nentity=p2 txn=1\n");
+        assert!(proper.contains("\"ok\":false"), "duplicate must fire: {proper}");
+        assert!(proper.contains("\"warnings\":[]"), "no warning when identity present: {proper}");
     }
 
     #[test]
