@@ -32,6 +32,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut consistency(&r.module, source));
     r.diagnostics.append(&mut feasibility(&r.module, source));
     r.diagnostics.append(&mut preservation(&r.module, source));
+    r.diagnostics.append(&mut bmc(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source));
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source));
@@ -373,6 +374,219 @@ pub(crate) fn pretty(s: &str) -> String {
     s.replace(ENT, "e")
 }
 
+/// Longest counterexample trace bounded model checking will search for.
+const BMC_MAX: usize = 6;
+
+/// A boolean state literal from an `ensures`/`init`: the observable's representative application and its
+/// target truth. Returns `false` if `e` is not a conjunction of bare/negated state applications (BMC then
+/// declines the whole spec, soundly, rather than model a transition it cannot represent exactly).
+fn as_literals(e: &Expr, state: &HashSet<String>, out: &mut Vec<(Expr, bool)>) -> bool {
+    let lit = |x: &Expr| -> Option<String> {
+        match x {
+            Expr::App { head, .. } => match &**head {
+                Expr::Name(h) if state.contains(h) => Some(h.clone()),
+                _ => None,
+            },
+            Expr::Field { name, .. } if state.contains(name) => Some(name.clone()),
+            Expr::Name(n) if state.contains(n) => Some(n.clone()),
+            _ => None,
+        }
+    };
+    match e {
+        Expr::Binary { op: BinOp::And, lhs, rhs } => as_literals(lhs, state, out) && as_literals(rhs, state, out),
+        Expr::Unary { op: UnOp::Not, e } if lit(e).is_some() => {
+            out.push(((**e).clone(), false));
+            true
+        }
+        _ if lit(e).is_some() => {
+            out.push((e.clone(), true));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The state name at the head of an application/field/name atom.
+fn atom_head(e: &Expr) -> Option<String> {
+    match e {
+        Expr::App { head, .. } => match &**head {
+            Expr::Name(h) => Some(h.clone()),
+            _ => None,
+        },
+        Expr::Field { name, .. } => Some(name.clone()),
+        Expr::Name(n) => Some(n.clone()),
+        _ => None,
+    }
+}
+
+/// Entity-normalise every variable in `e` to the canonical entity `ENT`.
+fn normalize(e: &Expr) -> Expr {
+    let mut ev = HashSet::new();
+    collect_entity_vars(e, &mut ev);
+    rename_entity(e, &ev)
+}
+
+/// Bounded model checking: for each boolean safety invariant, search for a concrete execution from `init`
+/// that reaches a state violating it, up to `BMC_MAX` steps, by iterative deepening (so the reported trace
+/// is minimal). Where inductive preservation proves safety and reports a *possible* one-step break, BMC
+/// answers the complementary question — is a violating state actually REACHABLE? — with a witness action
+/// sequence. Sound within the bound: a reported trace is a genuine execution; silence means no violation
+/// of length <= BMC_MAX (not a proof of safety, which is what preservation provides). Restricted to the
+/// literal-conjunction state-machine fragment with a fully-pinned init; declines other specs cleanly.
+pub fn bmc(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let state_names: HashSet<String> =
+            d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
+        let all_obs: HashSet<String> =
+            d.items.iter().filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given)).filter_map(|it| it.name.clone()).collect();
+        let bool_base = bool_names_of(d, src);
+        if state_names.is_empty() || state_names.iter().any(|s| !bool_base.contains(s)) {
+            continue; // BMC models boolean state machines; a non-boolean state is out of this fragment
+        }
+
+        // init, as a full assignment of every state literal (must pin all states, else skip).
+        let init_item = match d.items.iter().find(|it| it.kind == ItemKind::Init).and_then(|it| it.body) {
+            Some(sp) => {
+                let t = sp.slice(src);
+                parse_predicate(t.trim().strip_prefix("means").unwrap_or(t)).0
+            }
+            None => continue,
+        };
+        let mut init_lits = Vec::new();
+        if !as_literals(&normalize(&init_item), &state_names, &mut init_lits) {
+            continue;
+        }
+        if init_lits.len() < state_names.len() {
+            continue; // init leaves a state free: reachability would be an over-approximation
+        }
+
+        struct Act {
+            name: String,
+            guard: Option<Expr>,
+            writes: Vec<(Expr, bool)>,
+            modified: HashSet<String>,
+        }
+        let mut acts: Vec<Act> = Vec::new();
+        let mut literal_ok = true;
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
+            let ens = match it.ensures {
+                Some(sp) => normalize(&parse_predicate(sp.slice(src)).0),
+                None => continue,
+            };
+            let mut writes = Vec::new();
+            if !as_literals(&ens, &state_names, &mut writes) {
+                literal_ok = false;
+                break;
+            }
+            let modified: HashSet<String> = writes.iter().filter_map(|(a, _)| atom_head(a)).collect();
+            let guard = it.requires.map(|sp| normalize(&parse_predicate(sp.slice(src)).0));
+            acts.push(Act { name: it.name.clone().unwrap_or_else(|| "<anon>".into()), guard, writes, modified });
+        }
+        if !literal_ok || acts.is_empty() {
+            continue;
+        }
+
+        // Representative atom per state name (for framing and violation terms).
+        let mut atoms: HashMap<String, Expr> = HashMap::new();
+        for (a, _) in init_lits.iter().chain(acts.iter().flat_map(|a| a.writes.iter())) {
+            if let Some(h) = atom_head(a) {
+                atoms.entry(h).or_insert_with(|| a.clone());
+            }
+        }
+
+        let invs: Vec<(String, Expr)> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Invariant)
+            .filter_map(|it| {
+                let sp = it.body?;
+                checkable_invariant(&parse_predicate(sp.slice(src)).0, &bool_base, &all_obs)
+                    .map(|e| (it.name.clone().unwrap_or_else(|| "<anon>".into()), e))
+            })
+            .collect();
+        if invs.is_empty() {
+            continue;
+        }
+
+        // Boolean names for every stamped atom, so `=` frames encode as biconditionals.
+        let step_name = |n: &str, t: usize| format!("{n}@{t}");
+        let mut bnames = HashSet::new();
+        for s in &state_names {
+            for t in 0..=BMC_MAX {
+                bnames.insert(step_name(s, t));
+            }
+        }
+        let stamp = |e: &Expr, t: usize| rename_states(e, &|n: &str| state_names.contains(n).then(|| step_name(n, t)));
+
+        for (iname, inv) in &invs {
+            'depth: for k in 1..=BMC_MAX {
+                let mut cx: Vec<Expr> = Vec::new();
+                // init@0
+                for (a, pol) in &init_lits {
+                    let at = stamp(a, 0);
+                    cx.push(if *pol { at } else { Expr::Unary { op: UnOp::Not, e: Box::new(at) } });
+                }
+                // transitions 0..k-1
+                for t in 0..k {
+                    let fire = |i: usize| Expr::Name(format!("fire@{t}#{i}"));
+                    let mut some = fire(0);
+                    for i in 1..acts.len() {
+                        some = Expr::Binary { op: BinOp::Or, lhs: Box::new(some), rhs: Box::new(fire(i)) };
+                    }
+                    cx.push(some);
+                    for i in 0..acts.len() {
+                        for j in (i + 1)..acts.len() {
+                            cx.push(Expr::Unary {
+                                op: UnOp::Not,
+                                e: Box::new(Expr::Binary { op: BinOp::And, lhs: Box::new(fire(i)), rhs: Box::new(fire(j)) }),
+                            });
+                        }
+                    }
+                    for (i, act) in acts.iter().enumerate() {
+                        let imp = |body: Expr| Expr::Binary { op: BinOp::Implies, lhs: Box::new(fire(i)), rhs: Box::new(body) };
+                        if let Some(g) = &act.guard {
+                            cx.push(imp(stamp(g, t)));
+                        }
+                        for (a, pol) in &act.writes {
+                            let at = stamp(a, t + 1);
+                            cx.push(imp(if *pol { at } else { Expr::Unary { op: UnOp::Not, e: Box::new(at) } }));
+                        }
+                        for (name, atom) in &atoms {
+                            if !act.modified.contains(name) {
+                                cx.push(imp(Expr::Binary { op: BinOp::Eq, lhs: Box::new(stamp(atom, t + 1)), rhs: Box::new(stamp(atom, t)) }));
+                            }
+                        }
+                    }
+                }
+                cx.push(Expr::Unary { op: UnOp::Not, e: Box::new(stamp(inv, k)) });
+
+                let refs: Vec<&Expr> = cx.iter().collect();
+                if let Some(m) = crate::sat::satisfiable(&refs, &bnames) {
+                    let mut trace = Vec::new();
+                    for t in 0..k {
+                        for (i, act) in acts.iter().enumerate() {
+                            if *m.get(&format!("fire@{t}#{i}")).unwrap_or(&false) {
+                                trace.push(act.name.clone());
+                            }
+                        }
+                    }
+                    out.push(Diagnostic::warning(
+                        d.span,
+                        format!(
+                            "invariant `{iname}` in `{}` is REACHABLY VIOLATED in {k} step(s): init -> {} -> a state where it fails. A concrete counterexample, not just a non-inductive warning.",
+                            d.name,
+                            trace.join(" -> ")
+                        ),
+                    ));
+                    break 'depth;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// A canonical single entity: all entity variables are normalised to this so an invariant written over
 /// `p` and an action written over `t` line up (an action touches one entity, so the interesting instance
 /// of a universal invariant is that entity). Underscore-led so it cannot clash with a real spec name.
@@ -498,6 +712,27 @@ pub(crate) fn collect_writes(e: &Expr, _in_old: bool, state: &HashSet<String>, o
                 out.insert(n);
             }
         }
+    }
+}
+
+/// Rename the head of every state observable via `f` (applied to the state name; `None` leaves it as is).
+/// Renames application heads `X(..)`, bare names `X`, and record fields `.X`. Used to stamp a step index
+/// onto every state atom for bounded model checking (`X` -> `X@t`).
+fn rename_states(e: &Expr, f: &impl Fn(&str) -> Option<String>) -> Expr {
+    match e {
+        Expr::App { head, args } => {
+            let head = match &**head {
+                Expr::Name(h) => Box::new(Expr::Name(f(h).unwrap_or_else(|| h.clone()))),
+                other => Box::new(rename_states(other, f)),
+            };
+            Expr::App { head, args: args.iter().map(|a| rename_states(a, f)).collect() }
+        }
+        Expr::Field { base, name } => Expr::Field { base: Box::new(rename_states(base, f)), name: f(name).unwrap_or_else(|| name.clone()) },
+        Expr::Name(n) => Expr::Name(f(n).unwrap_or_else(|| n.clone())),
+        Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(rename_states(e, f)) },
+        Expr::Binary { op, lhs, rhs } => Expr::Binary { op: op.clone(), lhs: Box::new(rename_states(lhs, f)), rhs: Box::new(rename_states(rhs, f)) },
+        Expr::Cond { cond, then_, els } => Expr::Cond { cond: Box::new(rename_states(cond, f)), then_: Box::new(rename_states(then_, f)), els: Box::new(rename_states(els, f)) },
+        other => other.clone(),
     }
 }
 
@@ -969,6 +1204,21 @@ mod tests {
         let src = "-- allium: 4\ncomponent Order\n  entity O\n  observable state paid(O) : bool\n  observable state shipped(O) : bool\n  init means paid(o) and not shipped(o)\n  action ship\n    ensures shipped(o)\n  invariant always_paid means paid(o)\n  invariant ship_needs_paid means shipped(o) implies paid(o)\nend\n";
         assert!(!any(src, "can break"), "conjunction should exclude the bad pre-state: {:?}", msgs(src));
         assert!(any(src, "`ship_needs_paid` in `Order` is INDUCTIVE"), "{:?}", msgs(src));
+    }
+
+    #[test]
+    fn bmc_finds_a_minimal_reachable_counterexample_trace() {
+        // capture with no auth guard: BMC reaches the violation in one step (init -> capture).
+        let bad = "-- allium: 4\ncomponent Pay\n  entity P\n  observable state authed(P) : bool\n  observable state captured(P) : bool\n  init means not authed(p) and not captured(p)\n  action authorize\n    requires not authed(p)\n    ensures authed(p)\n  action capture\n    ensures captured(p)\n  invariant no_cap means captured(p) implies authed(p)\nend\n";
+        assert!(any(bad, "REACHABLY VIOLATED"), "{:?}", msgs(bad));
+        assert!(any(bad, "1 step"), "should be a one-step trace: {:?}", msgs(bad));
+    }
+
+    #[test]
+    fn bmc_is_silent_when_no_violation_is_reachable() {
+        // With the guard, the violating state is unreachable: BMC must find no counterexample.
+        let good = "-- allium: 4\ncomponent Pay\n  entity P\n  observable state authed(P) : bool\n  observable state captured(P) : bool\n  init means not authed(p) and not captured(p)\n  action authorize\n    requires not authed(p)\n    ensures authed(p)\n  action capture\n    requires authed(p)\n    ensures captured(p)\n  invariant no_cap means captured(p) implies authed(p)\nend\n";
+        assert!(!any(good, "REACHABLY VIOLATED"), "no counterexample should exist: {:?}", msgs(good));
     }
 
     #[test]
