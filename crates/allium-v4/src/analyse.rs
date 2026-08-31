@@ -20,7 +20,7 @@ use std::collections::HashSet;
 
 use crate::ast::{ItemKind, Module};
 use crate::diagnostic::Diagnostic;
-use crate::expr::{parse_predicate, BinOp, Expr, UnOp};
+use crate::expr::{parse_predicate, BinOp, Expr, Quant, UnOp};
 use crate::parser::ParseResult;
 
 const MAX_ATOMS: usize = 16;
@@ -100,15 +100,18 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         for n in bool_base.clone() {
             bnames.insert(format!("{n}'"));
         }
+        // Each invariant reduced to an entity-normalised boolean body (plain, or a single-variable
+        // universal). Arithmetic, multi-entity, and existential invariants are skipped (sound).
         let invariants: Vec<(String, Expr)> = d
             .items
             .iter()
             .filter(|it| it.kind == ItemKind::Invariant)
-            .filter_map(|it| it.body.map(|sp| (it.name.clone().unwrap_or_else(|| "<anon>".into()), parse_predicate(sp.slice(src)).0)))
-            // Only the boolean fragment: an arithmetic invariant becomes opaque atoms whose post version
-            // is unconstrained, which would make the violation query trivially satisfiable (a false
-            // alarm). Skipping it is sound — the check simply says nothing about arithmetic preservation.
-            .filter(|(_, e)| !has_quant(e) && boolean_fragment(e, &bool_base, &all_obs))
+            .filter_map(|it| {
+                let sp = it.body?;
+                let inv = parse_predicate(sp.slice(src)).0;
+                checkable_invariant(&inv, &bool_base, &all_obs)
+                    .map(|e| (it.name.clone().unwrap_or_else(|| "<anon>".into()), e))
+            })
             .collect();
         if invariants.is_empty() {
             continue;
@@ -127,7 +130,12 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                 let text = text.trim().strip_prefix("means").unwrap_or(text);
                 parse_predicate(text).0
             })
-            .filter(|e| boolean_fragment(e, &bool_base, &all_obs));
+            .filter(|e| boolean_fragment(e, &bool_base, &all_obs))
+            .map(|e| {
+                let mut ev = HashSet::new();
+                collect_entity_vars(&e, &mut ev);
+                rename_entity(&e, &ev)
+            });
         // Per-invariant status: established by init, and not broken by any action.
         let mut established = vec![true; invariants.len()];
         let mut broken = vec![false; invariants.len()];
@@ -139,7 +147,7 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                     let w: Vec<String> = m.iter().map(|(k, v)| format!("{k}={}", if *v { "T" } else { "F" })).collect();
                     out.push(Diagnostic::warning(
                         d.span,
-                        format!("`init` in `{}` does not establish invariant `{iname}`: the initial state can violate it (e.g. {}).", d.name, w.join(", ")),
+                        format!("`init` in `{}` does not establish invariant `{iname}`: the initial state can violate it (e.g. {}).", d.name, pretty(&w.join(", "))),
                     ));
                 }
             }
@@ -147,16 +155,28 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
 
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
             let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
-            let ensures = match it.ensures {
+            let ensures_raw = match it.ensures {
                 Some(sp) => parse_predicate(sp.slice(src)).0,
                 None => continue,
             };
+            let guard_raw = it.requires.map(|sp| parse_predicate(sp.slice(src)).0);
+            // Normalise the action's entity variables to the same canonical entity as the invariants.
+            // An action touching more than one distinct entity cannot be collapsed soundly, so skip it.
+            let mut ev = HashSet::new();
+            collect_entity_vars(&ensures_raw, &mut ev);
+            if let Some(g) = &guard_raw {
+                collect_entity_vars(g, &mut ev);
+            }
+            if ev.len() > 1 {
+                continue;
+            }
+            let ensures = rename_entity(&ensures_raw, &ev);
+            let guard = guard_raw.map(|g| rename_entity(&g, &ev));
             let mut modified = HashSet::new();
             collect_writes(&ensures, false, &state_names, &mut modified);
             if modified.is_empty() {
                 continue; // writes no state: cannot break any invariant
             }
-            let guard = it.requires.map(|sp| parse_predicate(sp.slice(src)).0);
             let effect = prime(&ensures, &modified, false);
             for (i, (iname, inv)) in invariants.iter().enumerate() {
                 if !mentions_any(inv, &modified) {
@@ -178,12 +198,12 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                     let fix = guard_suggestion(inv, &ensures, &modified);
                     out.push(Diagnostic::warning(
                         it.span,
-                        format!(
+                        pretty(&format!(
                             "action `{aname}` in `{}` can break invariant `{iname}`: from a state satisfying it (e.g. {}), the action reaches a state that violates it.{}",
                             d.name,
                             pre.join(", "),
                             fix
-                        ),
+                        )),
                     ));
                 }
             }
@@ -338,6 +358,86 @@ fn simplify(e: &Expr) -> Expr {
         }
         other => other.clone(),
     }
+}
+
+/// Present the canonical entity `_e` as a readable `e` in a diagnostic (cosmetic only; matching uses `_e`).
+fn pretty(s: &str) -> String {
+    s.replace(ENT, "e")
+}
+
+/// A canonical single entity: all entity variables are normalised to this so an invariant written over
+/// `p` and an action written over `t` line up (an action touches one entity, so the interesting instance
+/// of a universal invariant is that entity). Underscore-led so it cannot clash with a real spec name.
+const ENT: &str = "_e";
+
+/// Collect entity-variable names: quantifier-bound variables and bare-name arguments of applications.
+fn collect_entity_vars(e: &Expr, out: &mut HashSet<String>) {
+    match e {
+        Expr::Quant { vars, body, .. } | Expr::Sum { vars, body, .. } => {
+            out.extend(vars.iter().cloned());
+            collect_entity_vars(body, out);
+        }
+        Expr::App { head, args } => {
+            for a in args {
+                if let Expr::Name(n) = a {
+                    out.insert(n.clone());
+                } else {
+                    collect_entity_vars(a, out);
+                }
+            }
+            collect_entity_vars(head, out);
+        }
+        Expr::Field { base, .. } => collect_entity_vars(base, out),
+        Expr::Unary { e, .. } => collect_entity_vars(e, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_entity_vars(lhs, out);
+            collect_entity_vars(rhs, out);
+        }
+        Expr::Cond { cond, then_, els } => {
+            collect_entity_vars(cond, out);
+            collect_entity_vars(then_, out);
+            collect_entity_vars(els, out);
+        }
+        _ => {}
+    }
+}
+
+/// Rename every name in `vars` to the canonical entity `ENT`.
+fn rename_entity(e: &Expr, vars: &HashSet<String>) -> Expr {
+    match e {
+        Expr::Name(n) if vars.contains(n) => Expr::Name(ENT.into()),
+        Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(rename_entity(e, vars)) },
+        Expr::Binary { op, lhs, rhs } => Expr::Binary { op: op.clone(), lhs: Box::new(rename_entity(lhs, vars)), rhs: Box::new(rename_entity(rhs, vars)) },
+        Expr::App { head, args } => Expr::App { head: Box::new(rename_entity(head, vars)), args: args.iter().map(|a| rename_entity(a, vars)).collect() },
+        Expr::Field { base, name } => Expr::Field { base: Box::new(rename_entity(base, vars)), name: name.clone() },
+        Expr::Cond { cond, then_, els } => Expr::Cond { cond: Box::new(rename_entity(cond, vars)), then_: Box::new(rename_entity(then_, vars)), els: Box::new(rename_entity(els, vars)) },
+        other => other.clone(),
+    }
+}
+
+/// The boolean body a preservation check should run for this invariant, entity-normalised to `ENT`, or
+/// `None` if out of scope: a plain (quantifier-free) boolean invariant, or a single-variable `every`/`no`
+/// over a boolean body (a universal safety property). Multi-entity, `some`/`exists`, nested-quantifier,
+/// and arithmetic invariants are skipped (sound: the check simply says nothing about them).
+fn checkable_invariant(inv: &Expr, bool_base: &HashSet<String>, obs: &HashSet<String>) -> Option<Expr> {
+    let body = match inv {
+        Expr::Quant { q, vars, body, .. } if vars.len() == 1 && !has_quant(body) => match q {
+            Quant::Every => (**body).clone(),
+            Quant::No => Expr::Unary { op: UnOp::Not, e: body.clone() },
+            _ => return None,
+        },
+        _ if !has_quant(inv) => inv.clone(),
+        _ => return None,
+    };
+    let mut ev = HashSet::new();
+    collect_entity_vars(&body, &mut ev);
+    if ev.len() > 1 {
+        return None; // relates distinct entities; cannot collapse to one symbolic entity
+    }
+    if !boolean_fragment(&body, bool_base, obs) {
+        return None;
+    }
+    Some(rename_entity(&body, &ev))
 }
 
 /// True if `e` contains an explicit quantifier or aggregate (deferred by the preservation check).
@@ -829,7 +929,7 @@ mod tests {
     #[test]
     fn preservation_suggests_the_weakest_guard() {
         let bad = "-- allium: 4\ncomponent Pay\n  entity Txn\n  observable state authed(Txn) : bool\n  observable state captured(Txn) : bool\n  action capture\n    ensures captured(t)\n  invariant no_cap_without_auth means captured(t) implies authed(t)\nend\n";
-        assert!(any(bad, "requires authed(t)"), "should suggest the weakest guard: {:?}", msgs(bad));
+        assert!(any(bad, "requires authed(e)"), "should suggest the weakest guard: {:?}", msgs(bad));
     }
 
     #[test]
@@ -839,6 +939,16 @@ mod tests {
         assert!(any(src, "is INDUCTIVE"), "{:?}", msgs(src));
         assert!(!any(src, "can break"), "{:?}", msgs(src));
         assert!(!any(src, "does not establish"), "{:?}", msgs(src));
+    }
+
+    #[test]
+    fn preservation_handles_quantified_invariant_with_mismatched_var() {
+        // `every p :: ...` invariant (var p) against an action written over t: normalisation unifies them.
+        let bad = "-- allium: 4\ncomponent Pay\n  entity Txn\n  observable state authed(Txn) : bool\n  observable state captured(Txn) : bool\n  action capture\n    ensures captured(t)\n  invariant no_cap means every p :: captured(p) implies authed(p)\nend\n";
+        assert!(any(bad, "can break invariant `no_cap`"), "{:?}", msgs(bad));
+        let good = "-- allium: 4\ncomponent Pay\n  entity Txn\n  observable state authed(Txn) : bool\n  observable state captured(Txn) : bool\n  init means not authed(t) and not captured(t)\n  action capture\n    requires authed(t)\n    ensures captured(t)\n  invariant no_cap means every p :: captured(p) implies authed(p)\nend\n";
+        assert!(any(good, "is INDUCTIVE"), "{:?}", msgs(good));
+        assert!(!any(good, "can break"), "{:?}", msgs(good));
     }
 
     #[test]
