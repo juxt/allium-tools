@@ -504,12 +504,12 @@ rule UndeclaredImportAliasIsDiagnosedAtEveryReferenceSite {
 -- Beyond the alias, the name itself must resolve: with a valid alias whose
 -- target is in the check set, a qualified reference alias/Name where the aliased
 -- module offers no such name is diagnosed at the reference. A module offers its
--- declared types, its referenced triggers, `config` when it declares a config
--- block, and each deferred declaration's root name (`deferred Foo` and
--- `deferred Foo.bar` both offer `Foo`). A foreign-qualified deferred names a
--- construct another module owns (`deferred other/Foo`) and is deliberately not
--- offered. Same unified pass, every site (#72, #89 and the name-existence
--- audit). A target outside the check set is unknowable.
+-- declared types, its referenced triggers, its surface names, `config` when it
+-- declares a config block, and each deferred declaration's root name
+-- (`deferred Foo` and `deferred Foo.bar` both offer `Foo`). A foreign-qualified
+-- deferred names a construct another module owns (`deferred other/Foo`) and is
+-- deliberately not offered. Same unified pass, every site (#72, #89 and the
+-- name-existence audit). A target outside the check set is unknowable.
 --
 -- One reference form is exempt: a name in a collection-consuming position
 -- (a `for … in` / `in` / `where` iterable, or a `let` value) is an entity
@@ -583,6 +583,76 @@ rule QualifiedConfigFieldNotCheckedAtThisLayer {
     requires: ConfigBlockDeclaresNoParameterNamed(field)
 
     ensures: FindingNotObserved(code: "allium.reference.unknownName", name: field)
+}
+
+-- Surface names resolve across the boundary. A surface's related: clause is
+-- the documented construct for linking to another surface, and qualified names
+-- are the documented cross-module reference form, so related: alias/Surface(expr)
+-- must not warn when the aliased module declares the surface. The offering is
+-- by name-existence, not by kind: any qualified reference to a declared
+-- surface name resolves, related: or not.
+
+rule QualifiedRelatedSurfaceLinkResolves {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: SurfaceRelatedEntryReferencesQualifiedName(alias, Name)
+    requires: QualifiedReferenceBindsAliasToFileInCheckSet(alias, Name)
+    requires: AliasedModuleDeclaresSurfaceNamed(alias, Name)
+
+    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
+    ensures: FindingNotObserved(code: "allium.surface.relatedUndefined", name: Name)
+}
+
+rule QualifiedRelatedLinkToUndeclaredSurfaceStillWarns {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: SurfaceRelatedEntryReferencesQualifiedName(alias, Name)
+    requires: QualifiedReferenceBindsAliasToFileInCheckSet(alias, Name)
+    requires: AliasedModuleOffersNoNameNamed(alias, Name)
+
+    ensures: FindingObserved(code: "allium.reference.unknownName", severity: warning)
+    ensures: FindingMessageAnchoredAtReferenceNamesUnknownName(Name)
+}
+
+-- The local check is untouched: an unqualified related: entry resolves against
+-- the declaring file's own surfaces only, import or no import.
+
+rule UnqualifiedRelatedLinkResolvesLocallyOnly {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: SurfaceRelatedEntryReferencesUnqualifiedName(Name)
+    requires: DeclaringFileDeclaresNoSurfaceNamed(Name)
+
+    ensures: FindingObserved(code: "allium.surface.relatedUndefined", severity: error)
+}
+
+rule QualifiedSurfaceReferenceOutsideRelatedResolves {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: QualifiedReferenceBindsAliasToFileInCheckSet(alias, Name)
+    requires: AliasedModuleDeclaresSurfaceNamed(alias, Name)
+    requires: not SurfaceRelatedEntryReferencesQualifiedName(alias, Name)
+
+    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
+}
+
+-- One resolved position deserves its own pin: a default literal typed to an
+-- imported surface resolves by name like every other qualified reference, and
+-- nothing replaces the warning it used to draw. Surfaces carry no field
+-- schema, so allium.default.unknownField fires only for entity-typed defaults
+-- and the literal's fields go unchecked here. Chosen false negative, the same
+-- shape as QualifiedConfigFieldNotCheckedAtThisLayer; deferred-root-typed
+-- defaults already behave this way.
+
+rule SurfaceTypedDefaultFieldsNotCheckedAtThisLayer {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: DefaultDeclarationTypedToQualifiedName(alias, Name)
+    requires: AliasedModuleDeclaresSurfaceNamed(alias, Name)
+    requires: DefaultLiteralNamesFieldTheSurfaceNeverMentions(field)
+
+    ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
+    ensures: FindingNotObserved(code: "allium.default.unknownField", name: field)
 }
 
 rule WitnessedTransitionCreditsImportedLifecycle {
