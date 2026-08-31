@@ -934,6 +934,15 @@ mod tests {
     }
 
     #[test]
+    fn each_quantifier_synonym() {
+        // `each`/`all`/`any` are natural-English synonyms for every/some — data-driven fluency (distilled
+        // specs write `each p ::`). `each p : body` (single colon) also parses.
+        let spec = "-- allium: 4\ncomponent C\n  entity P\n  observable state bal(P) : Money\n  observable state interest(P) : Money\n  invariant x means each p : interest(p) = bal(p)\nend\n";
+        assert!(monitor_schedule(spec, "period=0 bal=100.00 interest=100.00\n", 0.01).contains("\"ok\":true"));
+        assert!(monitor_schedule(spec, "period=0 bal=100.00 interest=90.00\n", 0.01).contains("\"ok\":false"));
+    }
+
+    #[test]
     fn dot_notation_field_access() {
         // `p.field` is sugar for `field(p)` — the object.attribute form models/humans write naturally.
         let spec = "-- allium: 4\ncomponent C\n  entity P\n  observable state bal(P) : Money\n  observable state interest(P) : Money\n  invariant x means every p :: interest(p) = p.bal\nend\n";

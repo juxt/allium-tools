@@ -157,8 +157,11 @@ impl<'s> ExprParser<'s> {
         if let Tok::Ident(k) = &self.cur().tok {
             let k = k.clone();
             let quant = match k.as_str() {
-                "every" => Some(Quant::Every),
-                "some" if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.tok), Some(Tok::LParen)) => Some(Quant::Some),
+                // `each`/`all`/`forall` are accepted synonyms for `every`, `any` for `some` — the
+                // natural-English forms authors (and models) reach for. Data-driven fluency (distilled
+                // specs systematically write `each p ::`). `every p :: b`, `each p : b` both parse.
+                "every" | "each" | "all" | "forall" => Some(Quant::Every),
+                "some" | "any" if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.tok), Some(Tok::LParen)) => Some(Quant::Some),
                 "no" if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.tok), Some(Tok::LParen)) => Some(Quant::No),
                 "exists" => Some(Quant::ExistsOne),
                 _ => None,
