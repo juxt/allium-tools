@@ -526,6 +526,12 @@ fn eval_num(e: &Expr, env: &HashMap<String, usize>, m: &SModel) -> Option<f64> {
         Expr::Int(n) => Some(*n as f64),
         Expr::Dec(num, den) => Some(*num as f64 / *den as f64),
         Expr::Name(s) => m.givens.get(s).copied(),
+        // Dot notation `p.field` is sugar for `field(p)` — the object.attribute form models and humans
+        // reach for naturally. Reads the field `name` of the period bound to `base`.
+        Expr::Field { base, name } => {
+            let i = s_idx(base, env)?;
+            m.periods.get(i).and_then(|p| p.num.get(name).copied())
+        }
         Expr::App { head, args } => {
             let name = match head.as_ref() {
                 Expr::Name(s) => s,
@@ -925,6 +931,14 @@ mod tests {
         let r = monitor(SPEC, "t=1 entity=R1 collateralised=T has_code=F accepted=F rejected=F\n");
         assert!(count(&r, "collat_needs_code") == 1, "{r}");
         assert!(r.contains("\"ok\":false"));
+    }
+
+    #[test]
+    fn dot_notation_field_access() {
+        // `p.field` is sugar for `field(p)` — the object.attribute form models/humans write naturally.
+        let spec = "-- allium: 4\ncomponent C\n  entity P\n  observable state bal(P) : Money\n  observable state interest(P) : Money\n  invariant x means every p :: interest(p) = p.bal\nend\n";
+        assert!(monitor_schedule(spec, "period=0 bal=100.00 interest=100.00\n", 0.01).contains("\"ok\":true"));
+        assert!(monitor_schedule(spec, "period=0 bal=100.00 interest=99.00\n", 0.01).contains("\"ok\":false"));
     }
 
     #[test]
