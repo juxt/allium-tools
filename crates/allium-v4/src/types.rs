@@ -185,6 +185,9 @@ fn infer(e: &Expr, env: &HashMap<String, Ty>, at: Span, out: &mut Vec<Diagnostic
                 BinOp::Add | BinOp::Sub => additive(&l, &r, op, at, out),
                 BinOp::Mul => multiplicative(&l, &r, at, out),
                 BinOp::Div => divisive(&l, &r, at, out),
+                // Power: base ^ exponent. Our motivating use is a dimensionless base (1+f) to an
+                // integer count; the result carries the base's dimension (dimensionless -> dimensionless).
+                BinOp::Pow => l.clone(),
             }
         }
     }

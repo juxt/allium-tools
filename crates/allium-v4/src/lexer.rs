@@ -37,6 +37,7 @@ pub enum Tok {
     Minus,      // -
     Star,       // *
     Slash,      // /
+    Caret,      // ^
     Eof,
 }
 
@@ -160,6 +161,7 @@ pub fn lex(src: &str) -> Vec<Token> {
                 '-' => (Tok::Minus, 1),
                 '*' => (Tok::Star, 1),
                 '/' => (Tok::Slash, 1),
+                '^' => (Tok::Caret, 1),
                 // Unknown byte: skip it so lexing never wedges. The parser reports
                 // structural problems; a stray glyph is not worth a lexer error.
                 _ => {

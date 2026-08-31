@@ -581,6 +581,7 @@ fn eval_num(e: &Expr, env: &HashMap<String, usize>, m: &SModel) -> Option<f64> {
         Expr::Binary { op: BinOp::Sub, lhs, rhs } => Some(eval_num(lhs, env, m)? - eval_num(rhs, env, m)?),
         Expr::Binary { op: BinOp::Mul, lhs, rhs } => Some(eval_num(lhs, env, m)? * eval_num(rhs, env, m)?),
         Expr::Binary { op: BinOp::Div, lhs, rhs } => { let d = eval_num(rhs, env, m)?; if d == 0.0 { None } else { Some(eval_num(lhs, env, m)? / d) } }
+        Expr::Binary { op: BinOp::Pow, lhs, rhs } => Some(eval_num(lhs, env, m)?.powf(eval_num(rhs, env, m)?)),
         Expr::Cond { cond, then_, els } => { if eval_num_cond(cond, env, m)? { eval_num(then_, env, m) } else { eval_num(els, env, m) } }
         Expr::Sum { vars, body, .. } => {
             let mut acc = 0.0;
@@ -961,6 +962,19 @@ mod tests {
         let spec = "-- allium: 4\ncomponent C\n  entity P\n  observable state bal(P) : Money\n  observable state interest(P) : Money\n  invariant x means each p : interest(p) = bal(p)\nend\n";
         assert!(monitor_schedule(spec, "period=0 bal=100.00 interest=100.00\n", 0.01).contains("\"ok\":true"));
         assert!(monitor_schedule(spec, "period=0 bal=100.00 interest=90.00\n", 0.01).contains("\"ok\":false"));
+    }
+
+    #[test]
+    fn power_operator_annuity() {
+        // `^` power, right-assoc, tighter than `*`. Motivated by the loan annuity formula, which the
+        // gate could not pin without it. Here: emi = round(disbursed*f*(1+f)^n/((1+f)^n-1), 2), n=2,
+        // disbursed=1000, f=0.015 -> 511.28. Holds on the right value, fires on a wrong instalment.
+        let spec = "-- allium: 4\ncomponent L\n  entity P\n  given disbursed : Money\n  given months : Number\n  given f : Number\n  observable state emi(P) : Money\n  invariant annuity means every p :: emi(p) = round(disbursed * f * (1 + f)^months / ((1 + f)^months - 1), 2)\nend\n";
+        let ok = "period=0 emi=511.28\ngiven disbursed=1000.00 months=2 f=0.015\n";
+        assert!(monitor_schedule(spec, ok, 0.01).contains("\"holds\":true"), "annuity should hold: {}", monitor_schedule(spec, ok, 0.01));
+        let bad = "period=0 emi=516.28\ngiven disbursed=1000.00 months=2 f=0.015\n";
+        let r = monitor_schedule(spec, bad, 0.01);
+        assert!(r.contains("\"holds\":false"), "wrong instalment should fire: {r}");
     }
 
     #[test]
