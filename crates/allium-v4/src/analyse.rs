@@ -520,9 +520,8 @@ pub fn bmc(module: &Module, src: &str) -> Vec<Diagnostic> {
                     .map(|e| (it.name.clone().unwrap_or_else(|| "<anon>".into()), e))
             })
             .collect();
-        if invs.is_empty() {
-            continue;
-        }
+        // Note: no early return on empty `invs` — the invariant loop below is then a no-op, but
+        // dead-action detection still runs (it needs only the actions, not the invariants).
 
         // Boolean names for every stamped atom, so `=` frames encode as biconditionals.
         let step_name = |n: &str, t: usize| format!("{n}@{t}");
@@ -630,6 +629,38 @@ pub fn bmc(module: &Module, src: &str) -> Vec<Diagnostic> {
                     }
                     break;
                 }
+            }
+        }
+
+        // Dead-action detection: an action whose guard holds in no state reachable within BMC_MAX steps
+        // can never fire — dead spec code. For each prefix length t, ask whether the guard is satisfiable
+        // at step t of a t-step execution from init; if some length works the action is live. Checking each
+        // length separately avoids forcing the machine to keep stepping past a terminal state (which would
+        // spuriously make the query UNSAT). A guardless action is always enabled and is skipped.
+        for act in acts.iter().filter(|a| a.guard.is_some()) {
+            let g = act.guard.as_ref().unwrap();
+            let mut live = false;
+            for t in 0..=BMC_MAX {
+                let mut cx: Vec<Expr> = Vec::new();
+                for (a, pol) in &init_lits {
+                    let at = stamp(a, 0);
+                    cx.push(if *pol { at } else { Expr::Unary { op: UnOp::Not, e: Box::new(at) } });
+                }
+                for s in 0..t {
+                    cx.extend(mk_trans(s));
+                }
+                cx.push(stamp(g, t));
+                let refs: Vec<&Expr> = cx.iter().collect();
+                if crate::sat::satisfiable(&refs, &bnames).is_some() {
+                    live = true;
+                    break;
+                }
+            }
+            if !live {
+                out.push(Diagnostic::warning(
+                    d.span,
+                    format!("action `{}` in `{}` is never enabled in any reachable state (within {BMC_MAX} steps): its guard is never satisfied, so it can never fire — dead code, or a guard that contradicts the reachable states.", act.name, d.name),
+                ));
             }
         }
     }
@@ -1273,6 +1304,15 @@ mod tests {
         assert!(any(src, "SAFE (proved by 2-induction)"), "{:?}", msgs(src));
         assert!(!any(src, "can break invariant `r_implies_p`"), "the 1-step break must be superseded: {:?}", msgs(src));
         assert!(!any(src, "REACHABLY VIOLATED"), "no reachable counterexample exists: {:?}", msgs(src));
+    }
+
+    #[test]
+    fn dead_action_detection() {
+        // `deadact` requires `a and b`, but `b` is only ever set by `deadact` itself — so `b` is never
+        // reachably true and the guard can never hold. It is dead code, and a live action is not flagged.
+        let src = "-- allium: 4\ncomponent M\n  entity X\n  observable state a(X) : bool\n  observable state b(X) : bool\n  init means not a(x) and not b(x)\n  action seta\n    requires not a(x)\n    ensures a(x)\n  action deadact\n    requires a(x) and b(x)\n    ensures b(x)\nend\n";
+        assert!(any(src, "`deadact` in `M` is never enabled"), "{:?}", msgs(src));
+        assert!(!any(src, "`seta` in `M` is never enabled"), "live action must not be flagged: {:?}", msgs(src));
     }
 
     #[test]
