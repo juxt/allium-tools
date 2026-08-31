@@ -56,6 +56,20 @@ fn first_backtick(msg: &str) -> Option<String> {
     Some(msg[a..b].to_string())
 }
 
+/// Names of the boolean-typed state/given items in a declaration, so the SAT encoder can tell a
+/// boolean `=` (a biconditional it must encode) from an arithmetic one (an opaque atom for the LRA path).
+pub(crate) fn bool_names_of(d: &crate::ast::Decl, src: &str) -> std::collections::HashSet<String> {
+    d.items
+        .iter()
+        .filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given))
+        .filter_map(|it| {
+            let name = it.name.clone()?;
+            let ty = it.body?.slice(src).trim().to_ascii_lowercase();
+            (ty == "bool" || ty == "boolean").then_some(name)
+        })
+        .collect()
+}
+
 pub(crate) fn canon(e: &Expr) -> String {
     match e {
         Expr::Name(s) => s.clone(),
@@ -228,12 +242,13 @@ pub fn consistency(module: &Module, src: &str) -> Vec<Diagnostic> {
         if rules.len() < 2 {
             continue;
         }
+        let bnames = bool_names_of(d, src);
 
         // Joint satisfiability via the dependency-free SAT engine (scales past enumeration).
         let subset = |active: &[bool]| -> Vec<&Expr> {
             rules.iter().enumerate().filter(|(k, _)| active[*k]).map(|(_, (_, e))| e).collect()
         };
-        match crate::sat::satisfiable(&subset(&vec![true; rules.len()])) {
+        match crate::sat::satisfiable(&subset(&vec![true; rules.len()]), &bnames) {
             Some(m) => out.push(Diagnostic::warning(
                 d.span,
                 format!("rule set in `{}` is jointly satisfiable (e.g. {}).", d.name, crate::sat::describe(&m)),
@@ -243,7 +258,7 @@ pub fn consistency(module: &Module, src: &str) -> Vec<Diagnostic> {
                 let mut active = vec![true; rules.len()];
                 for k in 0..rules.len() {
                     active[k] = false;
-                    if crate::sat::satisfiable(&subset(&active)).is_some() {
+                    if crate::sat::satisfiable(&subset(&active), &bnames).is_some() {
                         active[k] = true;
                     }
                 }
@@ -283,12 +298,13 @@ pub fn feasibility(module: &Module, src: &str) -> Vec<Diagnostic> {
         if reqs.is_empty() {
             continue;
         }
+        let bnames = bool_names_of(d, src);
 
         // Does some report satisfy `req` together with every active axiom? (SAT engine.)
         let sat = |rexpr: &Expr, active: &[bool]| -> Option<BTreeMap<String, bool>> {
             let mut es: Vec<&Expr> = axioms.iter().enumerate().filter(|(k, _)| active[*k]).map(|(_, (_, e))| e).collect();
             es.push(rexpr);
-            crate::sat::satisfiable(&es)
+            crate::sat::satisfiable(&es, &bnames)
         };
 
         for (rname, rexpr) in &reqs {

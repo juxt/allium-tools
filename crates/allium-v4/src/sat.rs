@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use crate::analyse::canon;
 use crate::expr::{BinOp, Expr, UnOp};
@@ -18,16 +19,36 @@ use crate::expr::{BinOp, Expr, UnOp};
 /// Cap on total variables (atoms + Tseitin aux) to bound pathological inputs.
 const MAX_VARS: usize = 2000;
 
-struct CnfBuilder {
+/// Is `e` a boolean-valued expression, given the set of boolean state/relation names? Used to decide
+/// whether `A = B` is a biconditional between two booleans (which must be encoded) or an arithmetic
+/// equality (which stays an opaque atom, handled by the LRA path). Getting this wrong in the unsafe
+/// direction only ever adds freedom, so the default (no names) keeps every `=` opaque as before.
+fn is_bool_valued(e: &Expr, bool_names: &HashSet<String>) -> bool {
+    match e {
+        Expr::Name(s) => s == "true" || s == "false" || bool_names.contains(s),
+        Expr::App { head, .. } => matches!(&**head, Expr::Name(h) if bool_names.contains(h)),
+        Expr::Field { name, .. } => bool_names.contains(name),
+        Expr::Unary { op: UnOp::Not, .. } => true,
+        Expr::Binary { op, .. } => matches!(
+            op,
+            BinOp::And | BinOp::Or | BinOp::Implies | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge
+                | BinOp::Eq | BinOp::Ne | BinOp::In
+        ),
+        _ => false,
+    }
+}
+
+struct CnfBuilder<'a> {
     clauses: Vec<Vec<i32>>,
     atom_index: HashMap<String, i32>, // atom canon -> var id (1-based, positive)
     nvars: i32,
     overflow: bool,
+    bool_names: &'a HashSet<String>,
 }
 
-impl CnfBuilder {
-    fn new() -> Self {
-        CnfBuilder { clauses: Vec::new(), atom_index: HashMap::new(), nvars: 0, overflow: false }
+impl<'a> CnfBuilder<'a> {
+    fn new(bool_names: &'a HashSet<String>) -> Self {
+        CnfBuilder { clauses: Vec::new(), atom_index: HashMap::new(), nvars: 0, overflow: false, bool_names }
     }
 
     fn fresh(&mut self) -> i32 {
@@ -79,6 +100,30 @@ impl CnfBuilder {
                 self.clauses.push(vec![-x, -a, b]);
                 self.clauses.push(vec![a, x]);
                 self.clauses.push(vec![-b, x]);
+                x
+            }
+            // Boolean `=`/`<>` is a biconditional/xor between two booleans and must be encoded, not
+            // treated as one opaque atom (the latter silently drops the constraint `a = b`). Arithmetic
+            // equality (either side non-boolean) stays opaque here and is handled by the LRA path.
+            Expr::Binary { op: op @ (BinOp::Eq | BinOp::Ne), lhs, rhs }
+                if is_bool_valued(lhs, self.bool_names) && is_bool_valued(rhs, self.bool_names) =>
+            {
+                let a = self.encode(lhs);
+                let b = self.encode(rhs);
+                let x = self.fresh();
+                if matches!(op, BinOp::Eq) {
+                    // x <-> (a <-> b)
+                    self.clauses.push(vec![-x, -a, b]);
+                    self.clauses.push(vec![-x, a, -b]);
+                    self.clauses.push(vec![x, -a, -b]);
+                    self.clauses.push(vec![x, a, b]);
+                } else {
+                    // x <-> (a xor b)
+                    self.clauses.push(vec![-x, a, b]);
+                    self.clauses.push(vec![-x, -a, -b]);
+                    self.clauses.push(vec![x, -a, b]);
+                    self.clauses.push(vec![x, a, -b]);
+                }
                 x
             }
             atom => self.atom(canon(atom)),
@@ -152,8 +197,8 @@ fn dpll(clauses: &[Vec<i32>], assign: &mut [i8]) -> bool {
 /// Is the conjunction of `exprs` satisfiable? Returns a witness (atom -> bool) if so, or
 /// `None` if UNSAT. `None` is also returned on variable overflow (treated conservatively
 /// as "cannot certify SAT"); callers should note the cap.
-pub fn satisfiable(exprs: &[&Expr]) -> Option<BTreeMap<String, bool>> {
-    let mut b = CnfBuilder::new();
+pub fn satisfiable(exprs: &[&Expr], bool_names: &HashSet<String>) -> Option<BTreeMap<String, bool>> {
+    let mut b = CnfBuilder::new(bool_names);
     for e in exprs {
         b.assert(e);
     }
@@ -192,14 +237,28 @@ mod tests {
         let e1 = p("a implies b");
         let e2 = p("b implies not c");
         let e3 = p("a and c");
-        assert!(satisfiable(&[&e1, &e2, &e3]).is_none());
+        assert!(satisfiable(&[&e1, &e2, &e3], &std::collections::HashSet::new()).is_none());
+    }
+
+    #[test]
+    fn boolean_equality_is_a_biconditional() {
+        // `a = b` between two BOOLEAN names plus `a and not b` is a contradiction. It must be UNSAT
+        // when a,b are known boolean (biconditional encoded), and remain SAT when they are not (an
+        // opaque atom, the arithmetic-equality case handled elsewhere).
+        let eq = p("a = b");
+        let contra = p("a and not b");
+        let mut bools = HashSet::new();
+        bools.insert("a".to_string());
+        bools.insert("b".to_string());
+        assert!(satisfiable(&[&eq, &contra], &bools).is_none(), "boolean a=b should be a biconditional");
+        assert!(satisfiable(&[&eq, &contra], &HashSet::new()).is_some(), "non-boolean = stays opaque");
     }
 
     #[test]
     fn finds_sat_witness() {
         let e1 = p("a implies b");
         let e2 = p("a");
-        let m = satisfiable(&[&e1, &e2]).unwrap();
+        let m = satisfiable(&[&e1, &e2], &std::collections::HashSet::new()).unwrap();
         assert_eq!(m.get("a"), Some(&true));
         assert_eq!(m.get("b"), Some(&true));
     }
@@ -216,6 +275,6 @@ mod tests {
         exprs.push(p("b39 implies not c"));
         exprs.push(p("c"));
         let refs: Vec<&Expr> = exprs.iter().collect();
-        assert!(satisfiable(&refs).is_none()); // 80+ atoms, still decided
+        assert!(satisfiable(&refs, &std::collections::HashSet::new()).is_none()); // 80+ atoms, still decided
     }
 }
