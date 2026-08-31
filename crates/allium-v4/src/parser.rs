@@ -15,7 +15,7 @@ pub struct ParseResult {
 
 /// Item keywords that terminate a raw predicate / type at bracket depth 0.
 const ITEM_STARTERS: &[&str] = &[
-    "entity", "observable", "state", "given", "action", "init", "invariant",
+    "entity", "observable", "state", "given", "let", "action", "init", "invariant",
     "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish",
     "pub", "abstract", "readable", "contract", "component", "use", "end", "satisfies",
 ];
@@ -301,6 +301,19 @@ impl<'s> Parser<'s> {
                 self.advance();
                 self.parse_named_typed(ItemKind::Given, start)
             }
+            // `let name [(params)] = <expr>` — OCaml-style reference definition, sugar for
+            // `given name [(params)] means <expr>`. The natural form authors/models reach for.
+            Some("let") => {
+                self.advance();
+                let mut it = Item::new(ItemKind::Given, start);
+                it.name = self.take_name();
+                it.params = self.capture_params();
+                if matches!(self.cur().tok, Tok::Eq) {
+                    self.advance();
+                    it.body = self.read_raw(ITEM_STARTERS, false);
+                }
+                it
+            }
             Some("action") => {
                 self.advance();
                 self.parse_action(start)
@@ -469,14 +482,14 @@ impl<'s> Parser<'s> {
 }
 
 const ITEM_STARTERS_PLUS_ENSURES: &[&str] = &[
-    "entity", "observable", "state", "given", "action", "init", "invariant",
+    "entity", "observable", "state", "given", "let", "action", "init", "invariant",
     "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish",
     "pub", "abstract", "readable", "contract", "component", "use", "end",
     "satisfies", "ensures",
 ];
 
 const ITEM_STARTERS_PLUS_BY: &[&str] = &[
-    "entity", "observable", "state", "given", "action", "init", "invariant",
+    "entity", "observable", "state", "given", "let", "action", "init", "invariant",
     "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish",
     "pub", "abstract", "readable", "contract", "component", "use", "end",
     "satisfies", "by",

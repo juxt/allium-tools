@@ -134,6 +134,7 @@ pub fn lex(src: &str) -> Vec<Token> {
         let two = if i + 1 < n { &src[i..i + 2] } else { "" };
         let (tok, len) = match two {
             "::" => (Tok::ColonColon, 2),
+            "==" => (Tok::Eq, 2),
             "<>" => (Tok::NotEq, 2),
             "<=" => (Tok::Le, 2),
             ">=" => (Tok::Ge, 2),

@@ -943,6 +943,18 @@ mod tests {
     }
 
     #[test]
+    fn let_and_double_equals() {
+        // `let x = e` is OCaml-style sugar for `given x means e`; `==` is an accepted synonym for `=`.
+        // Both are idioms models reach for (distilled specs write `let f = r/1200` and `rate == f`).
+        // Verified end-to-end: a `let`-defined reference constant, compared with `==`, monitors.
+        let spec = "-- allium: 4\ncomponent C\n  entity P\n  given r : Rate\n  let f = r / 12\n  observable state rate_factor(P) : Rate\n  invariant x means every p :: rate_factor(p) == f\nend\n";
+        let ok = "period=0 rate_factor=0.010000\ngiven r=0.120000\n";
+        assert!(monitor_schedule(spec, ok, 0.0001).contains("\"ok\":true"), "let/== should hold: {}", monitor_schedule(spec, ok, 0.0001));
+        let bad = "period=0 rate_factor=0.020000\ngiven r=0.120000\n";
+        assert!(monitor_schedule(spec, bad, 0.0001).contains("\"ok\":false"), "let/== violation should be caught");
+    }
+
+    #[test]
     fn dot_notation_field_access() {
         // `p.field` is sugar for `field(p)` — the object.attribute form models/humans write naturally.
         let spec = "-- allium: 4\ncomponent C\n  entity P\n  observable state bal(P) : Money\n  observable state interest(P) : Money\n  invariant x means every p :: interest(p) = p.bal\nend\n";
