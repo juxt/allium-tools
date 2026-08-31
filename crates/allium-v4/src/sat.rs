@@ -23,7 +23,7 @@ const MAX_VARS: usize = 2000;
 /// whether `A = B` is a biconditional between two booleans (which must be encoded) or an arithmetic
 /// equality (which stays an opaque atom, handled by the LRA path). Getting this wrong in the unsafe
 /// direction only ever adds freedom, so the default (no names) keeps every `=` opaque as before.
-fn is_bool_valued(e: &Expr, bool_names: &HashSet<String>) -> bool {
+pub(crate) fn is_bool_valued(e: &Expr, bool_names: &HashSet<String>) -> bool {
     match e {
         Expr::Name(s) => s == "true" || s == "false" || bool_names.contains(s),
         Expr::App { head, .. } => matches!(&**head, Expr::Name(h) if bool_names.contains(h)),

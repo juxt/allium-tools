@@ -16,10 +16,11 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use crate::ast::{ItemKind, Module};
 use crate::diagnostic::Diagnostic;
-use crate::expr::{BinOp, Expr, UnOp};
+use crate::expr::{parse_predicate, BinOp, Expr, UnOp};
 use crate::parser::ParseResult;
 
 const MAX_ATOMS: usize = 16;
@@ -30,6 +31,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut coverage(&r.module, source));
     r.diagnostics.append(&mut consistency(&r.module, source));
     r.diagnostics.append(&mut feasibility(&r.module, source));
+    r.diagnostics.append(&mut preservation(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source));
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
@@ -68,6 +70,218 @@ pub(crate) fn bool_names_of(d: &crate::ast::Decl, src: &str) -> std::collections
             (ty == "bool" || ty == "boolean").then_some(name)
         })
         .collect()
+}
+
+/// Inductive invariant preservation. For each action and each quantifier-free invariant, build the
+/// one-step verification condition `inv(pre) ∧ guard(pre) ∧ effect ∧ ¬inv(post)` and ask whether it is
+/// satisfiable. A state observable the action WRITES (appears bare, outside `old`, in `ensures`) becomes a
+/// distinct post variable `X'`; everything the action does not touch keeps its pre variable, so the frame
+/// is implicit. If the VC is satisfiable, the action can step from a state satisfying the invariant to one
+/// that violates it — a missing-guard bug the field's model checkers catch and runtime monitoring cannot.
+/// Arithmetic and quantifiers stay opaque to the SAT engine, so the check never manufactures a false alarm.
+pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let state_names: HashSet<String> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::State)
+            .filter_map(|it| it.name.clone())
+            .collect();
+        let all_obs: HashSet<String> = d
+            .items
+            .iter()
+            .filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given))
+            .filter_map(|it| it.name.clone())
+            .collect();
+        let bool_base = bool_names_of(d, src);
+        // Boolean names for the SAT encoder, plus the primed post versions (also boolean).
+        let mut bnames = bool_base.clone();
+        for n in bool_base.clone() {
+            bnames.insert(format!("{n}'"));
+        }
+        let invariants: Vec<(String, Expr)> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Invariant)
+            .filter_map(|it| it.body.map(|sp| (it.name.clone().unwrap_or_else(|| "<anon>".into()), parse_predicate(sp.slice(src)).0)))
+            // Only the boolean fragment: an arithmetic invariant becomes opaque atoms whose post version
+            // is unconstrained, which would make the violation query trivially satisfiable (a false
+            // alarm). Skipping it is sound — the check simply says nothing about arithmetic preservation.
+            .filter(|(_, e)| !has_quant(e) && boolean_fragment(e, &bool_base, &all_obs))
+            .collect();
+        if invariants.is_empty() {
+            continue;
+        }
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
+            let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
+            let ensures = match it.ensures {
+                Some(sp) => parse_predicate(sp.slice(src)).0,
+                None => continue,
+            };
+            let mut modified = HashSet::new();
+            collect_writes(&ensures, false, &state_names, &mut modified);
+            if modified.is_empty() {
+                continue; // writes no state: cannot break any invariant
+            }
+            let guard = it.requires.map(|sp| parse_predicate(sp.slice(src)).0);
+            let effect = prime(&ensures, &modified, false);
+            for (iname, inv) in &invariants {
+                if !mentions_any(inv, &modified) {
+                    continue; // invariant untouched by this action
+                }
+                let inv_post = prime(inv, &modified, false);
+                let violation = Expr::Unary { op: UnOp::Not, e: Box::new(inv_post) };
+                let mut es: Vec<&Expr> = vec![inv, &effect, &violation];
+                if let Some(g) = &guard {
+                    es.push(g);
+                }
+                if let Some(m) = crate::sat::satisfiable(&es, &bnames) {
+                    let pre: Vec<String> = m
+                        .iter()
+                        .filter(|(k, _)| !k.contains('\'') && !k.starts_with("old "))
+                        .map(|(k, v)| format!("{k}={}", if *v { "T" } else { "F" }))
+                        .collect();
+                    out.push(Diagnostic::warning(
+                        it.span,
+                        format!(
+                            "action `{aname}` in `{}` can break invariant `{iname}`: from a state satisfying it (e.g. {}), the action reaches a state that violates it. Add a guard.",
+                            d.name,
+                            pre.join(", ")
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Is `e` in the pure boolean fragment the SAT preservation check can decide soundly? No arithmetic
+/// operators or literals, no ordering comparisons, every equality between two booleans, and every
+/// observable it applies is boolean-typed. Anything else would rest on opaque atoms and could false-alarm.
+fn boolean_fragment(e: &Expr, bool_names: &HashSet<String>, obs: &HashSet<String>) -> bool {
+    match e {
+        Expr::Int(_) | Expr::Dec(_, _) | Expr::Cond { .. } | Expr::Quant { .. } | Expr::Sum { .. } => false,
+        Expr::Name(_) => true, // a bound entity variable or bool literal
+        Expr::App { head, args } => {
+            let head_ok = match &**head {
+                Expr::Name(h) => !obs.contains(h) || bool_names.contains(h),
+                _ => boolean_fragment(head, bool_names, obs),
+            };
+            head_ok && args.iter().all(|a| boolean_fragment(a, bool_names, obs))
+        }
+        Expr::Field { name, base } => (!obs.contains(name) || bool_names.contains(name)) && boolean_fragment(base, bool_names, obs),
+        Expr::Unary { e, .. } => boolean_fragment(e, bool_names, obs),
+        Expr::Binary { op, lhs, rhs } => match op {
+            BinOp::And | BinOp::Or | BinOp::Implies => boolean_fragment(lhs, bool_names, obs) && boolean_fragment(rhs, bool_names, obs),
+            BinOp::Eq | BinOp::Ne => {
+                crate::sat::is_bool_valued(lhs, bool_names) && crate::sat::is_bool_valued(rhs, bool_names)
+                    && boolean_fragment(lhs, bool_names, obs)
+                    && boolean_fragment(rhs, bool_names, obs)
+            }
+            _ => false, // ordering comparisons and arithmetic operators
+        },
+        _ => false,
+    }
+}
+
+/// True if `e` contains an explicit quantifier or aggregate (deferred by the preservation check).
+fn has_quant(e: &Expr) -> bool {
+    match e {
+        Expr::Quant { .. } | Expr::Sum { .. } => true,
+        Expr::Binary { lhs, rhs, .. } => has_quant(lhs) || has_quant(rhs),
+        Expr::Unary { e, .. } => has_quant(e),
+        Expr::Cond { cond, then_, els } => has_quant(cond) || has_quant(then_) || has_quant(els),
+        Expr::App { head, args } => has_quant(head) || args.iter().any(has_quant),
+        Expr::Field { base, .. } => has_quant(base),
+        _ => false,
+    }
+}
+
+/// Collect state names written by `ensures`: an observable appearing bare (outside `old`).
+fn collect_writes(e: &Expr, in_old: bool, state: &HashSet<String>, out: &mut HashSet<String>) {
+    match e {
+        Expr::Unary { op: UnOp::Old, e } => collect_writes(e, true, state, out),
+        Expr::Unary { e, .. } => collect_writes(e, in_old, state, out),
+        Expr::App { head, args } => {
+            if let Expr::Name(h) = &**head {
+                if !in_old && state.contains(h) {
+                    out.insert(h.clone());
+                }
+            }
+            collect_writes(head, in_old, state, out);
+            args.iter().for_each(|a| collect_writes(a, in_old, state, out));
+        }
+        Expr::Field { base, name } => {
+            if !in_old && state.contains(name) {
+                out.insert(name.clone());
+            }
+            collect_writes(base, in_old, state, out);
+        }
+        Expr::Name(n) => {
+            if !in_old && state.contains(n) {
+                out.insert(n.clone());
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_writes(lhs, in_old, state, out);
+            collect_writes(rhs, in_old, state, out);
+        }
+        Expr::Cond { cond, then_, els } => {
+            collect_writes(cond, in_old, state, out);
+            collect_writes(then_, in_old, state, out);
+            collect_writes(els, in_old, state, out);
+        }
+        _ => {}
+    }
+}
+
+/// Rewrite `e` to its post-state reading: an observable in `modified`, appearing outside `old`, is
+/// primed (`X` -> `X'`); `old(X)` is stripped to the pre reading `X`; everything else is unchanged.
+fn prime(e: &Expr, modified: &HashSet<String>, in_old: bool) -> Expr {
+    match e {
+        Expr::Unary { op: UnOp::Old, e } => prime(e, modified, true),
+        Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(prime(e, modified, in_old)) },
+        Expr::App { head, args } => {
+            let head = match &**head {
+                Expr::Name(h) if !in_old && modified.contains(h) => Box::new(Expr::Name(format!("{h}'"))),
+                other => Box::new(prime(other, modified, in_old)),
+            };
+            Expr::App { head, args: args.iter().map(|a| prime(a, modified, in_old)).collect() }
+        }
+        Expr::Field { base, name } => {
+            let name = if !in_old && modified.contains(name) { format!("{name}'") } else { name.clone() };
+            Expr::Field { base: Box::new(prime(base, modified, in_old)), name }
+        }
+        Expr::Name(n) if !in_old && modified.contains(n) => Expr::Name(format!("{n}'")),
+        Expr::Binary { op, lhs, rhs } => Expr::Binary {
+            op: op.clone(),
+            lhs: Box::new(prime(lhs, modified, in_old)),
+            rhs: Box::new(prime(rhs, modified, in_old)),
+        },
+        Expr::Cond { cond, then_, els } => Expr::Cond {
+            cond: Box::new(prime(cond, modified, in_old)),
+            then_: Box::new(prime(then_, modified, in_old)),
+            els: Box::new(prime(els, modified, in_old)),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Does `e` reference any name in `names` (as an application head, field, or bare name)?
+fn mentions_any(e: &Expr, names: &HashSet<String>) -> bool {
+    match e {
+        Expr::Name(n) => names.contains(n),
+        Expr::App { head, args } => {
+            (matches!(&**head, Expr::Name(h) if names.contains(h))) || mentions_any(head, names) || args.iter().any(|a| mentions_any(a, names))
+        }
+        Expr::Field { base, name } => names.contains(name) || mentions_any(base, names),
+        Expr::Unary { e, .. } => mentions_any(e, names),
+        Expr::Binary { lhs, rhs, .. } => mentions_any(lhs, names) || mentions_any(rhs, names),
+        Expr::Cond { cond, then_, els } => mentions_any(cond, names) || mentions_any(then_, names) || mentions_any(els, names),
+        _ => false,
+    }
 }
 
 pub(crate) fn canon(e: &Expr) -> String {
@@ -446,6 +660,31 @@ mod tests {
     }
 
     const HDR: &str = "-- allium: 4\ncomponent R\n  entity T\n  observable state a(T) : bool\n  observable state b(T) : bool\n  observable state c(T) : bool\n";
+
+    #[test]
+    fn preservation_flags_missing_guard_and_clears_guarded_action() {
+        // An action that writes `captured` with no guard can break `captured => authed`.
+        let bad = "-- allium: 4\ncomponent Pay\n  entity Txn\n  observable state authed(Txn) : bool\n  observable state captured(Txn) : bool\n  action capture\n    ensures captured(t)\n  invariant no_cap_without_auth means captured(t) implies authed(t)\nend\n";
+        assert!(any(bad, "can break invariant `no_cap_without_auth`"), "{:?}", msgs(bad));
+        assert!(any(bad, "action `capture`"), "{:?}", msgs(bad));
+        // Adding the guard `requires authed(t)` makes it safe: no preservation finding.
+        let good = "-- allium: 4\ncomponent Pay\n  entity Txn\n  observable state authed(Txn) : bool\n  observable state captured(Txn) : bool\n  action capture\n    requires authed(t)\n    ensures captured(t)\n  invariant no_cap_without_auth means captured(t) implies authed(t)\nend\n";
+        assert!(!any(good, "can break"), "{:?}", msgs(good));
+    }
+
+    #[test]
+    fn preservation_is_silent_on_arithmetic_invariants() {
+        // An arithmetic invariant rests on opaque atoms; the check must NOT false-alarm on it.
+        let src = "-- allium: 4\ncomponent Bank\n  entity A\n  observable state bal(A) : Money\n  observable state amt(A) : Money\n  action withdraw\n    ensures bal(a) = old(bal(a)) - amt(a)\n  invariant non_negative means bal(a) >= 0\nend\n";
+        assert!(!any(src, "can break"), "{:?}", msgs(src));
+    }
+
+    #[test]
+    fn preservation_ignores_actions_that_write_unrelated_state() {
+        // `authorize` writes `authed`, which cannot break `captured => authed` (it can only help).
+        let src = "-- allium: 4\ncomponent Pay\n  entity Txn\n  observable state authed(Txn) : bool\n  observable state captured(Txn) : bool\n  action authorize\n    ensures authed(t)\n  invariant no_cap_without_auth means captured(t) implies authed(t)\nend\n";
+        assert!(!any(src, "can break"), "{:?}", msgs(src));
+    }
 
     #[test]
     fn consistency_flags_contradiction_with_minimal_core() {
