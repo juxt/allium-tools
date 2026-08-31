@@ -6242,11 +6242,13 @@ rule Ship {
     }
 
     #[test]
-    fn v3_version_4_still_rejected() {
+    fn v3_version_4_accepted_by_dispatch() {
+        // Phase 4a: version 4 is dispatched to the v4 pipeline, so the shared entry accepts
+        // the marker rather than rejecting it as unsupported (was v3_version_4_still_rejected).
         let src = "-- allium: 4\nentity E {}";
         let r = parse(src);
-        assert!(r.diagnostics.iter().any(|d| d.severity == Severity::Error
-            && d.message.contains("unsupported")));
+        assert!(!r.diagnostics.iter().any(|d| d.severity == Severity::Error
+            && d.message.contains("unsupported")), "v4 marker must not be 'unsupported': {:?}", r.diagnostics);
     }
 
     // -----------------------------------------------------------------------
