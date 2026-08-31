@@ -122,6 +122,10 @@ pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         if invs.is_empty() {
             continue;
         }
+        // The pre-state assumes the WHOLE linear invariant set (prove the conjunction inductive), so an
+        // invariant that is true-but-not-inductive alone is not spuriously flagged when another excludes
+        // the bad pre-state. Sound: a reported break means the full set is genuinely not preserved.
+        let all_pre: Vec<Con> = invs.iter().flat_map(|(_, _, c)| c.iter().cloned()).collect();
 
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
             let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
@@ -172,7 +176,7 @@ pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                 None => Vec::new(),
             };
 
-            for (iname, inv, pre_cons) in &invs {
+            for (iname, inv, _pre_cons) in &invs {
                 if !crate::analyse::mentions_any(inv, &modified_numeric) {
                     continue;
                 }
@@ -185,7 +189,7 @@ pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                 let mut witness: Option<String> = None;
                 'search: for pc in &post_cons {
                     for neg in negate_con(pc) {
-                        let mut q = pre_cons.clone();
+                        let mut q = all_pre.clone();
                         q.extend(guard_cons.iter().cloned());
                         q.extend(effect_cons.iter().cloned());
                         q.push(neg);

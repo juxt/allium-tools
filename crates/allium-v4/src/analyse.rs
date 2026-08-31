@@ -185,7 +185,14 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                 }
                 let inv_post = prime(inv, &modified, false);
                 let violation = Expr::Unary { op: UnOp::Not, e: Box::new(inv_post) };
-                let mut es: Vec<&Expr> = vec![inv, &effect, &violation];
+                // Pre-state: the WHOLE invariant set holds (prove the conjunction is inductive), not just
+                // this one. This excludes bad pre-states another invariant already forbids, so a true-but-
+                // not-inductive-alone invariant is not spuriously flagged. Sound: reporting a break means
+                // the full set is genuinely not preserved.
+                let mut es: Vec<&Expr> = vec![&effect, &violation];
+                for (_, other) in &invariants {
+                    es.push(other);
+                }
                 if let Some(g) = &guard {
                     es.push(g);
                 }
@@ -952,6 +959,16 @@ mod tests {
         let good = "-- allium: 4\ncomponent Pay\n  entity Txn\n  observable state authed(Txn) : bool\n  observable state captured(Txn) : bool\n  init means not authed(t) and not captured(t)\n  action capture\n    requires authed(t)\n    ensures captured(t)\n  invariant no_cap means every p :: captured(p) implies authed(p)\nend\n";
         assert!(any(good, "is INDUCTIVE"), "{:?}", msgs(good));
         assert!(!any(good, "can break"), "{:?}", msgs(good));
+    }
+
+    #[test]
+    fn preservation_uses_the_invariant_conjunction() {
+        // `ship_needs_paid` (shipped => paid) is NOT inductive alone: `ship` sets shipped from a paid=F
+        // state. But `always_paid` forbids paid=F, so together they are inductive. No break must be
+        // reported, and both must be certified inductive.
+        let src = "-- allium: 4\ncomponent Order\n  entity O\n  observable state paid(O) : bool\n  observable state shipped(O) : bool\n  init means paid(o) and not shipped(o)\n  action ship\n    ensures shipped(o)\n  invariant always_paid means paid(o)\n  invariant ship_needs_paid means shipped(o) implies paid(o)\nend\n";
+        assert!(!any(src, "can break"), "conjunction should exclude the bad pre-state: {:?}", msgs(src));
+        assert!(any(src, "`ship_needs_paid` in `Order` is INDUCTIVE"), "{:?}", msgs(src));
     }
 
     #[test]
