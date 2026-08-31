@@ -113,6 +113,38 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         if invariants.is_empty() {
             continue;
         }
+
+        // Base case of induction: does `init` establish each invariant? `init ∧ ¬I` satisfiable means
+        // the initial state can already violate I. Only meaningful when init is itself boolean-fragment.
+        let init_pred: Option<Expr> = d
+            .items
+            .iter()
+            .find(|it| it.kind == ItemKind::Init)
+            .and_then(|it| it.body)
+            .map(|sp| {
+                // The init body span keeps the `means` keyword; drop it before parsing the predicate.
+                let text = sp.slice(src);
+                let text = text.trim().strip_prefix("means").unwrap_or(text);
+                parse_predicate(text).0
+            })
+            .filter(|e| boolean_fragment(e, &bool_base, &all_obs));
+        // Per-invariant status: established by init, and not broken by any action.
+        let mut established = vec![true; invariants.len()];
+        let mut broken = vec![false; invariants.len()];
+        if let Some(init) = &init_pred {
+            for (i, (iname, inv)) in invariants.iter().enumerate() {
+                let neg = Expr::Unary { op: UnOp::Not, e: Box::new(inv.clone()) };
+                if let Some(m) = crate::sat::satisfiable(&[init, &neg], &bnames) {
+                    established[i] = false;
+                    let w: Vec<String> = m.iter().map(|(k, v)| format!("{k}={}", if *v { "T" } else { "F" })).collect();
+                    out.push(Diagnostic::warning(
+                        d.span,
+                        format!("`init` in `{}` does not establish invariant `{iname}`: the initial state can violate it (e.g. {}).", d.name, w.join(", ")),
+                    ));
+                }
+            }
+        }
+
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
             let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
             let ensures = match it.ensures {
@@ -126,7 +158,7 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
             }
             let guard = it.requires.map(|sp| parse_predicate(sp.slice(src)).0);
             let effect = prime(&ensures, &modified, false);
-            for (iname, inv) in &invariants {
+            for (i, (iname, inv)) in invariants.iter().enumerate() {
                 if !mentions_any(inv, &modified) {
                     continue; // invariant untouched by this action
                 }
@@ -137,18 +169,34 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                     es.push(g);
                 }
                 if let Some(m) = crate::sat::satisfiable(&es, &bnames) {
+                    broken[i] = true;
                     let pre: Vec<String> = m
                         .iter()
                         .filter(|(k, _)| !k.contains('\'') && !k.starts_with("old "))
                         .map(|(k, v)| format!("{k}={}", if *v { "T" } else { "F" }))
                         .collect();
+                    let fix = guard_suggestion(inv, &ensures, &modified);
                     out.push(Diagnostic::warning(
                         it.span,
                         format!(
-                            "action `{aname}` in `{}` can break invariant `{iname}`: from a state satisfying it (e.g. {}), the action reaches a state that violates it. Add a guard.",
+                            "action `{aname}` in `{}` can break invariant `{iname}`: from a state satisfying it (e.g. {}), the action reaches a state that violates it.{}",
                             d.name,
-                            pre.join(", ")
+                            pre.join(", "),
+                            fix
                         ),
+                    ));
+                }
+            }
+        }
+
+        // A full inductive proof: established by init AND preserved by every action => holds in all
+        // reachable states. Emit the positive result only when init is present to certify the base case.
+        if init_pred.is_some() {
+            for (i, (iname, _)) in invariants.iter().enumerate() {
+                if established[i] && !broken[i] {
+                    out.push(Diagnostic::warning(
+                        d.span,
+                        format!("invariant `{iname}` in `{}` is INDUCTIVE: established by `init` and preserved by every action, so it holds in every reachable state.", d.name),
                     ));
                 }
             }
@@ -183,6 +231,112 @@ fn boolean_fragment(e: &Expr, bool_names: &HashSet<String>, obs: &HashSet<String
             _ => false, // ordering comparisons and arithmetic operators
         },
         _ => false,
+    }
+}
+
+/// A suggested guard: the weakest precondition, the invariant with each written observable replaced by
+/// the value the action gives it, then simplified. `requires <that>` makes the action preserve the
+/// invariant. Falls back to a generic hint when the effect is not a simple assignment we can invert.
+fn guard_suggestion(inv: &Expr, ensures: &Expr, modified: &HashSet<String>) -> String {
+    let mut post: HashMap<String, Expr> = HashMap::new();
+    collect_post_values(ensures, modified, &mut post);
+    if post.is_empty() {
+        return " Add a guard (`requires …`) that rules out this pre-state.".to_string();
+    }
+    let wp = simplify(&substitute_by_canon(inv, &post));
+    // A trivial wp (`true`) means the substitution lost the constraint; fall back rather than mislead.
+    if matches!(&wp, Expr::Name(n) if n == "true") {
+        return " Add a guard (`requires …`) that rules out this pre-state.".to_string();
+    }
+    format!(" To fix, guard it: `requires {}`.", canon(&wp))
+}
+
+/// From an `ensures`, the post value each written observable takes: `X` -> true, `not X` -> false,
+/// `X = e` -> e. Walks top-level conjunctions; ignores conjuncts that are not simple assignments.
+fn collect_post_values(e: &Expr, modified: &HashSet<String>, out: &mut HashMap<String, Expr>) {
+    match e {
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            collect_post_values(lhs, modified, out);
+            collect_post_values(rhs, modified, out);
+        }
+        Expr::Unary { op: UnOp::Not, e } => {
+            if is_modified_app(e, modified) {
+                out.insert(canon(e), Expr::Name("false".into()));
+            }
+        }
+        Expr::Binary { op: BinOp::Eq, lhs, rhs } if is_modified_app(lhs, modified) => {
+            out.insert(canon(lhs), (**rhs).clone());
+        }
+        _ if is_modified_app(e, modified) => {
+            out.insert(canon(e), Expr::Name("true".into()));
+        }
+        _ => {}
+    }
+}
+
+fn is_modified_app(e: &Expr, modified: &HashSet<String>) -> bool {
+    match e {
+        Expr::App { head, .. } => matches!(&**head, Expr::Name(h) if modified.contains(h)),
+        Expr::Field { name, .. } => modified.contains(name),
+        Expr::Name(n) => modified.contains(n),
+        _ => false,
+    }
+}
+
+/// Replace every sub-expression whose canonical form is a key in `post` with the mapped value.
+fn substitute_by_canon(e: &Expr, post: &HashMap<String, Expr>) -> Expr {
+    if let Some(v) = post.get(&canon(e)) {
+        return v.clone();
+    }
+    match e {
+        Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(substitute_by_canon(e, post)) },
+        Expr::Binary { op, lhs, rhs } => Expr::Binary {
+            op: op.clone(),
+            lhs: Box::new(substitute_by_canon(lhs, post)),
+            rhs: Box::new(substitute_by_canon(rhs, post)),
+        },
+        Expr::App { head, args } => Expr::App {
+            head: Box::new(substitute_by_canon(head, post)),
+            args: args.iter().map(|a| substitute_by_canon(a, post)).collect(),
+        },
+        Expr::Cond { cond, then_, els } => Expr::Cond {
+            cond: Box::new(substitute_by_canon(cond, post)),
+            then_: Box::new(substitute_by_canon(then_, post)),
+            els: Box::new(substitute_by_canon(els, post)),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Boolean simplification enough to make a substituted wp readable: fold `true`/`false` through the
+/// connectives and drop double negation.
+fn simplify(e: &Expr) -> Expr {
+    let t = || Expr::Name("true".into());
+    let f = || Expr::Name("false".into());
+    let is_t = |x: &Expr| matches!(x, Expr::Name(n) if n == "true");
+    let is_f = |x: &Expr| matches!(x, Expr::Name(n) if n == "false");
+    match e {
+        Expr::Unary { op: UnOp::Not, e } => {
+            let s = simplify(e);
+            if is_t(&s) { f() } else if is_f(&s) { t() } else { Expr::Unary { op: UnOp::Not, e: Box::new(s) } }
+        }
+        Expr::Binary { op, lhs, rhs } => {
+            let l = simplify(lhs);
+            let r = simplify(rhs);
+            match op {
+                BinOp::And => {
+                    if is_f(&l) || is_f(&r) { f() } else if is_t(&l) { r } else if is_t(&r) { l } else { Expr::Binary { op: BinOp::And, lhs: Box::new(l), rhs: Box::new(r) } }
+                }
+                BinOp::Or => {
+                    if is_t(&l) || is_t(&r) { t() } else if is_f(&l) { r } else if is_f(&r) { l } else { Expr::Binary { op: BinOp::Or, lhs: Box::new(l), rhs: Box::new(r) } }
+                }
+                BinOp::Implies => {
+                    if is_f(&l) || is_t(&r) { t() } else if is_t(&l) { r } else { Expr::Binary { op: BinOp::Implies, lhs: Box::new(l), rhs: Box::new(r) } }
+                }
+                _ => Expr::Binary { op: op.clone(), lhs: Box::new(l), rhs: Box::new(r) },
+            }
+        }
+        other => other.clone(),
     }
 }
 
@@ -670,6 +824,28 @@ mod tests {
         // Adding the guard `requires authed(t)` makes it safe: no preservation finding.
         let good = "-- allium: 4\ncomponent Pay\n  entity Txn\n  observable state authed(Txn) : bool\n  observable state captured(Txn) : bool\n  action capture\n    requires authed(t)\n    ensures captured(t)\n  invariant no_cap_without_auth means captured(t) implies authed(t)\nend\n";
         assert!(!any(good, "can break"), "{:?}", msgs(good));
+    }
+
+    #[test]
+    fn preservation_suggests_the_weakest_guard() {
+        let bad = "-- allium: 4\ncomponent Pay\n  entity Txn\n  observable state authed(Txn) : bool\n  observable state captured(Txn) : bool\n  action capture\n    ensures captured(t)\n  invariant no_cap_without_auth means captured(t) implies authed(t)\nend\n";
+        assert!(any(bad, "requires authed(t)"), "should suggest the weakest guard: {:?}", msgs(bad));
+    }
+
+    #[test]
+    fn init_and_preservation_prove_inductive() {
+        // init establishes the invariant AND the guarded action preserves it -> a full inductive proof.
+        let src = "-- allium: 4\ncomponent Pay\n  entity Txn\n  observable state authed(Txn) : bool\n  observable state captured(Txn) : bool\n  init means not authed(t) and not captured(t)\n  action capture\n    requires authed(t)\n    ensures captured(t)\n  invariant no_cap means captured(t) implies authed(t)\nend\n";
+        assert!(any(src, "is INDUCTIVE"), "{:?}", msgs(src));
+        assert!(!any(src, "can break"), "{:?}", msgs(src));
+        assert!(!any(src, "does not establish"), "{:?}", msgs(src));
+    }
+
+    #[test]
+    fn init_that_violates_invariant_is_flagged() {
+        // init leaves captured true but authed false: it already violates captured => authed.
+        let src = "-- allium: 4\ncomponent Pay\n  entity Txn\n  observable state authed(Txn) : bool\n  observable state captured(Txn) : bool\n  init means captured(t) and not authed(t)\n  invariant no_cap means captured(t) implies authed(t)\nend\n";
+        assert!(any(src, "`init` in `Pay` does not establish invariant `no_cap`"), "{:?}", msgs(src));
     }
 
     #[test]
