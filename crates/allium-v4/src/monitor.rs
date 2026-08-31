@@ -817,25 +817,46 @@ fn is_computation(e: &Expr) -> bool {
     matches!(e, Expr::Binary { .. } | Expr::Unary { .. } | Expr::Int(_) | Expr::Dec(_, _) | Expr::Sum { .. })
 }
 
-/// Defined givens usable as inline reference functions/constants:
-///   `given f(params) means body` (parameterised) or `given k means <arithmetic>` (0-ary constant).
-/// Excludes plain type declarations `given x : T` (body parses to a bare type name/app).
+/// Collect `given` reference definitions from one module's own items.
+fn collect_own_defs(module: &crate::ast::Module, source: &str, out: &mut HashMap<String, (Vec<String>, Expr)>) {
+    for it in module.decls.iter().flat_map(|d| d.items.iter()) {
+        if it.kind != ItemKind::Given || it.body.is_none() {
+            continue;
+        }
+        let Some(name) = it.name.clone() else { continue };
+        let Some(bsp) = it.body else { continue };
+        let body = crate::expr::parse_predicate(bsp.slice(source)).0;
+        if it.params.is_empty() && !is_computation(&body) {
+            continue; // a type declaration, not a definition
+        }
+        out.entry(name).or_insert((it.params.clone(), body)); // own defs take precedence over imports
+    }
+}
+
+/// Defined givens usable as inline reference functions/constants, INCLUDING any brought in by a
+/// `use "<path>"` import — this is the standard-library mechanism: a shared file of `given` definitions
+/// (min/max/round/domain helpers) is loaded and made available, so the CORE need not carry them.
+/// Import paths resolve as given (absolute, or relative to the process CWD). One level of import.
 fn collect_defs(module: &crate::ast::Module, source: &str) -> HashMap<String, (Vec<String>, Expr)> {
-    module
-        .decls
-        .iter()
-        .flat_map(|d| d.items.iter())
-        .filter(|it| it.kind == ItemKind::Given && it.body.is_some())
-        .filter_map(|it| {
-            let name = it.name.clone()?;
-            let body = crate::expr::parse_predicate(it.body?.slice(source)).0;
-            // parameterised -> a reference function; 0-ary -> only if the body is a computation.
-            if it.params.is_empty() && !is_computation(&body) {
-                return None; // a type declaration, not a definition
+    let mut out = HashMap::new();
+    // own definitions first (they shadow imported ones)
+    collect_own_defs(module, source, &mut out);
+    // then imported stdlib definitions
+    for d in module.decls.iter().filter(|d| d.kind == crate::ast::DeclKind::Import) {
+        let path = &d.name;
+        if path.is_empty() {
+            continue;
+        }
+        let candidates = [path.clone(), format!("{path}.allium")];
+        for c in candidates {
+            if let Ok(imported_src) = std::fs::read_to_string(&c) {
+                let imported = crate::check::check(&imported_src).module;
+                collect_own_defs(&imported, &imported_src, &mut out);
+                break;
             }
-            Some((name, (it.params.clone(), body)))
-        })
-        .collect()
+        }
+    }
+    out
 }
 
 /// Monitor arithmetic invariants over one concrete schedule trace. `tol` is the
@@ -904,6 +925,21 @@ mod tests {
         let r = monitor(SPEC, "t=1 entity=R1 collateralised=T has_code=F accepted=F rejected=F\n");
         assert!(count(&r, "collat_needs_code") == 1, "{r}");
         assert!(r.contains("\"ok\":false"));
+    }
+
+    #[test]
+    fn stdlib_import_use() {
+        // A shared stdlib of user-space definitions, imported via `use "path"`, resolves and monitors —
+        // proving the small-core + stdlib extensibility model (min/max need not be core built-ins).
+        let dir = std::env::temp_dir();
+        let lib = dir.join("allium_test_stdlib.allium");
+        std::fs::write(&lib, "-- allium: 4\ncomponent Std\n  given umin(a,b) means if a < b then a else b\nend\n").unwrap();
+        let spec = format!("-- allium: 4\nuse \"{}\"\ncomponent F\n  entity P\n  given cap : Money\n  observable state computed(P) : Money\n  observable state fee(P) : Money\n  invariant capped means every p :: fee(p) = umin(computed(p), cap)\nend\n", lib.display());
+        let ok = "period=0 computed=30.00 fee=25.00\ngiven cap=25.00\n";
+        assert!(monitor_schedule(&spec, ok, 0.01).contains("\"ok\":true"), "imported umin should hold: {}", monitor_schedule(&spec, ok, 0.01));
+        let bad = "period=0 computed=30.00 fee=30.00\ngiven cap=25.00\n";
+        assert!(monitor_schedule(&spec, bad, 0.01).contains("\"ok\":false"), "imported umin violation should be caught");
+        let _ = std::fs::remove_file(&lib);
     }
 
     #[test]
