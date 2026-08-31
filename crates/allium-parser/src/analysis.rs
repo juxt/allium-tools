@@ -4569,7 +4569,16 @@ fn collect_qref_nodes(module: &Module) -> Vec<QRef<'_>> {
                 collect_qrefs_from_expr(&def.value, &mut refs);
             }
             Decl::Deferred(def) => {
+                // A deferred path names a code location, never member access
+                // on a value, so the dotted reread (see `QRef::dotted`) does
+                // not apply: a dotted deferred path through an undeclared
+                // alias keeps its unknown-alias error even when the module
+                // binds a value name spelled the same.
+                let start = refs.len();
                 collect_qrefs_from_expr(&def.path, &mut refs);
+                for r in &mut refs[start..] {
+                    r.dotted = false;
+                }
             }
             // Use, OpenQuestion — no expressions that could hold qualified names.
             _ => {}
@@ -5550,6 +5559,18 @@ struct QRef<'a> {
     /// valid collection from a typo. The `unknownName` branch leaves these
     /// alone rather than false-positive on every qualified collection (#82).
     collection: bool,
+    /// True when this reference was minted from the legacy dotted form: an
+    /// `ident.UppercaseField` member access reread as `alias.TypeName` (e.g.
+    /// `core.EntityMap` in exposes). The parser emits plain member access for
+    /// that shape — never a qualified name — so the reread is a heuristic, and
+    /// an over-inclusive one: `properties.Status` on a `Map<String, Any>`
+    /// field matches it too. The unknown-alias check exempts a dotted
+    /// reference whose qualifier is a locally-bound value name rather than
+    /// error on valid member access. Slash-form references (`alias/Name`)
+    /// parse as `QualifiedName` and are never dotted; neither are references
+    /// minted from a `deferred` path, which names a code location rather
+    /// than a value.
+    dotted: bool,
 }
 
 fn collect_qrefs_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<QRef<'a>>) {
@@ -5601,7 +5622,7 @@ fn collect_qrefs_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<QRef<'a>>)
         BlockItemKind::ContractsClause { entries } => {
             for e in entries {
                 if let Some(qualifier) = &e.qualifier {
-                    out.push(QRef { qualifier, name: &e.name.name, span: e.name.span, collection: false });
+                    out.push(QRef { qualifier, name: &e.name.name, span: e.name.span, collection: false, dotted: false });
                 }
             }
         }
@@ -5615,15 +5636,17 @@ fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
     match expr {
         Expr::QualifiedName(q) => {
             if let Some(qualifier) = &q.qualifier {
-                out.push(QRef { qualifier, name: &q.name, span: q.span, collection: false });
+                out.push(QRef { qualifier, name: &q.name, span: q.span, collection: false, dotted: false });
             }
         }
         Expr::MemberAccess { object, field, .. }
         | Expr::OptionalAccess { object, field, .. } => {
-            // Detect alias.TypeName pattern (e.g. core.EntityMap in exposes)
+            // Detect alias.TypeName pattern (e.g. core.EntityMap in exposes).
+            // Marked dotted: the parser sees plain member access here, so the
+            // alias check exempts qualifiers bound as local value names.
             if let Expr::Ident(id) = object.as_ref() {
                 if starts_uppercase(&field.name) {
-                    out.push(QRef { qualifier: &id.name, name: &field.name, span: id.span.merge(field.span), collection: false });
+                    out.push(QRef { qualifier: &id.name, name: &field.name, span: id.span.merge(field.span), collection: false, dotted: true });
                 }
             }
             collect_qrefs_from_expr(object, out);
@@ -5755,7 +5778,7 @@ fn collect_qrefs_from_collection<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
     match expr {
         Expr::QualifiedName(q) => {
             if let Some(qualifier) = &q.qualifier {
-                out.push(QRef { qualifier, name: &q.name, span: q.span, collection: true });
+                out.push(QRef { qualifier, name: &q.name, span: q.span, collection: true, dotted: false });
             }
         }
         // A filtered/projected collection still has its collection at `source`;
@@ -5772,6 +5795,151 @@ fn collect_qrefs_from_collection<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
         // Anything else (a call returning a collection, a field access, a list
         // literal) is not a bare entity-collection name; collect it normally.
         other => collect_qrefs_from_expr(other, out),
+    }
+}
+
+/// Lowercase-convention value names bound anywhere in the module: `name:`
+/// item names in any block (an entity/external-entity/value field, a `given`
+/// binding, a `config` parameter, a surface projection), `variant` field
+/// declarations, `default` declaration names, `let` bindings (block items
+/// and expression-level `let`), rule trigger parameters from `when:`
+/// clauses, `name: expr` clause bindings (a surface `context`/`facing`, a
+/// `when` binding form), lambda parameters, and `for` loop bindings —
+/// wherever they occur, including top-level `invariant` bodies and `default`
+/// values.
+///
+/// The set is deliberately a module-wide over-approximation: it ignores which
+/// declaration binds a name. Its one consumer is the dotted-form exemption in
+/// [`Ctx::check_undefined_import_aliases`], where the set only suppresses an
+/// error-severity diagnostic — over-inclusion fails safe (a missed legacy
+/// dotted reference stays silent), while under-inclusion is the false
+/// positive being avoided (an unknown-alias error on member access through a
+/// bound name).
+fn collect_local_value_names(module: &Module) -> HashSet<&str> {
+    let mut names: HashSet<&str> = HashSet::new();
+    for d in &module.declarations {
+        match d {
+            Decl::Block(b) => {
+                for item in &b.items {
+                    collect_value_names_from_item(&item.kind, &mut names);
+                }
+            }
+            Decl::Variant(v) => {
+                // The canonical `variant Name : Base { field: Type ... }`
+                // parses its brace body into the base expression — `Base
+                // { ... }` becomes a `JoinLookup` — so the variant's field
+                // declarations are that lookup's field names.
+                if let Expr::JoinLookup { fields, .. } = &v.base {
+                    for jf in fields {
+                        names.insert(&jf.field.name);
+                    }
+                }
+                collect_value_names_from_expr(&v.base, &mut names);
+                for item in &v.items {
+                    collect_value_names_from_item(&item.kind, &mut names);
+                }
+            }
+            Decl::Default(def) => {
+                names.insert(&def.name.name);
+                collect_value_names_from_expr(&def.value, &mut names);
+            }
+            Decl::Invariant(inv) => {
+                collect_value_names_from_expr(&inv.body, &mut names);
+            }
+            // Use, Deferred, OpenQuestion — bind no value names.
+            _ => {}
+        }
+    }
+    names
+}
+
+fn collect_value_names_from_item<'a>(kind: &'a BlockItemKind, out: &mut HashSet<&'a str>) {
+    match kind {
+        BlockItemKind::Assignment { name, value }
+        | BlockItemKind::FieldWithWhen { name, value, .. } => {
+            out.insert(&name.name);
+            collect_value_names_from_expr(value, out);
+        }
+        BlockItemKind::ParamAssignment { name, params, value } => {
+            out.insert(&name.name);
+            for p in params {
+                out.insert(&p.name);
+            }
+            collect_value_names_from_expr(value, out);
+        }
+        BlockItemKind::Let { name, value } => {
+            out.insert(&name.name);
+            collect_value_names_from_expr(value, out);
+        }
+        BlockItemKind::Clause { keyword, value } => {
+            // A rule's `when:` binds its trigger-call parameters
+            // (`when: Go(payload)`); `collect_bound_names` also covers the
+            // binding form (`when: e: Trigger(...)`).
+            if keyword == "when" {
+                collect_bound_names(value, out);
+            }
+            collect_value_names_from_expr(value, out);
+        }
+        BlockItemKind::PathAssignment { value, .. }
+        | BlockItemKind::InvariantBlock { body: value, .. } => {
+            collect_value_names_from_expr(value, out);
+        }
+        BlockItemKind::ForBlock { binding, collection, filter, items } => {
+            insert_for_binding_names(binding, out);
+            collect_value_names_from_expr(collection, out);
+            if let Some(f) = filter {
+                collect_value_names_from_expr(f, out);
+            }
+            for item in items {
+                collect_value_names_from_item(&item.kind, out);
+            }
+        }
+        BlockItemKind::IfBlock { branches, else_items } => {
+            for b in branches {
+                collect_value_names_from_expr(&b.condition, out);
+                for item in &b.items {
+                    collect_value_names_from_item(&item.kind, out);
+                }
+            }
+            if let Some(items) = else_items {
+                for item in items {
+                    collect_value_names_from_item(&item.kind, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Names bound inside an expression tree: `name: expr` bindings (a surface
+/// `context`/`facing`, a `when` binding form), expression-level `let`, lambda
+/// parameters, and `for` loop bindings.
+fn collect_value_names_from_expr<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
+    match expr {
+        Expr::Binding { name, .. } | Expr::LetExpr { name, .. } => {
+            out.insert(&name.name);
+        }
+        Expr::For { binding, .. } => insert_for_binding_names(binding, out),
+        Expr::Lambda { param, .. } => {
+            if let Expr::Ident(id) = param.as_ref() {
+                out.insert(&id.name);
+            }
+        }
+        _ => {}
+    }
+    walk_expr_children(expr, &mut |child| collect_value_names_from_expr(child, out));
+}
+
+fn insert_for_binding_names<'a>(binding: &'a ForBinding, out: &mut HashSet<&'a str>) {
+    match binding {
+        ForBinding::Single(id) => {
+            out.insert(&id.name);
+        }
+        ForBinding::Destructured(ids, _) => {
+            for id in ids {
+                out.insert(&id.name);
+            }
+        }
     }
 }
 
@@ -6005,7 +6173,8 @@ impl Ctx<'_> {
     /// alias`. A qualifier matching no declared alias is a locally-knowable typo
     /// and is diagnosed at the reference, single-file and multi-file alike
     /// (#78 and the wider sites audit). One pass over every qualified reference
-    /// rather than a separate check per site.
+    /// rather than a separate check per site. The legacy dotted form is exempt
+    /// when its qualifier is a locally-bound value name (see `QRef::dotted`).
     fn check_undefined_import_aliases(&mut self) {
         let aliases: HashSet<&str> = self
             .module
@@ -6052,13 +6221,29 @@ impl Ctx<'_> {
                         name: &t.name,
                         span: a.span.merge(t.span),
                         collection: false,
+                        dotted: false,
                     });
                 }
             }
         }
 
+        // Value names the module binds, for the dotted-form exemption below.
+        let local_value_names = collect_local_value_names(self.module);
+
         for r in refs {
             if !aliases.contains(r.qualifier) {
+                // A dotted reference is a heuristic reread of member access
+                // (see `QRef::dotted`): when its qualifier is a value name the
+                // module binds, the expression navigates that binding's data
+                // (`properties.Status` on a `Map<String, Any>` field) and no
+                // alias is involved. A dotted qualifier bound nowhere still
+                // errors — that is the legacy `alias.TypeName` form with a
+                // missing use declaration. Slash-form references are never
+                // exempt: the parser only produces them where a module
+                // qualifier is meant.
+                if r.dotted && local_value_names.contains(r.qualifier) {
+                    continue;
+                }
                 self.push(
                     Diagnostic::error(
                         r.span,
