@@ -50,6 +50,21 @@ pub fn analyse(source: &str) -> ParseResult {
         !(d.message.contains("is jointly satisfiable")
             && first_backtick(&d.message).map_or(false, |n| overruled.contains(&n)))
     });
+
+    // A k-induction safety PROOF supersedes the preservation pass's weaker 1-step "can break invariant Y"
+    // note for the same invariant: the invariant is provably safe (just not 1-inductive), so the break was
+    // a false alarm. Drop it. (Arithmetic breaks read "can break arithmetic invariant" and are untouched.)
+    let proved_safe: std::collections::HashSet<String> = r
+        .diagnostics
+        .iter()
+        .filter(|d| d.message.contains("is SAFE (proved by") && d.message.contains("-induction)"))
+        .filter_map(|d| first_backtick(&d.message))
+        .collect();
+    if !proved_safe.is_empty() {
+        r.diagnostics.retain(|d| {
+            !proved_safe.iter().any(|y| d.message.contains(&format!("can break invariant `{y}`")))
+        });
+    }
     r
 }
 
@@ -519,48 +534,52 @@ pub fn bmc(module: &Module, src: &str) -> Vec<Diagnostic> {
         }
         let stamp = |e: &Expr, t: usize| rename_states(e, &|n: &str| state_names.contains(n).then(|| step_name(n, t)));
 
+        // One step of the transition relation at time `t`: exactly one action fires, its guard holds at
+        // t, its literal effects hold at t+1, and the frame equates every unmodified state across the step.
+        let mk_trans = |t: usize| -> Vec<Expr> {
+            let mut v = Vec::new();
+            let fire = |i: usize| Expr::Name(format!("fire@{t}#{i}"));
+            let mut some = fire(0);
+            for i in 1..acts.len() {
+                some = Expr::Binary { op: BinOp::Or, lhs: Box::new(some), rhs: Box::new(fire(i)) };
+            }
+            v.push(some);
+            for i in 0..acts.len() {
+                for j in (i + 1)..acts.len() {
+                    v.push(Expr::Unary { op: UnOp::Not, e: Box::new(Expr::Binary { op: BinOp::And, lhs: Box::new(fire(i)), rhs: Box::new(fire(j)) }) });
+                }
+            }
+            for (i, act) in acts.iter().enumerate() {
+                let imp = |body: Expr| Expr::Binary { op: BinOp::Implies, lhs: Box::new(fire(i)), rhs: Box::new(body) };
+                if let Some(g) = &act.guard {
+                    v.push(imp(stamp(g, t)));
+                }
+                for (a, pol) in &act.writes {
+                    let at = stamp(a, t + 1);
+                    v.push(imp(if *pol { at } else { Expr::Unary { op: UnOp::Not, e: Box::new(at) } }));
+                }
+                for (name, atom) in &atoms {
+                    if !act.modified.contains(name) {
+                        v.push(imp(Expr::Binary { op: BinOp::Eq, lhs: Box::new(stamp(atom, t + 1)), rhs: Box::new(stamp(atom, t)) }));
+                    }
+                }
+            }
+            v
+        };
+
         for (iname, inv) in &invs {
+            // (1) BMC: search for a concrete reachable counterexample, shortest first.
+            let mut counterexample = false;
             'depth: for k in 1..=BMC_MAX {
                 let mut cx: Vec<Expr> = Vec::new();
-                // init@0
                 for (a, pol) in &init_lits {
                     let at = stamp(a, 0);
                     cx.push(if *pol { at } else { Expr::Unary { op: UnOp::Not, e: Box::new(at) } });
                 }
-                // transitions 0..k-1
                 for t in 0..k {
-                    let fire = |i: usize| Expr::Name(format!("fire@{t}#{i}"));
-                    let mut some = fire(0);
-                    for i in 1..acts.len() {
-                        some = Expr::Binary { op: BinOp::Or, lhs: Box::new(some), rhs: Box::new(fire(i)) };
-                    }
-                    cx.push(some);
-                    for i in 0..acts.len() {
-                        for j in (i + 1)..acts.len() {
-                            cx.push(Expr::Unary {
-                                op: UnOp::Not,
-                                e: Box::new(Expr::Binary { op: BinOp::And, lhs: Box::new(fire(i)), rhs: Box::new(fire(j)) }),
-                            });
-                        }
-                    }
-                    for (i, act) in acts.iter().enumerate() {
-                        let imp = |body: Expr| Expr::Binary { op: BinOp::Implies, lhs: Box::new(fire(i)), rhs: Box::new(body) };
-                        if let Some(g) = &act.guard {
-                            cx.push(imp(stamp(g, t)));
-                        }
-                        for (a, pol) in &act.writes {
-                            let at = stamp(a, t + 1);
-                            cx.push(imp(if *pol { at } else { Expr::Unary { op: UnOp::Not, e: Box::new(at) } }));
-                        }
-                        for (name, atom) in &atoms {
-                            if !act.modified.contains(name) {
-                                cx.push(imp(Expr::Binary { op: BinOp::Eq, lhs: Box::new(stamp(atom, t + 1)), rhs: Box::new(stamp(atom, t)) }));
-                            }
-                        }
-                    }
+                    cx.extend(mk_trans(t));
                 }
                 cx.push(Expr::Unary { op: UnOp::Not, e: Box::new(stamp(inv, k)) });
-
                 let refs: Vec<&Expr> = cx.iter().collect();
                 if let Some(m) = crate::sat::satisfiable(&refs, &bnames) {
                     let mut trace = Vec::new();
@@ -579,7 +598,37 @@ pub fn bmc(module: &Module, src: &str) -> Vec<Diagnostic> {
                             trace.join(" -> ")
                         ),
                     ));
+                    counterexample = true;
                     break 'depth;
+                }
+            }
+            if counterexample {
+                continue;
+            }
+            // (2) k-INDUCTION: no bounded counterexample, so try to PROVE the invariant safe unboundedly.
+            // Step case at length kk: no path of kk transitions where the invariant holds in the first kk
+            // states but fails at the (kk+1)-th. With the base case (BMC found no violation up to BMC_MAX
+            // >= kk), UNSAT of the step case proves the invariant holds in every reachable state. kk=1 is
+            // ordinary 1-induction, which the preservation pass already reports as INDUCTIVE, so only the
+            // stronger kk>=2 proof is announced here (and it supersedes preservation's 1-step break note).
+            for kk in 1..=BMC_MAX {
+                let mut step: Vec<Expr> = Vec::new();
+                for t in 0..kk {
+                    step.extend(mk_trans(t));
+                }
+                for j in 0..kk {
+                    step.push(stamp(inv, j));
+                }
+                step.push(Expr::Unary { op: UnOp::Not, e: Box::new(stamp(inv, kk)) });
+                let refs: Vec<&Expr> = step.iter().collect();
+                if crate::sat::satisfiable(&refs, &bnames).is_none() {
+                    if kk >= 2 {
+                        out.push(Diagnostic::warning(
+                            d.span,
+                            format!("invariant `{iname}` in `{}` is SAFE (proved by {kk}-induction): no reachable state violates it, though it is not 1-inductive. It holds in every reachable state.", d.name),
+                        ));
+                    }
+                    break;
                 }
             }
         }
@@ -1212,6 +1261,18 @@ mod tests {
         let bad = "-- allium: 4\ncomponent Pay\n  entity P\n  observable state authed(P) : bool\n  observable state captured(P) : bool\n  init means not authed(p) and not captured(p)\n  action authorize\n    requires not authed(p)\n    ensures authed(p)\n  action capture\n    ensures captured(p)\n  invariant no_cap means captured(p) implies authed(p)\nend\n";
         assert!(any(bad, "REACHABLY VIOLATED"), "{:?}", msgs(bad));
         assert!(any(bad, "1 step"), "should be a one-step trace: {:?}", msgs(bad));
+    }
+
+    #[test]
+    fn k_induction_proves_a_non_one_inductive_but_safe_invariant() {
+        // `r implies p` is safe but not 1-inductive: `setr` breaks it from p=F,q=T, which is unreachable
+        // (q is only set by `advance`, which requires p). No helper invariant is declared, so conjunction-
+        // strengthening cannot prove it — only 2-induction (one step back forces p=T). The 1-step break
+        // must be suppressed and replaced by the k-induction safety proof; no reachable counterexample.
+        let src = "-- allium: 4\ncomponent Staged\n  entity S\n  observable state p(S) : bool\n  observable state q(S) : bool\n  observable state r(S) : bool\n  init means not p(s) and not q(s) and not r(s)\n  action start\n    requires not p(s)\n    ensures p(s)\n  action advance\n    requires p(s) and not q(s)\n    ensures q(s)\n  action setr\n    requires q(s) and not r(s)\n    ensures r(s)\n  invariant r_implies_p means r(s) implies p(s)\nend\n";
+        assert!(any(src, "SAFE (proved by 2-induction)"), "{:?}", msgs(src));
+        assert!(!any(src, "can break invariant `r_implies_p`"), "the 1-step break must be superseded: {:?}", msgs(src));
+        assert!(!any(src, "REACHABLY VIOLATED"), "no reachable counterexample exists: {:?}", msgs(src));
     }
 
     #[test]
