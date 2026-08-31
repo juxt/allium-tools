@@ -34,6 +34,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut preservation(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source));
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
+    r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
     // "jointly satisfiable" while the (stronger) arithmetic tier reports it CONTRADICTORY or
     // VACUOUSLY. That dual message is misleading and the elicit gate reads it. The arithmetic
@@ -361,7 +362,7 @@ fn simplify(e: &Expr) -> Expr {
 }
 
 /// Present the canonical entity `_e` as a readable `e` in a diagnostic (cosmetic only; matching uses `_e`).
-fn pretty(s: &str) -> String {
+pub(crate) fn pretty(s: &str) -> String {
     s.replace(ENT, "e")
 }
 
@@ -371,7 +372,7 @@ fn pretty(s: &str) -> String {
 const ENT: &str = "_e";
 
 /// Collect entity-variable names: quantifier-bound variables and bare-name arguments of applications.
-fn collect_entity_vars(e: &Expr, out: &mut HashSet<String>) {
+pub(crate) fn collect_entity_vars(e: &Expr, out: &mut HashSet<String>) {
     match e {
         Expr::Quant { vars, body, .. } | Expr::Sum { vars, body, .. } => {
             out.extend(vars.iter().cloned());
@@ -403,7 +404,7 @@ fn collect_entity_vars(e: &Expr, out: &mut HashSet<String>) {
 }
 
 /// Rename every name in `vars` to the canonical entity `ENT`.
-fn rename_entity(e: &Expr, vars: &HashSet<String>) -> Expr {
+pub(crate) fn rename_entity(e: &Expr, vars: &HashSet<String>) -> Expr {
     match e {
         Expr::Name(n) if vars.contains(n) => Expr::Name(ENT.into()),
         Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(rename_entity(e, vars)) },
@@ -441,7 +442,7 @@ fn checkable_invariant(inv: &Expr, bool_base: &HashSet<String>, obs: &HashSet<St
 }
 
 /// True if `e` contains an explicit quantifier or aggregate (deferred by the preservation check).
-fn has_quant(e: &Expr) -> bool {
+pub(crate) fn has_quant(e: &Expr) -> bool {
     match e {
         Expr::Quant { .. } | Expr::Sum { .. } => true,
         Expr::Binary { lhs, rhs, .. } => has_quant(lhs) || has_quant(rhs),
@@ -453,47 +454,49 @@ fn has_quant(e: &Expr) -> bool {
     }
 }
 
-/// Collect state names written by `ensures`: an observable appearing bare (outside `old`).
-fn collect_writes(e: &Expr, in_old: bool, state: &HashSet<String>, out: &mut HashSet<String>) {
+/// Collect the state observables an `ensures` WRITES, understanding assignment form. A conjunct is a
+/// write of `X` when it is a bare state app `X` (sets it true), `not X` (false), or an equation `X = e`
+/// (X is the target; the right-hand side is a READ, not a write). This distinction matters for arithmetic
+/// effects like `balance(a) = old(balance(a)) - amount(a)`, where `amount` on the RHS is read, not written.
+/// The `in_old` parameter is retained for signature compatibility and ignored (writes are top-level).
+pub(crate) fn collect_writes(e: &Expr, _in_old: bool, state: &HashSet<String>, out: &mut HashSet<String>) {
+    let head_name = |x: &Expr| -> Option<String> {
+        match x {
+            Expr::App { head, .. } => match &**head {
+                Expr::Name(h) if state.contains(h) => Some(h.clone()),
+                _ => None,
+            },
+            Expr::Field { name, .. } if state.contains(name) => Some(name.clone()),
+            Expr::Name(n) if state.contains(n) => Some(n.clone()),
+            _ => None,
+        }
+    };
     match e {
-        Expr::Unary { op: UnOp::Old, e } => collect_writes(e, true, state, out),
-        Expr::Unary { e, .. } => collect_writes(e, in_old, state, out),
-        Expr::App { head, args } => {
-            if let Expr::Name(h) = &**head {
-                if !in_old && state.contains(h) {
-                    out.insert(h.clone());
-                }
-            }
-            collect_writes(head, in_old, state, out);
-            args.iter().for_each(|a| collect_writes(a, in_old, state, out));
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            collect_writes(lhs, false, state, out);
+            collect_writes(rhs, false, state, out);
         }
-        Expr::Field { base, name } => {
-            if !in_old && state.contains(name) {
-                out.insert(name.clone());
-            }
-            collect_writes(base, in_old, state, out);
-        }
-        Expr::Name(n) => {
-            if !in_old && state.contains(n) {
-                out.insert(n.clone());
+        Expr::Unary { op: UnOp::Not, e } => {
+            if let Some(n) = head_name(e) {
+                out.insert(n);
             }
         }
-        Expr::Binary { lhs, rhs, .. } => {
-            collect_writes(lhs, in_old, state, out);
-            collect_writes(rhs, in_old, state, out);
+        Expr::Binary { op: BinOp::Eq, lhs, .. } => {
+            if let Some(n) = head_name(lhs) {
+                out.insert(n);
+            }
         }
-        Expr::Cond { cond, then_, els } => {
-            collect_writes(cond, in_old, state, out);
-            collect_writes(then_, in_old, state, out);
-            collect_writes(els, in_old, state, out);
+        _ => {
+            if let Some(n) = head_name(e) {
+                out.insert(n);
+            }
         }
-        _ => {}
     }
 }
 
 /// Rewrite `e` to its post-state reading: an observable in `modified`, appearing outside `old`, is
 /// primed (`X` -> `X'`); `old(X)` is stripped to the pre reading `X`; everything else is unchanged.
-fn prime(e: &Expr, modified: &HashSet<String>, in_old: bool) -> Expr {
+pub(crate) fn prime(e: &Expr, modified: &HashSet<String>, in_old: bool) -> Expr {
     match e {
         Expr::Unary { op: UnOp::Old, e } => prime(e, modified, true),
         Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(prime(e, modified, in_old)) },
@@ -524,7 +527,7 @@ fn prime(e: &Expr, modified: &HashSet<String>, in_old: bool) -> Expr {
 }
 
 /// Does `e` reference any name in `names` (as an application head, field, or bare name)?
-fn mentions_any(e: &Expr, names: &HashSet<String>) -> bool {
+pub(crate) fn mentions_any(e: &Expr, names: &HashSet<String>) -> bool {
     match e {
         Expr::Name(n) => names.contains(n),
         Expr::App { head, args } => {
@@ -959,10 +962,21 @@ mod tests {
     }
 
     #[test]
-    fn preservation_is_silent_on_arithmetic_invariants() {
-        // An arithmetic invariant rests on opaque atoms; the check must NOT false-alarm on it.
-        let src = "-- allium: 4\ncomponent Bank\n  entity A\n  observable state bal(A) : Money\n  observable state amt(A) : Money\n  action withdraw\n    ensures bal(a) = old(bal(a)) - amt(a)\n  invariant non_negative means bal(a) >= 0\nend\n";
-        assert!(!any(src, "can break"), "{:?}", msgs(src));
+    fn arithmetic_preservation_catches_and_clears_via_lra() {
+        // The LRA tier catches value-safety: unguarded withdraw can drive balance below zero.
+        let bad = "-- allium: 4\ncomponent Bank\n  entity A\n  observable state bal(A) : Money\n  observable state amt(A) : Money\n  action withdraw\n    ensures bal(a) = old(bal(a)) - amt(a)\n  invariant non_negative means bal(a) >= 0\nend\n";
+        assert!(any(bad, "can break arithmetic invariant `non_negative`"), "{:?}", msgs(bad));
+        // Guarding it (requires amt <= bal) makes it safe — the simplex proves the post stays >= 0.
+        let good = "-- allium: 4\ncomponent Bank\n  entity A\n  observable state bal(A) : Money\n  observable state amt(A) : Money\n  action withdraw\n    requires amt(a) <= bal(a)\n    ensures bal(a) = old(bal(a)) - amt(a)\n  invariant non_negative means bal(a) >= 0\nend\n";
+        assert!(!any(good, "can break"), "{:?}", msgs(good));
+    }
+
+    #[test]
+    fn boolean_preservation_ignores_arithmetic_invariants() {
+        // The BOOLEAN preservation pass must stay silent on an arithmetic invariant (no opaque-atom
+        // false alarm); the LRA pass owns it. Assert no *boolean* break message is emitted.
+        let src = "-- allium: 4\ncomponent Bank\n  entity A\n  observable state bal(A) : Money\n  observable state amt(A) : Money\n  action withdraw\n    requires amt(a) <= bal(a)\n    ensures bal(a) = old(bal(a)) - amt(a)\n  invariant non_negative means bal(a) >= 0\nend\n";
+        assert!(!any(src, "can break invariant"), "boolean pass should be silent: {:?}", msgs(src));
     }
 
     #[test]

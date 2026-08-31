@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use crate::ast::{ItemKind, Module};
 use crate::diagnostic::Diagnostic;
@@ -77,6 +78,176 @@ pub fn arithmetic(module: &Module, src: &str) -> Vec<Diagnostic> {
         }
     }
     out
+}
+
+/// Arithmetic invariant preservation via the LRA tier. For each action and each LINEAR invariant, build
+/// the one-step verification condition and solve it with the simplex: `inv(pre) ∧ guard(pre) ∧ effect ∧
+/// ¬inv(post)`. A written numeric state `X` becomes a distinct post variable `X'`; the effect equations
+/// (`ensures`) link the two. If a case is satisfiable, the action can step from a good state to a state
+/// violating the invariant — a value-safety bug the boolean check cannot see (e.g. `withdraw` breaking
+/// `balance >= 0`). SOUND: the whole invariant, guard and effect must lower to linear constraints with no
+/// skipped (nonlinear) term; any skip abandons the pair rather than risk a false alarm.
+pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let mut st: HashMap<String, String> = HashMap::new();
+        for it in &d.items {
+            if matches!(it.kind, ItemKind::State | ItemKind::Given) {
+                if let (Some(n), Some(b)) = (&it.name, it.body) {
+                    st.insert(n.clone(), b.slice(src).trim().to_string());
+                }
+            }
+        }
+        let state_names: HashSet<String> =
+            d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
+
+        // Linear invariants, reduced to their entity-normalised quantifier-free body, with their
+        // constraint sets. Skip any with a nonlinear/unhandled term (a note) — unsound to reason about.
+        let mut invs: Vec<(String, Expr, Vec<Con>)> = Vec::new();
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
+            let (name, body) = match (&it.name, it.body) {
+                (Some(n), Some(b)) => (n.clone(), b),
+                _ => continue,
+            };
+            let inv = match arith_reduce(&parse_predicate(body.slice(src)).0) {
+                Some(e) => e,
+                None => continue,
+            };
+            let (cons, notes) = ground(&inv, &st);
+            if notes || cons.is_empty() {
+                continue;
+            }
+            invs.push((name, inv, cons));
+        }
+        if invs.is_empty() {
+            continue;
+        }
+
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
+            let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
+            let ensures_raw = match it.ensures {
+                Some(sp) => parse_predicate(sp.slice(src)).0,
+                None => continue,
+            };
+            let guard_raw = it.requires.map(|sp| parse_predicate(sp.slice(src)).0);
+            // One entity only (an action over two distinct entities cannot collapse soundly).
+            let mut ev = HashSet::new();
+            crate::analyse::collect_entity_vars(&ensures_raw, &mut ev);
+            if let Some(g) = &guard_raw {
+                crate::analyse::collect_entity_vars(g, &mut ev);
+            }
+            if ev.len() > 1 {
+                continue;
+            }
+            let ensures = crate::analyse::rename_entity(&ensures_raw, &ev);
+            let guard = guard_raw.map(|g| crate::analyse::rename_entity(&g, &ev));
+            let mut modified = HashSet::new();
+            crate::analyse::collect_writes(&ensures, false, &state_names, &mut modified);
+            let modified_numeric: HashSet<String> =
+                modified.iter().filter(|m| st.get(*m).map(|t| numeric(t)).unwrap_or(false)).cloned().collect();
+            if modified_numeric.is_empty() {
+                continue;
+            }
+            // The primed post state is a fresh numeric var of the same type.
+            let mut st2 = st.clone();
+            for m in &modified_numeric {
+                if let Some(t) = st.get(m).cloned() {
+                    st2.insert(format!("{m}'"), t);
+                }
+            }
+            // Effect: prime the written state in `ensures`, then lower. Any skip => abandon this action.
+            let effect_expr = crate::analyse::prime(&ensures, &modified_numeric, false);
+            let (effect_cons, effect_notes) = ground(&effect_expr, &st2);
+            if effect_notes || effect_cons.is_empty() {
+                continue;
+            }
+            let guard_cons = match &guard {
+                Some(g) => {
+                    let (c, n) = ground(g, &st2);
+                    if n {
+                        continue; // an unmodelled guard could hide a real constraint -> skip, don't false-alarm
+                    }
+                    c
+                }
+                None => Vec::new(),
+            };
+
+            for (iname, inv, pre_cons) in &invs {
+                if !crate::analyse::mentions_any(inv, &modified_numeric) {
+                    continue;
+                }
+                let inv_post = crate::analyse::prime(inv, &modified_numeric, false);
+                let (post_cons, post_notes) = ground(&inv_post, &st2);
+                if post_notes || post_cons.is_empty() {
+                    continue;
+                }
+                // ¬inv(post): at least one post constraint is violated. Try each, case-splitting Eq.
+                let mut witness: Option<String> = None;
+                'search: for pc in &post_cons {
+                    for neg in negate_con(pc) {
+                        let mut q = pre_cons.clone();
+                        q.extend(guard_cons.iter().cloned());
+                        q.extend(effect_cons.iter().cloned());
+                        q.push(neg);
+                        if let Outcome::Sat(m) = solve(&q) {
+                            witness = Some(schedule(&m, &st2));
+                            break 'search;
+                        }
+                    }
+                }
+                if let Some(w) = witness {
+                    out.push(Diagnostic::warning(
+                        it.span,
+                        crate::analyse::pretty(&format!(
+                            "action `{aname}` in `{}` can break arithmetic invariant `{iname}`: from a state satisfying it (e.g. {}), the action reaches a state that violates it. Add a guard.",
+                            d.name, w
+                        )),
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Reduce an invariant to the entity-normalised quantifier-free body the LRA preservation check runs:
+/// a plain invariant, or a single-variable `every p :: body` (a universal safety property). Existential,
+/// multi-variable, and nested-quantifier invariants are out of scope (None).
+fn arith_reduce(inv: &Expr) -> Option<Expr> {
+    let body = match inv {
+        Expr::Quant { q: Quant::Every, vars, body, .. } if vars.len() == 1 && !crate::analyse::has_quant(body) => (**body).clone(),
+        _ if !crate::analyse::has_quant(inv) => inv.clone(),
+        _ => return None,
+    };
+    let mut ev = HashSet::new();
+    crate::analyse::collect_entity_vars(&body, &mut ev);
+    if ev.len() > 1 {
+        return None;
+    }
+    Some(crate::analyse::rename_entity(&body, &ev))
+}
+
+/// Lower a predicate to linear constraints. Returns (constraints, any-skipped): the flag is true if any
+/// comparison/term could not be linearised, in which case the caller must not reason from the result.
+fn ground(e: &Expr, st: &HashMap<String, String>) -> (Vec<Con>, bool) {
+    let mut cons = Vec::new();
+    let mut notes = Vec::new();
+    let mut env = HashMap::new();
+    emit(e, &mut env, st, "vc", &mut cons, &mut notes);
+    (cons, !notes.is_empty())
+}
+
+/// The negation of a single constraint `lin REL 0`, as a list of alternative constraints (an Eq negation
+/// splits into two: `lin < 0` or `lin > 0`). Each alternative is checked as a separate query.
+fn negate_con(c: &Con) -> Vec<Con> {
+    match c.rel {
+        Rel::Le => vec![Con::new(c.lin.scale(Rat::int(-1)), Rel::Lt, c.label.clone())], // ¬(l≤0) = l>0 = -l<0
+        Rel::Lt => vec![Con::new(c.lin.scale(Rat::int(-1)), Rel::Le, c.label.clone())], // ¬(l<0) = l≥0 = -l≤0
+        Rel::Eq => vec![
+            Con::new(c.lin.clone(), Rel::Lt, c.label.clone()),                          // l<0
+            Con::new(c.lin.scale(Rat::int(-1)), Rel::Lt, c.label.clone()),              // l>0
+        ],
+    }
 }
 
 /// Feasibility: jointly satisfiable? Pins the opening balance to the disbursed
