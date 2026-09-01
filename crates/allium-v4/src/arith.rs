@@ -277,6 +277,67 @@ fn finite_atom(e: &Expr, st: &HashMap<String, String>) -> Option<(String, String
     }
 }
 
+/// True if `e` is a ground numeric expression — a literal or arithmetic over literals, no state/given.
+fn ground_num(e: &Expr) -> bool {
+    match e {
+        Expr::Int(_) | Expr::Dec(_, _) => true,
+        Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, lhs, rhs } => {
+            ground_num(lhs) && ground_num(rhs)
+        }
+        Expr::Unary { e, .. } => ground_num(e),
+        _ => false,
+    }
+}
+
+/// Collect `state(..) = <constant>` assignments from a conjunction (an `init` body), mapping the state
+/// name to the constant it is pinned to. Used to substitute init's values into a bound to reveal the
+/// residual constraint on the remaining free inputs (the missing assumption).
+fn const_assignments(e: &Expr, out: &mut HashMap<String, Expr>) {
+    match e {
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            const_assignments(lhs, out);
+            const_assignments(rhs, out);
+        }
+        Expr::Binary { op: BinOp::Eq, lhs, rhs } if ground_num(rhs) => {
+            if let Some(h) = app_head(lhs) {
+                out.insert(h.to_string(), (**rhs).clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Substitute pinned state constants into an expression (replacing `state(..)` and bare `state`).
+fn subst_consts(e: &Expr, consts: &HashMap<String, Expr>) -> Expr {
+    if let Some(h) = app_head(e) {
+        if let Some(c) = consts.get(h) {
+            return c.clone();
+        }
+    }
+    match e {
+        Expr::Binary { op, lhs, rhs } => Expr::Binary {
+            op: op.clone(),
+            lhs: Box::new(subst_consts(lhs, consts)),
+            rhs: Box::new(subst_consts(rhs, consts)),
+        },
+        Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(subst_consts(e, consts)) },
+        other => other.clone(),
+    }
+}
+
+/// True if `e` still references a state/given observable (an application or field) — i.e. after
+/// substituting init constants, a residual free-input constraint remains (a real assumption, not a
+/// constant inequality).
+fn has_free_ref(e: &Expr) -> bool {
+    match e {
+        Expr::App { .. } | Expr::Field { .. } => true,
+        Expr::Binary { lhs, rhs, .. } => has_free_ref(lhs) || has_free_ref(rhs),
+        Expr::Unary { e, .. } => has_free_ref(e),
+        Expr::Name(n) => !matches!(n.as_str(), "true" | "false"),
+        _ => false,
+    }
+}
+
 /// Read a finite GUARD atom as `(obs, tag, positive)`: `obs = tag` and a bare flag are positive
 /// (`obs == tag`); `obs <> tag` and `not flag` are negated (`obs != tag`). Unlike [`finite_atom`], which
 /// reads a concrete assignment, a guard may be a not-equal condition (a disjunction over the other tags).
@@ -441,6 +502,8 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
             let (init_arith, init_notes) = ground(&strip_enum_conjuncts(&init, &st), &st);
             let mut init_states = HashSet::new();
             crate::analyse::collect_writes(&init, false, &state_names, &mut init_states);
+            let mut init_consts = HashMap::new();
+            const_assignments(&init, &mut init_consts);
             if !init_notes {
                 for (iname, conds, arith_guard, a) in &guarded {
                     // The guard is definitely active at init only if init pins each condition's observable
@@ -477,9 +540,18 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                     });
                     if violated {
                         let guard_desc = conds.iter().map(|(o, t, pos)| format!("{o} {} {t}", if *pos { "=" } else { "<>" })).collect::<Vec<_>>().join(" and ");
+                        // Substitute init's pinned constants into the bound: if a residual constraint over
+                        // free inputs remains, that is the assumption the spec RELIES ON but has not stated
+                        // — surface it so the user can add it (the elicit value).
+                        let residual = subst_consts(a, &init_consts);
+                        let hint = if has_free_ref(&residual) {
+                            format!(" It holds at init only if `{}` — state this assumption (e.g. a `where` refinement on the input).", crate::analyse::pretty(&crate::analyse::canon(&residual)))
+                        } else {
+                            String::new()
+                        };
                         out.push(Diagnostic::warning(
                             d.span,
-                            format!("`init` in `{}` does not establish state-guarded invariant `{iname}`: the initial state has `{guard_desc}` but can violate the arithmetic bound.", d.name),
+                            format!("`init` in `{}` does not establish state-guarded invariant `{iname}`: the initial state has `{guard_desc}` but can violate the arithmetic bound.{hint}", d.name),
                         ));
                     } else {
                         established.insert(iname.clone());
@@ -1591,6 +1663,11 @@ mod tests {
         // establish, so no false alarm.
         let free = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state count(O) : Number\n  init means outcome(o) = success\n  invariant ok means outcome(o) = success implies count(o) >= 0\n  action noop\n    requires outcome(o) = failure\n    ensures count(o) = count(o)\nend\n";
         assert!(!any(&egp(free), "does not establish state-guarded"), "free input at init: {:#?}", egp(free));
+
+        // Assumption surfacing (elicit): init pins `wm = -1` but the bound `wm <= off` needs `off >= -1`,
+        // an input the spec has not constrained; the diagnostic names the missing assumption.
+        let elicit = "-- allium: 4\ncomponent L\n  entity S\n  observable state status(S) : { healthy | corrupted }\n  observable state wm(S) : Number\n  given off : Number\n  invariant b means status(s) = healthy implies wm(s) <= off\n  init means status(s) = healthy and wm(s) = 0 - 1\n  action advance\n    requires status(s) = healthy and wm(s) < off\n    ensures wm(s) = off\nend\n";
+        assert!(any(&egp(elicit), "holds at init only if `0 - 1 <= off`"), "{:#?}", egp(elicit));
 
         // Established by init AND preserved -> the stronger INDUCTIVE verdict.
         let ind = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state count(O) : Number\n  init means outcome(o) = success and count(o) = 0\n  invariant ok means outcome(o) = success implies count(o) >= 0\n  action inc\n    requires outcome(o) = success\n    ensures count(o) = count(o) + 1\nend\n";
