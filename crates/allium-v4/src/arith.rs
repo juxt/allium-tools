@@ -746,10 +746,27 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                 if let Some(w) = witness {
                     broken.insert(iname.clone());
                     let guard_desc = conds.iter().map(|(o, t, pos)| format!("{o} {} {t}", if *pos { "=" } else { "<>" })).collect::<Vec<_>>().join(" and ");
+                    // When the bound was not guaranteed before the action (a transition INTO the guard),
+                    // the precise fix is to state the bound for the source state too. Name it.
+                    let mut src_conds = Vec::new();
+                    let mut src_arith = Vec::new();
+                    if let Some(g) = &guard {
+                        split_ante(g, &st, &mut src_conds, &mut src_arith);
+                    }
+                    let src_desc = src_conds
+                        .iter()
+                        .map(|(o, t, pos)| format!("{o} {} {t}", if *pos { "=" } else { "<>" }))
+                        .collect::<Vec<_>>()
+                        .join(" and ");
+                    let fix = if !a_pre && !src_desc.is_empty() {
+                        format!(" To fix, state the bound for the source state — add `{} implies {}` — or guard the action.", src_desc, crate::analyse::canon(a))
+                    } else {
+                        " Guard the action or maintain the bound.".to_string()
+                    };
                     out.push(Diagnostic::warning(
                         it.span,
                         crate::analyse::pretty(&format!(
-                            "action `{aname}` in `{}` can break state-guarded invariant `{iname}`: with `{guard_desc}` holding afterwards, the arithmetic bound is violated (e.g. {w}). Guard the action or maintain the bound.",
+                            "action `{aname}` in `{}` can break state-guarded invariant `{iname}`: with `{guard_desc}` holding afterwards, the arithmetic bound is violated (e.g. {w}).{fix}",
                             d.name
                         )),
                     ));
@@ -1920,6 +1937,8 @@ mod tests {
         assert!(!any(&egp(&under_pending), "can break state-guarded"), "guard inactive under pending: {:#?}", egp(&under_pending));
         let into_active = format!("{nhdr}  action activate\n    requires phase(o) = pending\n    ensures phase(o) = active and bal(o) = 0 - 1\nend\n");
         assert!(any(&egp(&into_active), "`activate` in `E` can break state-guarded invariant `nonneg`"), "turning the guard on must respect it: {:#?}", egp(&into_active));
+        // The break on a transition INTO the guard suggests the precise missing invariant (source-state bound).
+        assert!(any(&egp(&into_active), "add `phase = pending implies bal(e) >= 0`"), "elicit suggestion: {:#?}", egp(&into_active));
         let out_to_pending = format!("{nhdr}  action reset\n    requires phase(o) = active\n    ensures phase(o) = pending and bal(o) = 0 - 1\nend\n");
         assert!(!any(&egp(&out_to_pending), "can break state-guarded"), "guard off after -> exempt: {:#?}", egp(&out_to_pending));
 
