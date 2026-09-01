@@ -143,6 +143,10 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         for n in bool_base.clone() {
             bnames.insert(format!("{n}'"));
         }
+        // Enum observables and their value sets (with primed post versions), so the encoder makes an enum
+        // status a one-of-N state, and enum-equality invariants (`status = shipped`) are checkable.
+        let evals = enum_values_of(d, src, true);
+        let enum_names: HashSet<String> = evals.keys().cloned().collect();
         // Each invariant reduced to an entity-normalised boolean body (plain, or a single-variable
         // universal). Arithmetic, multi-entity, and existential invariants are skipped (sound).
         let invariants: Vec<(String, Expr)> = d
@@ -152,7 +156,7 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
             .filter_map(|it| {
                 let sp = it.body?;
                 let inv = parse_predicate(sp.slice(src)).0;
-                checkable_invariant(&inv, &bool_base, &all_obs)
+                checkable_invariant_e(&inv, &bool_base, &all_obs, &enum_names)
                     .map(|e| (it.name.clone().unwrap_or_else(|| "<anon>".into()), e))
             })
             .collect();
@@ -173,7 +177,7 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                 let text = text.trim().strip_prefix("means").unwrap_or(text);
                 parse_predicate(text).0
             })
-            .filter(|e| boolean_fragment(e, &bool_base, &all_obs))
+            .filter(|e| boolean_fragment_e(e, &bool_base, &all_obs, &enum_names))
             .map(|e| {
                 let mut ev = HashSet::new();
                 collect_entity_vars(&e, &mut ev);
@@ -190,7 +194,7 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                 // init-violation from treating `old settled` as a free atom.
                 let inv0 = strip_old(inv);
                 let neg = Expr::Unary { op: UnOp::Not, e: Box::new(inv0) };
-                if let Some(m) = crate::sat::satisfiable(&[init, &neg], &bnames) {
+                if let Some(m) = crate::sat::satisfiable_enum(&[init, &neg], &bnames, &evals) {
                     established[i] = false;
                     let w: Vec<String> = m.iter().map(|(k, v)| format!("{k}={}", if *v { "T" } else { "F" })).collect();
                     out.push(Diagnostic::warning(
@@ -243,7 +247,7 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                 if let Some(g) = &guard {
                     es.push(g);
                 }
-                if let Some(m) = crate::sat::satisfiable(&es, &bnames) {
+                if let Some(m) = crate::sat::satisfiable_enum(&es, &bnames, &evals) {
                     broken[i] = true;
                     let pre: Vec<String> = m
                         .iter()
@@ -284,24 +288,45 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
 /// operators or literals, no ordering comparisons, every equality between two booleans, and every
 /// observable it applies is boolean-typed. Anything else would rest on opaque atoms and could false-alarm.
 fn boolean_fragment(e: &Expr, bool_names: &HashSet<String>, obs: &HashSet<String>) -> bool {
+    boolean_fragment_e(e, bool_names, obs, &HashSet::new())
+}
+
+/// True if `e` is `enum_obs(args) = value` (or `<>`) — an equality between a declared enum observable and
+/// a bare value name, which is a decidable proposition (the SAT engine adds the exactly-one-value axiom).
+fn is_enum_eq(e: &Expr, enum_names: &HashSet<String>) -> bool {
+    let head = |x: &Expr| match x {
+        Expr::App { head, .. } => matches!(&**head, Expr::Name(h) if enum_names.contains(h)),
+        Expr::Name(n) => enum_names.contains(n),
+        _ => false,
+    };
+    matches!(e, Expr::Binary { op: BinOp::Eq | BinOp::Ne, lhs, rhs }
+        if head(lhs) && matches!(&**rhs, Expr::Name(_)))
+}
+
+/// As [`boolean_fragment`], additionally admitting enum-observable equalities `status(e) = paid` as
+/// decidable atoms (the SAT engine constrains an enum observable to exactly one value).
+fn boolean_fragment_e(e: &Expr, bool_names: &HashSet<String>, obs: &HashSet<String>, enum_names: &HashSet<String>) -> bool {
+    if is_enum_eq(e, enum_names) {
+        return true;
+    }
     match e {
         Expr::Int(_) | Expr::Dec(_, _) | Expr::Cond { .. } | Expr::Quant { .. } | Expr::Sum { .. } => false,
         Expr::Name(_) => true, // a bound entity variable or bool literal
         Expr::App { head, args } => {
             let head_ok = match &**head {
                 Expr::Name(h) => !obs.contains(h) || bool_names.contains(h),
-                _ => boolean_fragment(head, bool_names, obs),
+                _ => boolean_fragment_e(head, bool_names, obs, enum_names),
             };
-            head_ok && args.iter().all(|a| boolean_fragment(a, bool_names, obs))
+            head_ok && args.iter().all(|a| boolean_fragment_e(a, bool_names, obs, enum_names))
         }
-        Expr::Field { name, base } => (!obs.contains(name) || bool_names.contains(name)) && boolean_fragment(base, bool_names, obs),
-        Expr::Unary { e, .. } => boolean_fragment(e, bool_names, obs),
+        Expr::Field { name, base } => (!obs.contains(name) || bool_names.contains(name)) && boolean_fragment_e(base, bool_names, obs, enum_names),
+        Expr::Unary { e, .. } => boolean_fragment_e(e, bool_names, obs, enum_names),
         Expr::Binary { op, lhs, rhs } => match op {
-            BinOp::And | BinOp::Or | BinOp::Implies => boolean_fragment(lhs, bool_names, obs) && boolean_fragment(rhs, bool_names, obs),
+            BinOp::And | BinOp::Or | BinOp::Implies => boolean_fragment_e(lhs, bool_names, obs, enum_names) && boolean_fragment_e(rhs, bool_names, obs, enum_names),
             BinOp::Eq | BinOp::Ne => {
                 crate::sat::is_bool_valued(lhs, bool_names) && crate::sat::is_bool_valued(rhs, bool_names)
-                    && boolean_fragment(lhs, bool_names, obs)
-                    && boolean_fragment(rhs, bool_names, obs)
+                    && boolean_fragment_e(lhs, bool_names, obs, enum_names)
+                    && boolean_fragment_e(rhs, bool_names, obs, enum_names)
             }
             _ => false, // ordering comparisons and arithmetic operators
         },
@@ -659,7 +684,7 @@ fn nonlinear_reason(e: &Expr, num: &HashSet<String>) -> Option<String> {
 
 /// Classify an invariant by the rung it needs. Existential quantifiers and 3+ entity variables are honestly
 /// reported as not-statically-covered; a nonlinear term names its shape; otherwise boolean or linear.
-fn classify(inv: &Expr, bool_base: &HashSet<String>, all_obs: &HashSet<String>, num: &HashSet<String>) -> Tier {
+fn classify(inv: &Expr, bool_base: &HashSet<String>, all_obs: &HashSet<String>, num: &HashSet<String>, enum_names: &HashSet<String>) -> Tier {
     // Peel universal quantifiers; an existential anywhere is beyond the bounded static fragment.
     if contains_existential(inv) {
         return Tier::NotStatic("an existential quantifier (`some`/`exists`)".into());
@@ -667,6 +692,11 @@ fn classify(inv: &Expr, bool_base: &HashSet<String>, all_obs: &HashSet<String>, 
     let (vars, body) = universal_body(inv).unwrap_or_else(|| (Vec::new(), inv.clone()));
     if vars.len() > 2 {
         return Tier::NotStatic(format!("{}-way quantification (static support covers up to two entities)", vars.len()));
+    }
+    // An enum-fragment invariant (booleans plus enum-value equalities) is decided by SAT with the
+    // exactly-one-value axiom, so it belongs at the boolean tier, not the arithmetic one.
+    if boolean_fragment_e(&body, bool_base, all_obs, enum_names) {
+        return Tier::Boolean;
     }
     if let Some(r) = nonlinear_reason(&body, num) {
         return Tier::NotStatic(r);
@@ -702,6 +732,7 @@ pub fn tier_report(module: &Module, src: &str) -> Vec<Diagnostic> {
         let all_obs: HashSet<String> =
             d.items.iter().filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given)).filter_map(|it| it.name.clone()).collect();
         let num = numeric_names_of(d, src);
+        let enum_names: HashSet<String> = enum_values_of(d, src, false).into_keys().collect();
         let invs: Vec<(String, Expr)> = d
             .items
             .iter()
@@ -715,7 +746,7 @@ pub fn tier_report(module: &Module, src: &str) -> Vec<Diagnostic> {
         let mut linear = Vec::new();
         let mut runtime = Vec::new();
         for (name, inv) in &invs {
-            match classify(inv, &bool_base, &all_obs, &num) {
+            match classify(inv, &bool_base, &all_obs, &num, &enum_names) {
                 Tier::Boolean => boolean.push(name.clone()),
                 Tier::LinearArith => linear.push(name.clone()),
                 Tier::NotStatic(reason) => runtime.push(format!("{name} ({reason})")),
@@ -1236,6 +1267,11 @@ pub(crate) fn rename_entity(e: &Expr, vars: &HashSet<String>) -> Expr {
 /// over a boolean body (a universal safety property). Multi-entity, `some`/`exists`, nested-quantifier,
 /// and arithmetic invariants are skipped (sound: the check simply says nothing about them).
 fn checkable_invariant(inv: &Expr, bool_base: &HashSet<String>, obs: &HashSet<String>) -> Option<Expr> {
+    checkable_invariant_e(inv, bool_base, obs, &HashSet::new())
+}
+
+/// As [`checkable_invariant`], additionally admitting enum-observable equalities as decidable atoms.
+fn checkable_invariant_e(inv: &Expr, bool_base: &HashSet<String>, obs: &HashSet<String>, enum_names: &HashSet<String>) -> Option<Expr> {
     let body = match inv {
         Expr::Quant { q, vars, body, .. } if vars.len() == 1 && !has_quant(body) => match q {
             Quant::Every => (**body).clone(),
@@ -1250,7 +1286,7 @@ fn checkable_invariant(inv: &Expr, bool_base: &HashSet<String>, obs: &HashSet<St
     if ev.len() > 1 {
         return None; // relates distinct entities; cannot collapse to one symbolic entity
     }
-    if !boolean_fragment(&body, bool_base, obs) {
+    if !boolean_fragment_e(&body, bool_base, obs, enum_names) {
         return None;
     }
     Some(rename_entity(&body, &ev))
@@ -2009,6 +2045,18 @@ mod tests {
         let src = "-- allium: 4\ncomponent F\n  entity I\n  observable state fee(I) : Money\n  observable state on(I) : bool\n  invariant cap means every i :: on(i) implies fee(i) <= 10\n  invariant floor means every i :: on(i) implies fee(i) >= 20\nend\n";
         assert!(any(src, "VACUO"), "{:?}", msgs(src));
         assert!(!any(src, "jointly satisfiable"), "{:?}", msgs(src));
+    }
+
+    #[test]
+    fn enum_state_lifecycle_preservation() {
+        // A lifecycle over an ENUM status (not boolean flags). The finality invariant is proven INDUCTIVE
+        // for a legal machine; a `reopen` action that regresses from `delivered` breaks it. The exactly-one
+        // axiom makes `status = a` and `status = b` mutually exclusive, so preservation reasons over it.
+        let ok = "-- allium: 4\ncomponent O\n  entity X\n  observable state status(X) : { created | paid | delivered }\n  init means status(x) = created\n  action pay\n    requires status(x) = created\n    ensures status(x) = paid\n  action deliver\n    requires status(x) = paid\n    ensures status(x) = delivered\n  invariant fin means old(status(x) = delivered) implies status(x) = delivered\nend\n";
+        assert!(any(ok, "`fin` in `O` is INDUCTIVE"), "{:?}", msgs(ok));
+        assert!(any(ok, "boolean tier: fin"), "enum invariant should be boolean tier: {:?}", msgs(ok));
+        let bad = "-- allium: 4\ncomponent O\n  entity X\n  observable state status(X) : { created | paid | delivered }\n  init means status(x) = created\n  action pay\n    requires status(x) = created\n    ensures status(x) = paid\n  action deliver\n    requires status(x) = paid\n    ensures status(x) = delivered\n  action reopen\n    requires status(x) = delivered\n    ensures status(x) = created\n  invariant fin means old(status(x) = delivered) implies status(x) = delivered\nend\n";
+        assert!(any(bad, "`reopen` in `O` can break invariant `fin`"), "{:?}", msgs(bad));
     }
 
     #[test]
