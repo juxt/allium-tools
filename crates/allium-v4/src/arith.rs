@@ -402,6 +402,9 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
         // whether the initial arithmetic state can still violate `A` (with the arithmetic guard). If so the
         // bound does not hold at init — the induction has no base. Only report when the finite guard is
         // definitely active at init, so an unpinned enum never yields a false alarm.
+        // `established` collects bounds init definitely establishes (checked and not violated), so that a
+        // bound both established and preserved earns the stronger INDUCTIVE verdict below.
+        let mut established: HashSet<String> = HashSet::new();
         if let Some(init_it) = d.items.iter().find(|it| it.kind == ItemKind::Init).and_then(|it| it.body) {
             let init_raw = parse_predicate(init_it.slice(src).trim().strip_prefix("means").unwrap_or(init_it.slice(src))).0;
             let mut iev = HashSet::new();
@@ -446,6 +449,8 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                             d.span,
                             format!("`init` in `{}` does not establish state-guarded invariant `{iname}`: the initial state has `{guard_desc}` but can violate the arithmetic bound.", d.name),
                         ));
+                    } else {
+                        established.insert(iname.clone());
                     }
                 }
             }
@@ -638,10 +643,17 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
         // An invariant every action engaged but none broke is preserved under its guard — a positive result.
         for (iname, _, _, _) in &guarded {
             if engaged.contains(iname) && !broken.contains(iname) {
-                out.push(Diagnostic::warning(
-                    d.span,
-                    format!("state-guarded invariant `{iname}` in `{}` is PRESERVED: every action maintains the arithmetic bound wherever its guard holds.", d.name),
-                ));
+                if established.contains(iname) {
+                    out.push(Diagnostic::warning(
+                        d.span,
+                        format!("state-guarded invariant `{iname}` in `{}` is INDUCTIVE: established by `init` and preserved by every action wherever its guard holds.", d.name),
+                    ));
+                } else {
+                    out.push(Diagnostic::warning(
+                        d.span,
+                        format!("state-guarded invariant `{iname}` in `{}` is PRESERVED: every action maintains the arithmetic bound wherever its guard holds.", d.name),
+                    ));
+                }
             }
         }
     }
@@ -1520,6 +1532,10 @@ mod tests {
         // establish, so no false alarm.
         let free = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state count(O) : Number\n  init means outcome(o) = success\n  invariant ok means outcome(o) = success implies count(o) >= 0\n  action noop\n    requires outcome(o) = failure\n    ensures count(o) = count(o)\nend\n";
         assert!(!any(&egp(free), "does not establish state-guarded"), "free input at init: {:#?}", egp(free));
+
+        // Established by init AND preserved -> the stronger INDUCTIVE verdict.
+        let ind = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state count(O) : Number\n  init means outcome(o) = success and count(o) = 0\n  invariant ok means outcome(o) = success implies count(o) >= 0\n  action inc\n    requires outcome(o) = success\n    ensures count(o) = count(o) + 1\nend\n";
+        assert!(any(&egp(ind), "state-guarded invariant `ok` in `E` is INDUCTIVE"), "{:#?}", egp(ind));
 
         // Guarded MONOTONICITY (an `old`-based bound under a guard): while healthy the watermark never
         // decreases. `retreat` breaks it; `advance` does not (old grounds to the pre-value).
