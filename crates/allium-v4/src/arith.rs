@@ -424,6 +424,13 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
             }
 
             'inv: for (iname, conds, a) in &guarded {
+                // The action must touch the invariant to be able to affect it — either a guard observable
+                // (which could turn the guard on) or a numeric state in the bound. Otherwise it is trivially
+                // preserved and should not be reported as engaged (a vacuous PRESERVED over-claims).
+                let touches = conds.iter().any(|(o, _)| modified.contains(o)) || crate::analyse::mentions_any(a, &modified);
+                if !touches {
+                    continue;
+                }
                 // Every guard condition must still hold after the action for the bound to be required
                 // (active_post), and all must have held before for A to be assumed to have held (a_pre).
                 let mut a_pre = true;
