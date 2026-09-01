@@ -38,6 +38,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source));
     r.diagnostics.append(&mut variant_access(&r.module, source));
+    r.diagnostics.append(&mut stuck_states(&r.module, source));
     r.diagnostics.append(&mut tier_report(&r.module, source));
     r.diagnostics.append(&mut refinement(&r.module, source));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
@@ -124,6 +125,82 @@ fn parse_variants(ty: &str) -> Option<Vec<(String, Vec<(String, String)>)>> {
         }
     }
     (out.len() >= 2).then_some(out)
+}
+
+/// Stuck-state (deadlock) detection for enum lifecycles. A reachable enum state from which NO action can
+/// fire, and which is not declared `terminal`, is a dead-end where the machine gets stuck. Unblocked by the
+/// terminal marker, which tells intended end states from bugs. Reachability is approximated by "some action
+/// (or init) puts the state there"; "can fire" is "some action's guard is satisfiable in that state".
+pub fn stuck_states(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let evals = enum_values_of(d, src, false);
+        // A lifecycle needs an enum state, actions, and a defined start; without `init` there is no
+        // reachability to speak of (and it screens out malformed decls).
+        if evals.is_empty()
+            || !d.items.iter().any(|it| it.kind == ItemKind::Init)
+            || !d.items.iter().any(|it| it.kind == ItemKind::Action)
+        {
+            continue;
+        }
+        let bnames = bool_names_of(d, src);
+        let all_obs: HashSet<String> = d.items.iter().filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given)).filter_map(|it| it.name.clone()).collect();
+
+        // Declared terminal state facts (canon of the normalised condition).
+        let terminals: HashSet<String> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Terminal)
+            .filter_map(|it| Some(canon(&normalize(&parse_predicate(it.body?.slice(src)).0))))
+            .collect();
+
+        // Reachability facts: state equalities established by init or any action's ensures.
+        let mut reachable: HashSet<String> = HashSet::new();
+        if let Some(init) = d.items.iter().find(|it| it.kind == ItemKind::Init).and_then(|it| it.body) {
+            let t = init.slice(src);
+            reachable.extend(discriminant_facts(&normalize(&parse_predicate(t.trim().strip_prefix("means").unwrap_or(t)).0)));
+        }
+        // Actions, normalised, with their guards; and their ensures contribute reachability targets.
+        let actions: Vec<Option<Expr>> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Action)
+            .map(|it| {
+                if let Some(sp) = it.ensures {
+                    reachable.extend(discriminant_facts(&normalize(&parse_predicate(sp.slice(src)).0)));
+                }
+                it.requires.map(|sp| normalize(&parse_predicate(sp.slice(src)).0))
+            })
+            .collect();
+
+        for (obs, vals) in &evals {
+            for v in vals {
+                // The state `obs(_e) = v`.
+                let cond = Expr::Binary {
+                    op: BinOp::Eq,
+                    lhs: Box::new(Expr::App { head: Box::new(Expr::Name(obs.clone())), args: vec![Expr::Name(ENT.into())] }),
+                    rhs: Box::new(Expr::Name(v.clone())),
+                };
+                let ckey = canon(&cond);
+                if terminals.contains(&ckey) || !reachable.contains(&ckey) {
+                    continue;
+                }
+                // Can any action fire here? `guard ∧ (obs = v)` satisfiable (a guardless action always can).
+                let can_fire = actions.iter().any(|g| match g {
+                    None => true,
+                    Some(guard) => crate::sat::satisfiable_enum(&[guard, &cond], &bnames, &evals).is_some(),
+                });
+                let _ = &all_obs;
+                if !can_fire {
+                    out.push(Diagnostic::warning(
+                        d.span,
+                        pretty(&format!("state `{ckey}` in `{}` is reachable but no action can fire from it, and it is not `terminal` — a stuck state. Add an action to leave it, or mark it `terminal`.", d.name)),
+                    ));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Correct-by-construction check for sum/variant state: a payload field may only be READ where its
@@ -2220,6 +2297,15 @@ mod tests {
         let src = "-- allium: 4\ncomponent F\n  entity I\n  observable state fee(I) : Money\n  observable state on(I) : bool\n  invariant cap means every i :: on(i) implies fee(i) <= 10\n  invariant floor means every i :: on(i) implies fee(i) >= 20\nend\n";
         assert!(any(src, "VACUO"), "{:?}", msgs(src));
         assert!(!any(src, "jointly satisfiable"), "{:?}", msgs(src));
+    }
+
+    #[test]
+    fn stuck_state_detection_respects_terminal() {
+        // `delivered` is reachable and no action leaves it: a stuck state — UNLESS declared `terminal`.
+        let stuck = "-- allium: 4\ncomponent O\n  entity X\n  observable state status(X) : { created | paid | delivered }\n  init means status(x) = created\n  action pay\n    requires status(x) = created\n    ensures status(x) = paid\n  action deliver\n    requires status(x) = paid\n    ensures status(x) = delivered\nend\n";
+        assert!(any(stuck, "state `status(e) = delivered` in `O` is reachable but no action can fire"), "{:?}", msgs(stuck));
+        let terminal = "-- allium: 4\ncomponent O\n  entity X\n  observable state status(X) : { created | paid | delivered }\n  init means status(x) = created\n  action pay\n    requires status(x) = created\n    ensures status(x) = paid\n  action deliver\n    requires status(x) = paid\n    ensures status(x) = delivered\n  terminal status(x) = delivered\nend\n";
+        assert!(!any(terminal, "stuck state"), "a declared terminal must not be flagged: {:?}", msgs(terminal));
     }
 
     #[test]
