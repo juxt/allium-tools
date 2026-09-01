@@ -1151,7 +1151,7 @@ fn comp_span() -> crate::span::Span {
 
 #[cfg(test)]
 mod tests {
-    use super::arithmetic;
+    use super::{arithmetic, enum_guarded_preservation};
     use crate::parser::parse;
 
     fn run(src: &str) -> Vec<String> {
