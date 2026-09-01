@@ -1931,6 +1931,16 @@ mod tests {
     }
 
     #[test]
+    fn arithmetic_transition_invariant_monotone() {
+        // `old(total) <= total` (a non-decreasing / append-only total). With `amt >= 0`, `record` (adds)
+        // preserves it and `rollback` (subtracts) breaks it. The arithmetic preservation path handles the
+        // two-state invariant via the same pre/post priming, soundly, with no init or BMC misfire.
+        let src = "-- allium: 4\ncomponent Meter\n  entity M\n  observable state total(M) : Money\n  observable state amt(M) : Money\n  action record\n    requires amt(m) >= 0\n    ensures total(m) = old(total(m)) + amt(m)\n  action rollback\n    requires amt(m) >= 0\n    ensures total(m) = old(total(m)) - amt(m)\n  invariant monotone means old(total(m)) <= total(m)\nend\n";
+        assert!(any(src, "`rollback` in `Meter` can break arithmetic invariant `monotone`"), "{:?}", msgs(src));
+        assert!(!any(src, "`record` in `Meter` can break"), "adding a non-negative amount preserves it: {:?}", msgs(src));
+    }
+
+    #[test]
     fn arithmetic_preservation_catches_and_clears_via_lra() {
         // The LRA tier catches value-safety: unguarded withdraw can drive balance below zero.
         let bad = "-- allium: 4\ncomponent Bank\n  entity A\n  observable state bal(A) : Money\n  observable state amt(A) : Money\n  action withdraw\n    ensures bal(a) = old(bal(a)) - amt(a)\n  invariant non_negative means bal(a) >= 0\nend\n";
