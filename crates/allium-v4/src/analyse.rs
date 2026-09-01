@@ -459,12 +459,20 @@ pub fn refinement(module: &Module, src: &str) -> Vec<Diagnostic> {
         if d.satisfies.is_empty() {
             continue;
         }
-        // X's own guarantees (normalised to one entity).
+        // X's own guarantees plus its `rely` assumptions (assume-guarantee: X promises its guarantees
+        // ASSUMING the environment provides its relies, so the relies are available as hypotheses). The
+        // rely names are tracked so the verdict can say the satisfaction is conditional on them.
         let x_guar: Vec<Expr> = d
             .items
             .iter()
-            .filter(|it| matches!(it.kind, ItemKind::Invariant | ItemKind::Axiom | ItemKind::Guarantee))
+            .filter(|it| matches!(it.kind, ItemKind::Invariant | ItemKind::Axiom | ItemKind::Guarantee | ItemKind::Rely))
             .filter_map(|it| Some(normalize(&parse_predicate(it.body?.slice(src)).0)))
+            .collect();
+        let x_relies: Vec<String> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Rely)
+            .filter_map(|it| it.name.clone())
             .collect();
         let x_bool = bool_names_of(d, src);
         // Numeric type map spanning X (and, added per-contract below, C), for linear-arithmetic promises.
@@ -546,7 +554,12 @@ pub fn refinement(module: &Module, src: &str) -> Vec<Diagnostic> {
                 } else {
                     " This holds wherever those invariants hold (a declarative component; no actions to check for preservation)."
                 };
-                out.push(Diagnostic::warning(d.span, format!("{kw} `{}` SATISFIES contract `{}`: its invariants entail every promise ({}).{}", d.name, cname, entailed.join(", "), footing)));
+                let assuming = if x_relies.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Assuming its rely-conditions ({}), which the environment must provide.", x_relies.join(", "))
+                };
+                out.push(Diagnostic::warning(d.span, format!("{kw} `{}` SATISFIES contract `{}`: its invariants entail every promise ({}).{}{}", d.name, cname, entailed.join(", "), assuming, footing)));
             } else {
                 for f in &failed {
                     out.push(Diagnostic::warning(d.span, format!("{kw} `{}` does NOT satisfy contract `{}`: promise `{}` is not entailed by its invariants — the detailed layer does not guarantee the abstract contract.", d.name, cname, f)));
@@ -1844,6 +1857,17 @@ mod tests {
         assert!(any(ok, "`Impl` SATISFIES contract `Settle`"), "{:?}", msgs(ok));
         let bad = "-- allium: 4\ncontract Settle\n  entity T\n  observable state settled(T) : bool\n  observable state funded(T) : bool\n  guarantee sf means settled(t) implies funded(t)\nend\ncomponent Impl satisfies (s : Settle)\n  entity T\n  observable state settled(T) : bool\n  observable state cash(T) : bool\n  observable state sec(T) : bool\n  given funded(t) means cash(t) and sec(t)\n  invariant a means settled(t) implies cash(t)\nend\n";
         assert!(any(bad, "does NOT satisfy contract `Settle`"), "{:?}", msgs(bad));
+    }
+
+    #[test]
+    fn refinement_assume_guarantee_via_rely() {
+        // Service delivers `ok` only ASSUMING the environment keeps it `up` (a rely). With the rely it
+        // satisfies the contract, and the verdict states the assumption; without it, `ok` is not entailed.
+        let ok = "-- allium: 4\ncontract Avail\n  entity R\n  observable state ok(R) : bool\n  guarantee dok means ok(r)\nend\ncomponent Svc satisfies (a : Avail)\n  entity R\n  observable state up(R) : bool\n  observable state ok(R) : bool\n  rely env_up means up(r)\n  invariant okwhenup means up(r) implies ok(r)\nend\n";
+        assert!(any(ok, "`Svc` SATISFIES contract `Avail`"), "{:?}", msgs(ok));
+        assert!(any(ok, "Assuming its rely-conditions (env_up)"), "verdict must state the assumption: {:?}", msgs(ok));
+        let bad = "-- allium: 4\ncontract Avail\n  entity R\n  observable state ok(R) : bool\n  guarantee dok means ok(r)\nend\ncomponent Svc satisfies (a : Avail)\n  entity R\n  observable state up(R) : bool\n  observable state ok(R) : bool\n  invariant okwhenup means up(r) implies ok(r)\nend\n";
+        assert!(any(bad, "does NOT satisfy contract `Avail`"), "without the rely, ok is not entailed: {:?}", msgs(bad));
     }
 
     #[test]
