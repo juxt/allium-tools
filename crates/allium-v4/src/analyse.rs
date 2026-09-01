@@ -2392,9 +2392,15 @@ pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
                     let mut gatoms = BTreeSet::new();
                     collect_atoms(&guard, &mut gatoms);
                     let reads_enum = gatoms.iter().any(|a| evals.keys().any(|e| a.contains(e.as_str())));
+                    // Writes at least one enum state — even if it also updates arithmetic state (`settle`
+                    // sets `phase = settled and paid = amount`). A lifecycle transition need not be a pure
+                    // enum assignment.
                     let writes_enum = it.ensures.is_some_and(|sp| {
-                        let mut w = Vec::new();
-                        enum_effect(&normalize(&parse_predicate(sp.slice(src)).0), &evals, &mut w) && !w.is_empty()
+                        let ens = normalize(&parse_predicate(sp.slice(src)).0);
+                        let mut w = HashSet::new();
+                        let enum_states: HashSet<String> = evals.keys().cloned().collect();
+                        collect_writes(&ens, false, &enum_states, &mut w);
+                        !w.is_empty()
                     });
                     reads_enum && writes_enum
                 });
@@ -2772,6 +2778,10 @@ mod tests {
         // A genuine decision table (actions derive an output from disjoint input guards) still is one.
         let table = "-- allium: 4\ncomponent Rate\n  entity L\n  observable state tier(L) : Number\n  observable state rate(L) : Number\n  action low\n    requires tier(l) < 100\n    ensures rate(l) = 2\n  action high\n    requires tier(l) >= 100\n    ensures rate(l) = 5\nend\n";
         assert!(any(table, "case-split in `Rate`"), "a decision table is still checked: {:?}", msgs(table));
+        // A transition that ALSO updates arithmetic state (`settle` sets phase AND paid) is still a
+        // lifecycle transition, not a case-split.
+        let mixed = "-- allium: 4\ncomponent S\n  entity T\n  observable state phase(T) : { pending | settled | failed }\n  observable state paid(T) : Money\n  observable state amount(T) : Money\n  init means phase(t) = pending\n  action settle\n    requires phase(t) = pending\n    ensures phase(t) = settled and paid(t) = amount(t)\n  action fail\n    requires phase(t) = pending\n    ensures phase(t) = failed\nend\n";
+        assert!(!any(mixed, "case-split"), "a transition with an arithmetic effect is not a case-split: {:?}", msgs(mixed));
     }
 
     #[test]
