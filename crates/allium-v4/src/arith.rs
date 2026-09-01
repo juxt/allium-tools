@@ -405,6 +405,24 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                 None => Vec::new(),
             };
 
+            // Other state-guarded bounds that are known to hold in the pre-state — those whose finite guard
+            // the action `requires` — are valid pre-hypotheses. Without them a bound that another invariant
+            // pins (e.g. `compacting implies wm <= off`, where `healthy implies wm <= off` already holds and
+            // the action requires `healthy`) would false-alarm. Sound: the action can only fire when its
+            // requires hold, so those guards hold before it.
+            let mut guarded_pre: Vec<Con> = Vec::new();
+            for (_, jconds, jbound) in &guarded {
+                let all_required = jconds.iter().all(|(o, t)| {
+                    guard.as_ref().and_then(|g| required_enum_tag(g, o, &st)).as_deref() == Some(t.as_str())
+                });
+                if all_required {
+                    let (c, n) = ground(jbound, &st);
+                    if !n {
+                        guarded_pre.extend(c);
+                    }
+                }
+            }
+
             'inv: for (iname, conds, a) in &guarded {
                 // Every guard condition must still hold after the action for the bound to be required
                 // (active_post), and all must have held before for A to be assumed to have held (a_pre).
@@ -444,6 +462,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                         if a_pre {
                             q.extend(a_pre_cons.clone());
                         }
+                        q.extend(guarded_pre.clone());
                         q.extend(uncond_pre.clone());
                         q.extend(guard_cons.clone());
                         q.extend(effect_cons.clone());
@@ -1323,6 +1342,13 @@ mod tests {
         assert!(any(&egp(&safe2), "state-guarded invariant `ok` in `E` is PRESERVED"), "{:#?}", egp(&safe2));
         // When some action breaks it, there is no PRESERVED verdict.
         assert!(!any(&egp(&botch), "is PRESERVED"), "{:#?}", egp(&botch));
+
+        // Cross-invariant pre-hypothesis: `begin_compact` sets `compacting` but not the watermark; because
+        // `wm_bounded` (guard `healthy`, which the action requires) already pins `wm <= off`, the compacting
+        // bound cannot be broken. Without other guarded bounds as pre-hypotheses this false-alarmed.
+        let mhdr = "-- allium: 4\ncomponent L\n  entity S\n  observable state status(S) : { healthy | corrupted }\n  observable state wm(S) : Number\n  observable state compacting(S) : bool\n  given off : Number\n  invariant wm_bounded means status(s) = healthy implies wm(s) <= off\n  invariant compact_frozen means compacting(s) implies wm(s) <= off\n";
+        let bc = format!("{mhdr}  action begin_compact\n    requires status(s) = healthy\n    ensures compacting(s)\nend\n");
+        assert!(!any(&egp(&bc), "can break state-guarded invariant `compact_frozen`"), "cross-invariant pre-hypothesis: {:#?}", egp(&bc));
     }
 
     #[test]
