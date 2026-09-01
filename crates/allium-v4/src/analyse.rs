@@ -60,6 +60,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source));
     r.diagnostics.append(&mut crate::arith::enum_guarded_preservation(&r.module, source));
+    r.diagnostics.append(&mut crate::arith::aggregate_preservation(&r.module, source));
     r.diagnostics.append(&mut variant_access(&r.module, source));
     r.diagnostics.append(&mut stuck_states(&r.module, source));
     r.diagnostics.append(&mut tier_report(&r.module, source));
