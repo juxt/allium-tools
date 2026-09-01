@@ -55,6 +55,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut bmc(&r.module, source));
     r.diagnostics.append(&mut bmc_enum(&r.module, source));
     r.diagnostics.append(&mut transitions_notice(&r.module, source));
+    r.diagnostics.append(&mut reserved_tag_check(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source));
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source));
@@ -1536,6 +1537,35 @@ fn enum_assignments(e: &Expr, evals: &HashMap<String, Vec<String>>, out: &mut Ha
     }
 }
 
+/// Keywords that break predicate parsing when used as a bare value (an enum variant tag). A tag in value
+/// position (`status(e) = no`) is read as the start of this keyword's construct, so init/guards parse
+/// wrongly and the tier declines with confusing downstream noise. Reject the tag with a pointed message.
+const RESERVED_TAGS: &[&str] = &[
+    "every", "some", "no", "exists", "not", "and", "or", "implies", "in", "if", "then", "else", "means",
+    "old", "sum", "true", "false",
+];
+
+/// Flag an enum/variant tag that is a reserved word (`{ yes | no }` — `no` is the negation quantifier).
+/// Such a tag silently breaks parsing at every use site; name the tag and the collision directly.
+pub fn reserved_tag_check(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        for it in d.items.iter().filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given)) {
+            let (Some(name), Some(bsp)) = (&it.name, it.body) else { continue };
+            let Some(variants) = parse_variants(bsp.slice(src).trim()) else { continue };
+            for (tag, _) in variants {
+                if RESERVED_TAGS.contains(&tag.as_str()) {
+                    out.push(Diagnostic::error(
+                        it.span,
+                        format!("variant tag `{tag}` of `{name}` in `{}` is a reserved word: used as a value (`{name}(e) = {tag}`) it is parsed as the `{tag}` keyword, silently breaking every guard and init that mentions it. Rename the tag.", d.name),
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Warn that a `transitions` block is parsed but not yet expanded to guarded actions, so the lifecycle it
 /// declares is not checked. Prevents the silent-no-op trap: the block used to shred into bogus items with
 /// no diagnostic. Until the sugar lands, the user should write an `action` per edge.
@@ -2678,6 +2708,16 @@ mod tests {
         assert!(!any(good, "REACHABLY VIOLATED"), "no reachable violation exists: {:?}", msgs(good));
         // The reachable graph closes (3 states), so the invariant is proven exactly, not just unwitnessed.
         assert!(any(good, "`deliver_after_process` in `Cyc` is PROVED SAFE"), "graph closes → exact proof: {:?}", msgs(good));
+    }
+
+    #[test]
+    fn reserved_word_variant_tag_is_flagged() {
+        // `no` is the negation quantifier: as a tag it silently breaks parsing, so name the collision.
+        let bad = "-- allium: 4\ncomponent Eval\n  entity E\n  observable state ok(E) : { yes | no }\n  init means ok(e) = yes\nend\n";
+        assert!(any(bad, "variant tag `no` of `ok` in `Eval` is a reserved word"), "{:?}", msgs(bad));
+        // A tag set with no reserved words is clean.
+        let good = "-- allium: 4\ncomponent Eval\n  entity E\n  observable state ok(E) : { good | bad }\n  init means ok(e) = good\nend\n";
+        assert!(!any(good, "reserved word"), "clean tags must not be flagged: {:?}", msgs(good));
     }
 
     #[test]
