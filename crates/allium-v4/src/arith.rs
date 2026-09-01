@@ -242,12 +242,31 @@ fn finite_atom(e: &Expr, st: &HashMap<String, String>) -> Option<(String, String
     }
 }
 
-/// Extract `(obs, tag, A)` from a reduced body `finite-guard implies A`, where the guard is an enum
-/// equality or a boolean flag (bare/negated), and `A` is the arithmetic consequent.
-fn enum_guarded_inv(qf: &Expr, st: &HashMap<String, String>) -> Option<(String, String, Expr)> {
+/// Collect a conjunction of finite-state atoms into `out`; false if any conjunct is not a finite atom.
+fn finite_conjuncts(e: &Expr, st: &HashMap<String, String>, out: &mut Vec<(String, String)>) -> bool {
+    match e {
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            finite_conjuncts(lhs, st, out) && finite_conjuncts(rhs, st, out)
+        }
+        _ => match finite_atom(e, st) {
+            Some(a) => {
+                out.push(a);
+                true
+            }
+            None => false,
+        },
+    }
+}
+
+/// Extract `(conds, A)` from a reduced body `finite-guard implies A`, where the guard is a conjunction of
+/// finite-state atoms (enum equalities and boolean flags) and `A` is the arithmetic consequent.
+fn finite_guarded_inv(qf: &Expr, st: &HashMap<String, String>) -> Option<(Vec<(String, String)>, Expr)> {
     let Expr::Binary { op: BinOp::Implies, lhs, rhs } = qf else { return None };
-    let (obs, tag) = finite_atom(lhs, st)?;
-    Some((obs, tag, (**rhs).clone()))
+    let mut conds = Vec::new();
+    if !finite_conjuncts(lhs, st, &mut conds) || conds.is_empty() {
+        return None;
+    }
+    Some((conds, (**rhs).clone()))
 }
 
 /// The tag an `ensures` conjunction assigns to `obs` (`obs = tag`, or a bare/negated boolean flag), if any.
@@ -309,7 +328,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
 
         // Enum-guarded linear invariants, and the unconditional linear invariants (pre-hypotheses that
         // rule out impossible pre-states, so a break is only reported from a genuinely reachable one).
-        let mut guarded: Vec<(String, String, String, Expr)> = Vec::new();
+        let mut guarded: Vec<(String, Vec<(String, String)>, Expr)> = Vec::new();
         let mut uncond_pre: Vec<Con> = Vec::new();
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
             let (name, body) = match (&it.name, it.body) {
@@ -320,12 +339,12 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                 Some(e) => e,
                 None => continue,
             };
-            if let Some((obs, tag, a)) = enum_guarded_inv(&qf, &st) {
+            if let Some((conds, a)) = finite_guarded_inv(&qf, &st) {
                 let (acons, anotes) = ground(&a, &st);
                 if anotes || acons.is_empty() {
                     continue; // consequent not purely linear
                 }
-                guarded.push((name, obs, tag, a));
+                guarded.push((name, conds, a));
             } else {
                 let (c, n) = ground(&qf, &st);
                 if !n {
@@ -382,25 +401,30 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                 None => Vec::new(),
             };
 
-            for (iname, obs, tag, a) in &guarded {
-                let required = guard.as_ref().and_then(|g| required_enum_tag(g, obs, &st));
-                // Decide whether `obs = tag` holds after the action, and whether A held before it.
-                let (active_post, a_pre) = if modified.contains(obs) {
-                    match assigned_enum_tag(&ensures, obs, &st) {
-                        Some(v) if &v == tag => (true, required.as_deref() == Some(tag.as_str())),
-                        Some(_) => (false, false), // set to another tag -> guard inactive after
-                        None => continue,          // conditional/opaque enum set -> cannot decide soundly
+            'inv: for (iname, conds, a) in &guarded {
+                // Every guard condition must still hold after the action for the bound to be required
+                // (active_post), and all must have held before for A to be assumed to have held (a_pre).
+                let mut a_pre = true;
+                for (obs, tag) in conds {
+                    let required = guard.as_ref().and_then(|g| required_enum_tag(g, obs, &st));
+                    let (active_i, pre_i) = if modified.contains(obs) {
+                        match assigned_enum_tag(&ensures, obs, &st) {
+                            Some(v) if &v == tag => (true, required.as_deref() == Some(tag.as_str())),
+                            Some(_) => (false, false), // set to another tag -> this condition inactive after
+                            None => continue 'inv,     // conditional/opaque enum set -> cannot decide soundly
+                        }
+                    } else {
+                        // unchanged: active after iff it held before; the action must be able to fire then,
+                        // so a different required tag on this observable rules the case out.
+                        if required.as_deref().map(|r| r != tag).unwrap_or(false) {
+                            continue 'inv;
+                        }
+                        (true, true)
+                    };
+                    if !active_i {
+                        continue 'inv; // a guard condition is definitely false after -> invariant vacuous
                     }
-                } else {
-                    // enum unchanged: the guard is active after iff it held before; the action must be able
-                    // to fire in that pre-state, so a different required tag rules the case out.
-                    if required.as_deref().map(|r| r != tag).unwrap_or(false) {
-                        continue;
-                    }
-                    (true, true)
-                };
-                if !active_post {
-                    continue;
+                    a_pre = a_pre && pre_i;
                 }
                 let (a_pre_cons, apn) = ground(a, &st);
                 let a_post = crate::analyse::prime(a, &modified_numeric, false);
@@ -426,10 +450,11 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                     }
                 }
                 if let Some(w) = witness {
+                    let guard_desc = conds.iter().map(|(o, t)| format!("{o} = {t}")).collect::<Vec<_>>().join(" and ");
                     out.push(Diagnostic::warning(
                         it.span,
                         crate::analyse::pretty(&format!(
-                            "action `{aname}` in `{}` can break state-guarded invariant `{iname}`: with `{obs} = {tag}` holding afterwards, the arithmetic bound is violated (e.g. {w}). Guard the action or maintain the bound under `{tag}`.",
+                            "action `{aname}` in `{}` can break state-guarded invariant `{iname}`: with `{guard_desc}` holding afterwards, the arithmetic bound is violated (e.g. {w}). Guard the action or maintain the bound.",
                             d.name
                         )),
                     ));
@@ -1269,6 +1294,14 @@ mod tests {
         assert!(!any(&egp(&onclosed), "can break state-guarded"), "{:#?}", egp(&onclosed));
         let open = format!("{bhdr}  action open\n    ensures active(x) and balance(x) = 0 - 5\nend\n");
         assert!(any(&egp(&open), "`open` in `Acct` can break state-guarded invariant `solvent`"), "{:#?}", egp(&open));
+
+        // A CONJUNCTIVE finite guard: the bound applies only when BOTH conditions hold.
+        let chdr = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state phase(O) : { running | halted }\n  observable state count(O) : Number\n  invariant ok means outcome(o) = success and phase(o) = running implies count(o) >= 0\n";
+        let both = format!("{chdr}  action botch\n    requires outcome(o) = success and phase(o) = running\n    ensures count(o) = 0 - 1\nend\n");
+        assert!(any(&egp(&both), "with `outcome = success and phase = running` holding"), "{:#?}", egp(&both));
+        // One condition false after the action (phase halted): the bound does not apply, so no break.
+        let one = format!("{chdr}  action botch\n    requires outcome(o) = success and phase(o) = halted\n    ensures count(o) = 0 - 1\nend\n");
+        assert!(!any(&egp(&one), "can break state-guarded"), "{:#?}", egp(&one));
     }
 
     #[test]
