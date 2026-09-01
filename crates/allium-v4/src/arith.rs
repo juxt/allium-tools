@@ -133,6 +133,41 @@ pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         // the bad pre-state. Sound: a reported break means the full set is genuinely not preserved.
         let all_pre: Vec<Con> = invs.iter().flat_map(|(_, _, c)| c.iter().cloned()).collect();
 
+        // Base case: does `init` establish each linear invariant? If the initial arithmetic state can
+        // violate `A` (e.g. `init` sets `balance = -5` against `balance >= 0`), the induction has no base.
+        if let Some(init_it) = d.items.iter().find(|it| it.kind == ItemKind::Init).and_then(|it| it.body) {
+            let init_raw = parse_predicate(init_it.slice(src).trim().strip_prefix("means").unwrap_or(init_it.slice(src))).0;
+            let mut iev = HashSet::new();
+            crate::analyse::collect_entity_vars(&init_raw, &mut iev);
+            let init = crate::analyse::rename_entity(&init_raw, &iev);
+            let (init_cons, init_notes) = ground(&strip_enum_conjuncts(&init, &st), &st);
+            // States `init` actually assigns. Only invariants over a state init sets can be *contradicted*
+            // by init; an invariant over a value init leaves free is an input assumption, not init's to
+            // establish, so gating on this avoids noise while still catching a genuine init contradiction.
+            let mut init_states = HashSet::new();
+            crate::analyse::collect_writes(&init, false, &state_names, &mut init_states);
+            if !init_notes {
+                for (iname, inv, icons) in &invs {
+                    if !crate::analyse::mentions_any(inv, &init_states) {
+                        continue;
+                    }
+                    let violated = icons.iter().any(|c| {
+                        negate_con(c).into_iter().any(|neg| {
+                            let mut q: Vec<Con> = init_cons.clone();
+                            q.push(neg);
+                            matches!(solve(&q), Outcome::Sat(_))
+                        })
+                    });
+                    if violated {
+                        out.push(Diagnostic::warning(
+                            d.span,
+                            format!("`init` in `{}` does not establish arithmetic invariant `{iname}`: the initial state can violate it.", d.name),
+                        ));
+                    }
+                }
+            }
+        }
+
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
             let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
             let ensures_raw = match it.ensures {
@@ -373,10 +408,13 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
             crate::analyse::collect_entity_vars(&init_raw, &mut iev);
             let init = crate::analyse::rename_entity(&init_raw, &iev);
             let (init_arith, init_notes) = ground(&strip_enum_conjuncts(&init, &st), &st);
+            let mut init_states = HashSet::new();
+            crate::analyse::collect_writes(&init, false, &state_names, &mut init_states);
             if !init_notes {
                 for (iname, conds, arith_guard, a) in &guarded {
                     let active = conds.iter().all(|(o, t)| assigned_enum_tag(&init, o, &st).as_deref() == Some(t.as_str()));
-                    if !active {
+                    // Only a bound over a numeric state init assigns can be contradicted by init.
+                    if !active || !crate::analyse::mentions_any(a, &init_states) {
                         continue;
                     }
                     let (acons, an) = ground(a, &st);
@@ -1478,6 +1516,24 @@ mod tests {
         assert!(!any(&egp(&ig), "does not establish state-guarded"), "{:#?}", egp(&ig));
         let inact = ib.replace("outcome(o) = success and count(o) = 0 - 1", "outcome(o) = failure and count(o) = 0 - 1");
         assert!(!any(&egp(&inact), "does not establish state-guarded"), "guard inactive at init: {:#?}", egp(&inact));
+        // init that does NOT assign the bound's state (count) leaves it a free input — not init's to
+        // establish, so no false alarm.
+        let free = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state count(O) : Number\n  init means outcome(o) = success\n  invariant ok means outcome(o) = success implies count(o) >= 0\n  action noop\n    requires outcome(o) = failure\n    ensures count(o) = count(o)\nend\n";
+        assert!(!any(&egp(free), "does not establish state-guarded"), "free input at init: {:#?}", egp(free));
+    }
+
+    #[test]
+    fn init_establishment_of_unconditional_arithmetic_invariant() {
+        let run_ap = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::arith_preservation(&m, src).into_iter().map(|d| d.message).collect()
+        };
+        // init sets balance = -5, contradicting the refinement balance >= 0.
+        let bad = "-- allium: 4\ncomponent B\n  entity A\n  observable state balance(A) : Money where balance(a) >= 0\n  init means balance(a) = 0 - 5\n  action dep\n    ensures balance(a) = balance(a) + 1\nend\n";
+        assert!(any(&run_ap(bad), "`init` in `B` does not establish arithmetic invariant `refine[balance]`"), "{:#?}", run_ap(bad));
+        // A good init (balance = 0) does not.
+        let good = bad.replace("balance(a) = 0 - 5", "balance(a) = 0");
+        assert!(!any(&run_ap(&good), "does not establish arithmetic"), "{:#?}", run_ap(&good));
     }
 
     #[test]
