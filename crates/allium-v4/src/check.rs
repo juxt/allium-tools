@@ -59,6 +59,13 @@ fn collect_enum_values(src: &str) -> HashSet<String> {
 }
 
 /// Name resolution over predicate bodies. Every free name in a predicate must
+/// Strip a leading `means` keyword from a raw body span (an `init means <pred>` body carries it, unlike
+/// invariant bodies), so the resolver sees the predicate, not the keyword as a phantom free name.
+fn strip_means(raw: &str) -> &str {
+    let t = raw.trim_start();
+    t.strip_prefix("means").filter(|r| r.starts_with(char::is_whitespace)).map(str::trim_start).unwrap_or(t)
+}
+
 /// resolve to something in scope: a declaration parameter, an item name, an
 /// import alias, a state/enum value, or a builtin. Unresolved → warning.
 fn resolve_names(module: &Module, src: &str) -> Vec<Diagnostic> {
@@ -96,6 +103,23 @@ fn resolve_names(module: &Module, src: &str) -> Vec<Diagnostic> {
         // Payload fields of a sum/variant state observable are names too (`outputs` of `{ success
         // { outputs } | … }`); their guarded-access is checked separately by `variant_access`.
         scope.extend(crate::analyse::variant_fields_of(d, src).into_keys());
+        // Entity variables — the bare-name arguments of observable applications (`instance` in
+        // `status(instance)`) and quantifier-bound vars — are implicitly in scope: the analysis reasons
+        // over a single representative entity per sort, so these are bound, not free. Collect them from
+        // every predicate body in the declaration so a full-word entity var reads as declared.
+        for it in &d.items {
+            for span in it
+                .body
+                .iter()
+                .chain(it.requires.iter())
+                .chain(it.ensures.iter())
+                .chain(it.where_pred.iter())
+                .copied()
+            {
+                let (e, _) = parse_predicate(strip_means(span.slice(src)));
+                crate::analyse::collect_entity_vars(&e, &mut scope);
+            }
+        }
 
         // Resolve each predicate body in the declaration.
         for it in &d.items {
@@ -113,7 +137,7 @@ fn resolve_names(module: &Module, src: &str) -> Vec<Diagnostic> {
                 _ => Vec::new(),
             };
             for span in spans {
-                let text = span.slice(src);
+                let text = strip_means(span.slice(src));
                 let (e, _pd) = parse_predicate(text);
                 let mut bound = Vec::new();
                 let mut names = Vec::new();

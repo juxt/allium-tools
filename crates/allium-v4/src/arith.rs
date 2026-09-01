@@ -338,6 +338,12 @@ fn entailment_probe(
     out: &mut Vec<Diagnostic>,
 ) {
     for (i, (name, cons_i)) in grounded.iter().enumerate() {
+        // A refinement type (`refine[x]`, from a `where` clause) is a stated constraint on the value, not
+        // a derived property: it is *meant* to be independent, so the "relies on an unstated assumption"
+        // critique is a false alarm. Keep it as a hypothesis for the others, but do not critique it here.
+        if name.starts_with("refine[") {
+            continue;
+        }
         let others: Vec<Con> =
             grounded.iter().enumerate().filter(|(j, _)| *j != i).flat_map(|(_, (_, c))| c.clone()).collect();
         // Ii is entailed iff every negated ground constraint is UNSAT with the others.

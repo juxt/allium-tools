@@ -2296,6 +2296,31 @@ pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
         if named.len() < 2 {
             continue; // not a case-split
         }
+        // A lifecycle is not a decision table. When every guarded action is a transition — its guard reads
+        // an enum state that its own `ensures` writes — disjointness and exhaustiveness of the guards are
+        // the wrong properties (overlap is nondeterminism, gaps are terminal states). Stuck-state detection
+        // and bmc own the lifecycle; skip the case-split verdict rather than raise a category-error alarm.
+        let evals = enum_values_of(d, src, false);
+        if !evals.is_empty() {
+            let all_transitions = d
+                .items
+                .iter()
+                .filter(|it| it.kind == ItemKind::Action && it.requires.is_some())
+                .all(|it| {
+                    let guard = parse_predicate(it.requires.unwrap().slice(src)).0;
+                    let mut gatoms = BTreeSet::new();
+                    collect_atoms(&guard, &mut gatoms);
+                    let reads_enum = gatoms.iter().any(|a| evals.keys().any(|e| a.contains(e.as_str())));
+                    let writes_enum = it.ensures.is_some_and(|sp| {
+                        let mut w = Vec::new();
+                        enum_effect(&normalize(&parse_predicate(sp.slice(src)).0), &evals, &mut w) && !w.is_empty()
+                    });
+                    reads_enum && writes_enum
+                });
+            if all_transitions {
+                continue;
+            }
+        }
         let names: Vec<String> = named.iter().map(|(n, _)| n.clone()).collect();
         let guards: Vec<Expr> = named.into_iter().map(|(_, e)| e).collect();
 
@@ -2636,6 +2661,25 @@ mod tests {
         assert!(!any(good, "REACHABLY VIOLATED"), "no reachable violation exists: {:?}", msgs(good));
         // The reachable graph closes (3 states), so the invariant is proven exactly, not just unwitnessed.
         assert!(any(good, "`deliver_after_process` in `Cyc` is PROVED SAFE"), "graph closes → exact proof: {:?}", msgs(good));
+    }
+
+    #[test]
+    fn lifecycle_actions_are_not_a_case_split() {
+        // A lifecycle's overlapping transitions (both fireable from `running`) are nondeterminism, not an
+        // ambiguous classification: no disjointness/exhaustiveness verdict should be raised.
+        let life = "-- allium: 4\ncomponent Node\n  entity I\n  observable state status(I) : { starting | running | dead }\n  init means status(i) = starting\n  action go\n    requires status(i) = starting\n    ensures status(i) = running\n  action drain\n    requires status(i) = running\n    ensures status(i) = dead\n  action die\n    requires status(i) = running\n    ensures status(i) = dead\nend\n";
+        assert!(!any(life, "case-split"), "a lifecycle is not a case-split: {:?}", msgs(life));
+        // A genuine decision table (actions derive an output from disjoint input guards) still is one.
+        let table = "-- allium: 4\ncomponent Rate\n  entity L\n  observable state tier(L) : Number\n  observable state rate(L) : Number\n  action low\n    requires tier(l) < 100\n    ensures rate(l) = 2\n  action high\n    requires tier(l) >= 100\n    ensures rate(l) = 5\nend\n";
+        assert!(any(table, "case-split in `Rate`"), "a decision table is still checked: {:?}", msgs(table));
+    }
+
+    #[test]
+    fn refinement_type_is_not_critiqued_as_unstated_assumption() {
+        // A `where` refinement is a stated constraint, not a hidden assumption: the entailment probe must
+        // not flag it as "relies on an unstated assumption".
+        let src = "-- allium: 4\ncomponent Ev\n  entity E\n  observable state gap(E) : Number where gap(e) >= 1\n  observable state idx(E) : Number where idx(e) >= 0\nend\n";
+        assert!(!any(src, "`refine[gap]` in `Ev` is NOT entailed"), "refinement is definitional: {:?}", msgs(src));
     }
 
     #[test]
