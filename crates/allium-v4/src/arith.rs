@@ -356,6 +356,10 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
             continue;
         }
 
+        // Track which invariants an action actually engaged (ran the VC for) and which were broken, so a
+        // state-guarded invariant that survives every action gets a positive PRESERVED verdict.
+        let mut engaged: HashSet<String> = HashSet::new();
+        let mut broken: HashSet<String> = HashSet::new();
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
             let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
             let ensures_raw = match it.ensures {
@@ -432,6 +436,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                 if apn || apostn || a_post_cons.is_empty() {
                     continue;
                 }
+                engaged.insert(iname.clone());
                 let mut witness: Option<String> = None;
                 'search: for pc in &a_post_cons {
                     for neg in negate_con(pc) {
@@ -450,6 +455,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                     }
                 }
                 if let Some(w) = witness {
+                    broken.insert(iname.clone());
                     let guard_desc = conds.iter().map(|(o, t)| format!("{o} = {t}")).collect::<Vec<_>>().join(" and ");
                     out.push(Diagnostic::warning(
                         it.span,
@@ -459,6 +465,15 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                         )),
                     ));
                 }
+            }
+        }
+        // An invariant every action engaged but none broke is preserved under its guard — a positive result.
+        for (iname, _, _) in &guarded {
+            if engaged.contains(iname) && !broken.contains(iname) {
+                out.push(Diagnostic::warning(
+                    d.span,
+                    format!("state-guarded invariant `{iname}` in `{}` is PRESERVED: every action maintains the arithmetic bound wherever its guard holds.", d.name),
+                ));
             }
         }
     }
@@ -1302,6 +1317,12 @@ mod tests {
         // One condition false after the action (phase halted): the bound does not apply, so no break.
         let one = format!("{chdr}  action botch\n    requires outcome(o) = success and phase(o) = halted\n    ensures count(o) = 0 - 1\nend\n");
         assert!(!any(&egp(&one), "can break state-guarded"), "{:#?}", egp(&one));
+
+        // A safe action that engages the invariant earns a positive PRESERVED verdict.
+        let safe2 = format!("{hdr}  action ok_act\n    requires outcome(o) = success\n    ensures count(o) = 7\nend\n");
+        assert!(any(&egp(&safe2), "state-guarded invariant `ok` in `E` is PRESERVED"), "{:#?}", egp(&safe2));
+        // When some action breaks it, there is no PRESERVED verdict.
+        assert!(!any(&egp(&botch), "is PRESERVED"), "{:#?}", egp(&botch));
     }
 
     #[test]
