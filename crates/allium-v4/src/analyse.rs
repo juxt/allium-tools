@@ -1615,38 +1615,59 @@ pub fn bmc_enum(module: &Module, src: &str) -> Vec<Diagnostic> {
             v.sort();
             v
         };
+        // Render a concrete state as `a = x, b = y` (sorted) for the counterexample.
+        let render = |st: &HashMap<String, String>| {
+            let mut kv: Vec<String> = st.iter().map(|(k, v)| format!("{k} = {v}")).collect();
+            kv.sort();
+            kv.join(", ")
+        };
         let mut reported: HashSet<String> = HashSet::new();
+        // An invariant that eval_enum cannot settle (Some/None) in some reachable state — e.g. its
+        // consequent is arithmetic — is neither witnessed nor proven here; arith_preservation owns it.
+        let mut indeterminate: HashSet<String> = HashSet::new();
         let mut seen: HashSet<Vec<(String, String)>> = HashSet::new();
         seen.insert(key(&init_state));
         let mut frontier: Vec<(HashMap<String, String>, Vec<String>)> = vec![(init_state, Vec::new())];
+        // `closed` becomes true only if the reachable set is fully explored (a step produced no new state)
+        // before the depth bound: then the safe invariants hold over *every* reachable state, an exact proof.
+        let mut closed = false;
         for depth in 0..=BMC_MAX {
-            let mut next = Vec::new();
             for (st, path) in &frontier {
                 for (iname, inv) in &invs {
                     if reported.contains(iname) {
                         continue;
                     }
-                    if eval_enum(inv, st) == Some(false) {
-                        let trace = if path.is_empty() {
-                            "init".to_string()
-                        } else {
-                            format!("init -> {}", path.join(" -> "))
-                        };
-                        out.push(Diagnostic::warning(
-                            d.span,
-                            format!(
-                                "invariant `{iname}` in `{}` is REACHABLY VIOLATED in {} step(s): {} reaches a state where it fails. A concrete counterexample, not just a non-inductive warning.",
-                                d.name,
-                                path.len(),
-                                trace
-                            ),
-                        ));
-                        reported.insert(iname.clone());
+                    match eval_enum(inv, st) {
+                        Some(false) => {
+                            let trace = if path.is_empty() {
+                                "init".to_string()
+                            } else {
+                                format!("init -> {}", path.join(" -> "))
+                            };
+                            out.push(Diagnostic::warning(
+                                d.span,
+                                format!(
+                                    "invariant `{iname}` in `{}` is REACHABLY VIOLATED in {} step(s): {} reaches {{{}}}, where it fails. A concrete counterexample, not just a non-inductive warning.",
+                                    d.name,
+                                    path.len(),
+                                    trace,
+                                    render(st)
+                                ),
+                            ));
+                            reported.insert(iname.clone());
+                        }
+                        None => {
+                            indeterminate.insert(iname.clone());
+                        }
+                        Some(true) => {}
                     }
                 }
-                if depth == BMC_MAX {
-                    continue; // check the states reached at the bound, but do not expand past it
-                }
+            }
+            if reported.len() == invs.len() || depth == BMC_MAX {
+                break; // all invariants already witnessed, or the bound is reached with states still open
+            }
+            let mut next = Vec::new();
+            for (st, path) in &frontier {
                 for act in &acts {
                     let fires = match &act.guard {
                         Some(g) => eval_enum(g, st) == Some(true),
@@ -1666,10 +1687,26 @@ pub fn bmc_enum(module: &Module, src: &str) -> Vec<Diagnostic> {
                     }
                 }
             }
-            if reported.len() == invs.len() || next.is_empty() {
+            if next.is_empty() {
+                closed = true; // reachable set exhausted within the bound
                 break;
             }
             frontier = next;
+        }
+        // Each invariant with no witnessed violation over the fully-explored reachable set is proven safe.
+        if closed {
+            for (iname, _) in &invs {
+                if !reported.contains(iname) && !indeterminate.contains(iname) {
+                    out.push(Diagnostic::warning(
+                        d.span,
+                        format!(
+                            "invariant `{iname}` in `{}` is PROVED SAFE: no reachable state violates it (explicit-state, {} reachable state(s) explored to fixpoint). An exact proof over the whole lifecycle, not a bounded search.",
+                            d.name,
+                            seen.len()
+                        ),
+                    ));
+                }
+            }
         }
     }
     out
@@ -2529,6 +2566,16 @@ mod tests {
         // A monotone lifecycle with no reachable violation must produce no trace (no false counterexample).
         let good = "-- allium: 4\ncomponent Cyc\n  entity C\n  observable state status(C) : { partitioning | processing | delivering }\n  init means status(c) = partitioning\n  action partition\n    requires status(c) = partitioning\n    ensures status(c) = processing\n  action deliver\n    requires status(c) = processing\n    ensures status(c) = delivering\n  invariant deliver_after_process means status(c) = delivering implies status(c) <> partitioning\nend\n";
         assert!(!any(good, "REACHABLY VIOLATED"), "no reachable violation exists: {:?}", msgs(good));
+        // The reachable graph closes (3 states), so the invariant is proven exactly, not just unwitnessed.
+        assert!(any(good, "`deliver_after_process` in `Cyc` is PROVED SAFE"), "graph closes → exact proof: {:?}", msgs(good));
+    }
+
+    #[test]
+    fn bmc_enum_does_not_prove_an_arithmetic_invariant() {
+        // With a Money state present the decl leaves the enum-only fragment, so bmc_enum must not claim to
+        // have proved the arithmetic invariant `pos` (arith_preservation owns it).
+        let src = "-- allium: 4\ncomponent M\n  entity C\n  observable state status(C) : { open | closed }\n  observable state bal(C) : Money\n  init means status(c) = open\n  action shut\n    requires status(c) = open\n    ensures status(c) = closed\n  invariant pos means status(c) = closed implies bal(c) >= 0\nend\n";
+        assert!(!any(src, "`pos` in `M` is PROVED SAFE"), "must not prove an arithmetic invariant: {:?}", msgs(src));
     }
 
     #[test]
