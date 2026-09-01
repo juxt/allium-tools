@@ -220,54 +220,49 @@ pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
     out
 }
 
-/// True if `e` is `obs(..)` or `obs` for the given name.
-fn head_is(e: &Expr, name: &str) -> bool {
+/// Read a finite-state atom `obs(..) = tag` / bare boolean `obs(..)` / negated `not obs(..)` as its
+/// `(obs, tag)` pair, where a bare flag is `= true` and its negation `= false`. None otherwise.
+fn finite_atom(e: &Expr, st: &HashMap<String, String>) -> Option<(String, String)> {
     match e {
-        Expr::App { head, .. } => matches!(head.as_ref(), Expr::Name(h) if h == name),
-        Expr::Name(n) => n == name,
-        _ => false,
+        Expr::Binary { op: BinOp::Eq, lhs, rhs } => {
+            let h = app_head(lhs).filter(|h| finite_typed(h, st))?;
+            match rhs.as_ref() {
+                Expr::Name(t) => Some((h.to_string(), t.clone())),
+                _ => None,
+            }
+        }
+        Expr::Unary { op: UnOp::Not, e } => {
+            let h = app_head(e).filter(|h| bool_typed(h, st))?;
+            Some((h.to_string(), "false".into()))
+        }
+        _ => {
+            let h = app_head(e).filter(|h| bool_typed(h, st))?;
+            Some((h.to_string(), "true".into()))
+        }
     }
 }
 
-/// Extract `(enum_obs, tag, A)` from a reduced body of the shape `enum_obs(e) = tag implies A`, where
-/// `enum_obs` is an enum-typed observable, `tag` a bare variant tag, and `A` the arithmetic consequent.
+/// Extract `(obs, tag, A)` from a reduced body `finite-guard implies A`, where the guard is an enum
+/// equality or a boolean flag (bare/negated), and `A` is the arithmetic consequent.
 fn enum_guarded_inv(qf: &Expr, st: &HashMap<String, String>) -> Option<(String, String, Expr)> {
     let Expr::Binary { op: BinOp::Implies, lhs, rhs } = qf else { return None };
-    let Expr::Binary { op: BinOp::Eq, lhs: el, rhs: er } = lhs.as_ref() else { return None };
-    let obs = match el.as_ref() {
-        Expr::App { head, .. } => match head.as_ref() {
-            Expr::Name(h) if enum_typed(h, st) => h.clone(),
-            _ => return None,
-        },
-        Expr::Name(n) if enum_typed(n, st) => n.clone(),
-        _ => return None,
-    };
-    let Expr::Name(tag) = er.as_ref() else { return None };
-    Some((obs, tag.clone(), (**rhs).clone()))
+    let (obs, tag) = finite_atom(lhs, st)?;
+    Some((obs, tag, (**rhs).clone()))
 }
 
-/// The tag an `ensures` conjunction assigns to `obs` unconditionally (`obs(..) = tag`), if any.
-fn assigned_enum_tag(e: &Expr, obs: &str) -> Option<String> {
+/// The tag an `ensures` conjunction assigns to `obs` (`obs = tag`, or a bare/negated boolean flag), if any.
+fn assigned_enum_tag(e: &Expr, obs: &str, st: &HashMap<String, String>) -> Option<String> {
     match e {
-        Expr::Binary { op: BinOp::And, lhs, rhs } => assigned_enum_tag(lhs, obs).or_else(|| assigned_enum_tag(rhs, obs)),
-        Expr::Binary { op: BinOp::Eq, lhs, rhs } if head_is(lhs, obs) => match rhs.as_ref() {
-            Expr::Name(t) => Some(t.clone()),
-            _ => None,
-        },
-        _ => None,
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            assigned_enum_tag(lhs, obs, st).or_else(|| assigned_enum_tag(rhs, obs, st))
+        }
+        _ => finite_atom(e, st).filter(|(o, _)| o == obs).map(|(_, t)| t),
     }
 }
 
-/// The tag a guard conjunction requires for `obs` (`obs(..) = tag`), if any.
-fn required_enum_tag(e: &Expr, obs: &str) -> Option<String> {
-    match e {
-        Expr::Binary { op: BinOp::And, lhs, rhs } => required_enum_tag(lhs, obs).or_else(|| required_enum_tag(rhs, obs)),
-        Expr::Binary { op: BinOp::Eq, lhs, rhs } if head_is(lhs, obs) => match rhs.as_ref() {
-            Expr::Name(t) => Some(t.clone()),
-            _ => None,
-        },
-        _ => None,
-    }
+/// The tag a guard conjunction requires for `obs` (`obs = tag`, or a bare/negated boolean flag), if any.
+fn required_enum_tag(e: &Expr, obs: &str, st: &HashMap<String, String>) -> Option<String> {
+    assigned_enum_tag(e, obs, st)
 }
 
 /// Replace each enum-equality conjunct with `true`, leaving only the arithmetic part of a guard to ground.
@@ -388,10 +383,10 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
             };
 
             for (iname, obs, tag, a) in &guarded {
-                let required = guard.as_ref().and_then(|g| required_enum_tag(g, obs));
+                let required = guard.as_ref().and_then(|g| required_enum_tag(g, obs, &st));
                 // Decide whether `obs = tag` holds after the action, and whether A held before it.
                 let (active_post, a_pre) = if modified.contains(obs) {
-                    match assigned_enum_tag(&ensures, obs) {
+                    match assigned_enum_tag(&ensures, obs, &st) {
                         Some(v) if &v == tag => (true, required.as_deref() == Some(tag.as_str())),
                         Some(_) => (false, false), // set to another tag -> guard inactive after
                         None => continue,          // conditional/opaque enum set -> cannot decide soundly
@@ -434,7 +429,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                     out.push(Diagnostic::warning(
                         it.span,
                         crate::analyse::pretty(&format!(
-                            "action `{aname}` in `{}` can break enum-guarded invariant `{iname}`: with `{obs} = {tag}` holding afterwards, the arithmetic bound is violated (e.g. {w}). Guard the action or maintain the bound under `{tag}`.",
+                            "action `{aname}` in `{}` can break state-guarded invariant `{iname}`: with `{obs} = {tag}` holding afterwards, the arithmetic bound is violated (e.g. {w}). Guard the action or maintain the bound under `{tag}`.",
                             d.name
                         )),
                     ));
@@ -671,24 +666,44 @@ fn enum_typed(n: &str, st: &HashMap<String, String>) -> bool {
     st.get(n).map(|t| t.trim_start().starts_with('{')).unwrap_or(false)
 }
 
-/// True if `e` is a guard built purely from enum-observable (dis)equalities — `outcome = success`, and
-/// their and/or/not combinations. Such a guard is checked by the enum tier, not the arithmetic tier, so
-/// the arithmetic tier should drop it silently rather than report it as an unchecked nonlinear term.
+/// True if the state named `n` is boolean-typed. A boolean is a two-valued finite type (`{ true | false }`)
+/// for the purpose of finite-guard reasoning.
+fn bool_typed(n: &str, st: &HashMap<String, String>) -> bool {
+    st.get(n).map(|t| matches!(t.trim().to_ascii_lowercase().as_str(), "bool" | "boolean")).unwrap_or(false)
+}
+
+/// True if `n` has a finite type the SAT/enum tier owns — an enum/variant or a boolean.
+fn finite_typed(n: &str, st: &HashMap<String, String>) -> bool {
+    enum_typed(n, st) || bool_typed(n, st)
+}
+
+/// The head observable name of `obs(..)` or `obs`, if any.
+fn app_head(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::App { head, .. } => match head.as_ref() {
+            Expr::Name(h) => Some(h),
+            _ => None,
+        },
+        Expr::Name(n) => Some(n),
+        _ => None,
+    }
+}
+
+/// True if `e` is a guard built purely from finite-state atoms — enum (dis)equalities `outcome = success`,
+/// boolean equalities `active = true`, bare boolean flags `active`, and their and/or/not combinations.
+/// Such a guard is checked by the enum/SAT tier, not the arithmetic tier, so the arithmetic tier should
+/// drop it silently rather than report it as an unchecked nonlinear term.
 fn is_enum_guard(e: &Expr, st: &HashMap<String, String>) -> bool {
     match e {
         Expr::Binary { op: BinOp::Eq | BinOp::Ne, lhs, rhs } => {
-            let head_enum = |x: &Expr| match x {
-                Expr::App { head, .. } => matches!(&**head, Expr::Name(h) if enum_typed(h, st)),
-                Expr::Name(n) => enum_typed(n, st),
-                _ => false,
-            };
-            // an enum observable compared to a bare tag (Name) on either side
-            (head_enum(lhs) && matches!(rhs.as_ref(), Expr::Name(_)))
-                || (head_enum(rhs) && matches!(lhs.as_ref(), Expr::Name(_)))
+            let head_finite = |x: &Expr| app_head(x).map(|h| finite_typed(h, st)).unwrap_or(false);
+            (head_finite(lhs) && matches!(rhs.as_ref(), Expr::Name(_)))
+                || (head_finite(rhs) && matches!(lhs.as_ref(), Expr::Name(_)))
         }
         Expr::Binary { op: BinOp::And | BinOp::Or, lhs, rhs } => is_enum_guard(lhs, st) && is_enum_guard(rhs, st),
         Expr::Unary { op: UnOp::Not, e } => is_enum_guard(e, st),
-        _ => false,
+        // a bare boolean flag used as a guard (`active`)
+        _ => app_head(e).map(|h| bool_typed(h, st)).unwrap_or(false),
     }
 }
 
@@ -1225,26 +1240,35 @@ mod tests {
         let hdr = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state count(O) : Number\n  invariant ok means outcome(o) = success implies count(o) >= 0\n";
         // Breaks: sets count negative while success holds after.
         let botch = format!("{hdr}  action botch\n    requires outcome(o) = success\n    ensures count(o) = 0 - 1\nend\n");
-        assert!(any(&egp(&botch), "`botch` in `E` can break enum-guarded invariant `ok`"), "{:#?}", egp(&botch));
+        assert!(any(&egp(&botch), "`botch` in `E` can break state-guarded invariant `ok`"), "{:#?}", egp(&botch));
         // Breaks: transitions failure->success while setting count negative (must establish the bound).
         let finish = format!("{hdr}  action finish\n    requires outcome(o) = failure\n    ensures outcome(o) = success and count(o) = 0 - 1\nend\n");
-        assert!(any(&egp(&finish), "`finish` in `E` can break enum-guarded invariant `ok`"), "{:#?}", egp(&finish));
+        assert!(any(&egp(&finish), "`finish` in `E` can break state-guarded invariant `ok`"), "{:#?}", egp(&finish));
         // Safe: maintains the bound under success.
         let safe = format!("{hdr}  action safe\n    requires outcome(o) = success\n    ensures count(o) = 5\nend\n");
-        assert!(!any(&egp(&safe), "can break enum-guarded"), "{:#?}", egp(&safe));
+        assert!(!any(&egp(&safe), "can break state-guarded"), "{:#?}", egp(&safe));
         // Safe: acts under failure (guard inactive), so a negative count is fine.
         let onfail = format!("{hdr}  action onfail\n    requires outcome(o) = failure\n    ensures count(o) = 0 - 1\nend\n");
-        assert!(!any(&egp(&onfail), "can break enum-guarded"), "{:#?}", egp(&onfail));
+        assert!(!any(&egp(&onfail), "can break state-guarded"), "{:#?}", egp(&onfail));
         // Safe: transitions success->failure (guard inactive after), so a negative count is fine.
         let failit = format!("{hdr}  action failit\n    ensures outcome(o) = failure and count(o) = 0 - 1\nend\n");
-        assert!(!any(&egp(&failit), "can break enum-guarded"), "{:#?}", egp(&failit));
+        assert!(!any(&egp(&failit), "can break state-guarded"), "{:#?}", egp(&failit));
 
         // A numeric sum-type PAYLOAD field is a numeric state: a variant-guarded bound over it is checked.
         let phdr = "-- allium: 4\ncomponent V\n  entity O\n  observable state outcome(O) : { success { out : Number } | failure { err : Number } }\n  invariant outok means outcome(o) = success implies out(o) >= 0\n";
         let bad = format!("{phdr}  action rec\n    requires outcome(o) = success\n    ensures out(o) = 0 - 3\nend\n");
-        assert!(any(&egp(&bad), "`rec` in `V` can break enum-guarded invariant `outok`"), "{:#?}", egp(&bad));
+        assert!(any(&egp(&bad), "`rec` in `V` can break state-guarded invariant `outok`"), "{:#?}", egp(&bad));
         let good = format!("{phdr}  action rec\n    requires outcome(o) = success\n    ensures out(o) = 4\nend\n");
-        assert!(!any(&egp(&good), "can break enum-guarded"), "{:#?}", egp(&good));
+        assert!(!any(&egp(&good), "can break state-guarded"), "{:#?}", egp(&good));
+
+        // A BOOLEAN flag guard is a two-valued finite guard: `active implies balance >= 0` is checked too.
+        let bhdr = "-- allium: 4\ncomponent Acct\n  entity X\n  observable state active(X) : bool\n  observable state balance(X) : Money\n  invariant solvent means active(x) implies balance(x) >= 0\n";
+        let drain = format!("{bhdr}  action drain\n    requires active(x)\n    ensures balance(x) = 0 - 1\nend\n");
+        assert!(any(&egp(&drain), "`drain` in `Acct` can break state-guarded invariant `solvent`"), "{:#?}", egp(&drain));
+        let onclosed = format!("{bhdr}  action drain\n    requires not active(x)\n    ensures balance(x) = 0 - 1\nend\n");
+        assert!(!any(&egp(&onclosed), "can break state-guarded"), "{:#?}", egp(&onclosed));
+        let open = format!("{bhdr}  action open\n    ensures active(x) and balance(x) = 0 - 5\nend\n");
+        assert!(any(&egp(&open), "`open` in `Acct` can break state-guarded invariant `solvent`"), "{:#?}", egp(&open));
     }
 
     #[test]
