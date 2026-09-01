@@ -38,6 +38,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source));
     r.diagnostics.append(&mut tier_report(&r.module, source));
+    r.diagnostics.append(&mut refinement(&r.module, source));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
     // "jointly satisfiable" while the (stronger) arithmetic tier reports it CONTRADICTORY or
     // VACUOUSLY. That dual message is misleading and the elicit gate reads it. The arithmetic
@@ -421,6 +422,89 @@ fn as_literals(e: &Expr, state: &HashSet<String>, out: &mut Vec<(Expr, bool)>) -
         }
         _ => false,
     }
+}
+
+/// Refinement checking (the abstraction ladder's glue). A `component X satisfies (_ : C)` claims that X's
+/// behaviour honours contract C. This verifies the standard interface-refinement reading: X's own
+/// guarantees (its invariants/axioms/guarantees) must ENTAIL every promise C makes. For each promise P,
+/// `X_guarantees ∧ ¬P` is checked unsatisfiable — if so X guarantees P; if not, refinement fails with a
+/// witness. Lets each layer be verified alone and the abstract contract be trusted without reading the
+/// detail. Boolean fragment (single entity); other promises are reported as not-statically-checked.
+/// NOTE (for the human): the *semantics* of `satisfies` — entailment here vs behavioural simulation — is a
+/// design decision; this ships the entailment reading with a proposal note (ladders/REFINEMENT-NOTE.md).
+pub fn refinement(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let promises_of = |name: &str| -> Option<(Vec<(String, Expr)>, HashSet<String>, HashSet<String>)> {
+        let c = module.decls.iter().find(|d| d.name == name)?;
+        let ps = c
+            .items
+            .iter()
+            .filter(|it| matches!(it.kind, ItemKind::Invariant | ItemKind::Axiom | ItemKind::Guarantee))
+            .filter_map(|it| Some((it.name.clone().unwrap_or_else(|| "<anon>".into()), parse_predicate(it.body?.slice(src)).0)))
+            .collect();
+        Some((ps, bool_names_of(c, src), numeric_names_of(c, src)))
+    };
+    for d in &module.decls {
+        if d.satisfies.is_empty() {
+            continue;
+        }
+        // X's own guarantees (normalised to one entity).
+        let x_guar: Vec<Expr> = d
+            .items
+            .iter()
+            .filter(|it| matches!(it.kind, ItemKind::Invariant | ItemKind::Axiom | ItemKind::Guarantee))
+            .filter_map(|it| Some(normalize(&parse_predicate(it.body?.slice(src)).0)))
+            .collect();
+        let x_bool = bool_names_of(d, src);
+
+        for sat in &d.satisfies {
+            let cname = &sat.ty;
+            let (promises, c_bool, _c_num) = match promises_of(cname) {
+                Some(x) => x,
+                None => {
+                    out.push(Diagnostic::warning(d.span, format!("component `{}` claims to satisfy `{}`, but no such contract is declared.", d.name, cname)));
+                    continue;
+                }
+            };
+            let mut bnames: HashSet<String> = x_bool.union(&c_bool).cloned().collect();
+            bnames.extend(bnames.clone().into_iter().map(|n| format!("{n}'")));
+            let all_obs: HashSet<String> = x_bool.union(&c_bool).cloned().collect();
+
+            let mut entailed = Vec::new();
+            let mut failed = Vec::new();
+            let mut skipped = Vec::new();
+            for (pname, promise) in &promises {
+                let pn = normalize(promise);
+                // Only the boolean fragment for now; classify others out honestly.
+                let body = universal_body(&pn).map(|(_, b)| b).unwrap_or_else(|| pn.clone());
+                if has_quant(&body) || !boolean_fragment_rel(&body, &x_bool, &all_obs) {
+                    skipped.push(pname.clone());
+                    continue;
+                }
+                let neg = Expr::Unary { op: UnOp::Not, e: Box::new(body.clone()) };
+                let mut es: Vec<&Expr> = x_guar.iter().collect();
+                es.push(&neg);
+                match crate::sat::satisfiable(&es, &bnames) {
+                    None => entailed.push(pname.clone()),
+                    Some(_) => failed.push(pname.clone()),
+                }
+            }
+            if failed.is_empty() && skipped.is_empty() && !entailed.is_empty() {
+                out.push(Diagnostic::warning(d.span, format!("component `{}` SATISFIES contract `{}`: its invariants entail every promise ({}).", d.name, cname, entailed.join(", "))));
+            } else {
+                for f in &failed {
+                    out.push(Diagnostic::warning(d.span, format!("component `{}` does NOT satisfy contract `{}`: promise `{}` is not entailed by its invariants — the detailed layer does not guarantee the abstract contract.", d.name, cname, f)));
+                }
+                if !entailed.is_empty() {
+                    out.push(Diagnostic::warning(d.span, format!("component `{}` vs contract `{}`: entailed {}.", d.name, cname, entailed.join(", "))));
+                }
+                for s in &skipped {
+                    out.push(Diagnostic::warning(d.span, format!("component `{}` vs contract `{}`: promise `{}` not statically checked (outside the boolean fragment).", d.name, cname, s)));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The reasoning tier an invariant needs, decided syntactically (cheap and sound: it only classifies; the
@@ -1645,6 +1729,16 @@ mod tests {
         assert!(any(bad, "can break relational invariant `at_most_one`"), "{:?}", msgs(bad));
         let release = "-- allium: 4\ncomponent L\n  entity H\n  observable state active(H) : bool\n  action release\n    requires active(h)\n    ensures not active(h)\n  invariant at_most_one means every a :: every b :: (active(a) and active(b)) implies a = b\nend\n";
         assert!(!any(release, "can break relational"), "deactivation cannot break at-most-one: {:?}", msgs(release));
+    }
+
+    #[test]
+    fn refinement_entailment_check() {
+        // The detailed component's two invariants (settle->cash, cash->funded) entail the contract's
+        // promise (settled->funded); dropping the second breaks refinement.
+        let ok = "-- allium: 4\ncontract Settle\n  entity T\n  observable state settled(T) : bool\n  observable state funded(T) : bool\n  guarantee sif means settled(t) implies funded(t)\nend\ncomponent Impl satisfies (s : Settle)\n  entity T\n  observable state settled(T) : bool\n  observable state cash(T) : bool\n  observable state funded(T) : bool\n  invariant a means settled(t) implies cash(t)\n  invariant b means cash(t) implies funded(t)\nend\n";
+        assert!(any(ok, "`Impl` SATISFIES contract `Settle`"), "{:?}", msgs(ok));
+        let bad = "-- allium: 4\ncontract Settle\n  entity T\n  observable state settled(T) : bool\n  observable state funded(T) : bool\n  guarantee sif means settled(t) implies funded(t)\nend\ncomponent Impl satisfies (s : Settle)\n  entity T\n  observable state settled(T) : bool\n  observable state cash(T) : bool\n  observable state funded(T) : bool\n  invariant a means settled(t) implies cash(t)\nend\n";
+        assert!(any(bad, "does NOT satisfy contract `Settle`"), "{:?}", msgs(bad));
     }
 
     #[test]
