@@ -1535,6 +1535,56 @@ fn enum_assignments(e: &Expr, evals: &HashMap<String, Vec<String>>, out: &mut Ha
     }
 }
 
+/// Collect `obs = <tag-valued expr>` action effects from a conjunction. Like [`enum_assignments`] but the
+/// RHS may be an `if/then/else` over tags (a branching transition, e.g. `status = if ok then done else
+/// failed`), resolved to a concrete tag at fire time by [`resolve_tag`]. Returns false if any conjunct is
+/// not such an effect over a declared enum observable.
+fn enum_effect(e: &Expr, evals: &HashMap<String, Vec<String>>, out: &mut Vec<(String, Expr)>) -> bool {
+    match e {
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            enum_effect(lhs, evals, out) && enum_effect(rhs, evals, out)
+        }
+        Expr::Binary { op: BinOp::Eq, lhs, rhs } => {
+            if let Some(obs) = atom_head(lhs) {
+                if let Some(tags) = evals.get(&obs) {
+                    if tag_valued(rhs, tags) {
+                        out.push((obs, (**rhs).clone()));
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// True if `e` yields a variant tag: a bare tag name, or an `if/then/else` whose branches do (recursively).
+/// The branch conditions are not checked here — [`resolve_tag`] evaluates them against a concrete state.
+fn tag_valued(e: &Expr, tags: &[String]) -> bool {
+    match e {
+        Expr::Name(t) => tags.contains(t),
+        Expr::Cond { then_, els, .. } => tag_valued(then_, tags) && tag_valued(els, tags),
+        _ => false,
+    }
+}
+
+/// Resolve a tag-valued effect expression to a concrete tag against a state, evaluating `if/then/else`
+/// conditions with [`eval_enum`]. None if a condition cannot be settled from the state.
+fn resolve_tag(e: &Expr, st: &HashMap<String, String>) -> Option<String> {
+    match e {
+        Expr::Name(t) => Some(t.clone()),
+        Expr::Cond { cond, then_, els } => {
+            if eval_enum(cond, st)? {
+                resolve_tag(then_, st)
+            } else {
+                resolve_tag(els, st)
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Explicit-state reachability for enum lifecycles — the counterexample-trace complement to preservation,
 /// for the state machines the SAT-based [`bmc`] declines (its states must all be boolean). When every
 /// `observable state` is enum-typed, `init` pins them all, and actions are guarded enum transitions, this
@@ -1573,7 +1623,9 @@ pub fn bmc_enum(module: &Module, src: &str) -> Vec<Diagnostic> {
         struct Act {
             name: String,
             guard: Option<Expr>,
-            eff: HashMap<String, String>,
+            // Each effect is `obs = <tag-valued expr>`, where the RHS is a variant tag or an `if/then/else`
+            // over tags: resolved to a concrete tag against the current state when the action fires.
+            eff: Vec<(String, Expr)>,
         }
         let mut acts: Vec<Act> = Vec::new();
         let mut ok = true;
@@ -1582,8 +1634,8 @@ pub fn bmc_enum(module: &Module, src: &str) -> Vec<Diagnostic> {
                 Some(sp) => normalize(&parse_predicate(sp.slice(src)).0),
                 None => continue,
             };
-            let mut eff = HashMap::new();
-            if !enum_assignments(&ens, &evals, &mut eff) {
+            let mut eff = Vec::new();
+            if !enum_effect(&ens, &evals, &mut eff) {
                 ok = false;
                 break;
             }
@@ -1631,6 +1683,9 @@ pub fn bmc_enum(module: &Module, src: &str) -> Vec<Diagnostic> {
         // `closed` becomes true only if the reachable set is fully explored (a step produced no new state)
         // before the depth bound: then the safe invariants hold over *every* reachable state, an exact proof.
         let mut closed = false;
+        // Cleared if a conditional effect ever fails to resolve to a tag from a concrete state: the graph
+        // is then under-explored, so no exact-proof claim can be made (witnesses stay sound).
+        let mut sound_closure = true;
         for depth in 0..=BMC_MAX {
             for (st, path) in &frontier {
                 for (iname, inv) in &invs {
@@ -1677,8 +1732,21 @@ pub fn bmc_enum(module: &Module, src: &str) -> Vec<Diagnostic> {
                         continue;
                     }
                     let mut ns = st.clone();
-                    for (k, v) in &act.eff {
-                        ns.insert(k.clone(), v.clone());
+                    let mut resolved = true;
+                    for (obs, rhs) in &act.eff {
+                        match resolve_tag(rhs, st) {
+                            Some(tag) => {
+                                ns.insert(obs.clone(), tag);
+                            }
+                            None => {
+                                resolved = false; // a branch condition we cannot settle from this state
+                                break;
+                            }
+                        }
+                    }
+                    if !resolved {
+                        sound_closure = false;
+                        continue;
                     }
                     if seen.insert(key(&ns)) {
                         let mut np = path.clone();
@@ -1694,7 +1762,7 @@ pub fn bmc_enum(module: &Module, src: &str) -> Vec<Diagnostic> {
             frontier = next;
         }
         // Each invariant with no witnessed violation over the fully-explored reachable set is proven safe.
-        if closed {
+        if closed && sound_closure {
             for (iname, _) in &invs {
                 if !reported.contains(iname) && !indeterminate.contains(iname) {
                     out.push(Diagnostic::warning(
@@ -2568,6 +2636,17 @@ mod tests {
         assert!(!any(good, "REACHABLY VIOLATED"), "no reachable violation exists: {:?}", msgs(good));
         // The reachable graph closes (3 states), so the invariant is proven exactly, not just unwitnessed.
         assert!(any(good, "`deliver_after_process` in `Cyc` is PROVED SAFE"), "graph closes → exact proof: {:?}", msgs(good));
+    }
+
+    #[test]
+    fn bmc_enum_handles_conditional_effects() {
+        // A branching transition `phase = if ok = good then done else failed`: the branch is resolved
+        // against the concrete state, so a `bad` init reaches `failed` and violates `never_failed`.
+        let bad = "-- allium: 4\ncomponent Eval\n  entity E\n  observable state phase(E) : { pending | done | failed }\n  observable state ok(E) : { good | bad }\n  init means phase(e) = pending and ok(e) = bad\n  action run\n    requires phase(e) = pending\n    ensures phase(e) = if ok(e) = good then done else failed\n  invariant never_failed means phase(e) <> failed\nend\n";
+        assert!(any(bad, "`never_failed` in `Eval` is REACHABLY VIOLATED in 1 step(s): init -> run"), "{:?}", msgs(bad));
+        // The other branch (`good`) never reaches `failed`, and the graph closes: exact proof.
+        let good = "-- allium: 4\ncomponent Eval\n  entity E\n  observable state phase(E) : { pending | done | failed }\n  observable state ok(E) : { good | bad }\n  init means phase(e) = pending and ok(e) = good\n  action run\n    requires phase(e) = pending\n    ensures phase(e) = if ok(e) = good then done else failed\n  invariant never_failed means phase(e) <> failed\nend\n";
+        assert!(any(good, "`never_failed` in `Eval` is PROVED SAFE"), "good branch never fails: {:?}", msgs(good));
     }
 
     #[test]
