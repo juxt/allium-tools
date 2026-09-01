@@ -492,12 +492,13 @@ pub fn refinement(module: &Module, src: &str) -> Vec<Diagnostic> {
             })
             .collect();
 
+        let kw = if d.kind == crate::ast::DeclKind::Contract { "contract" } else { "component" };
         for sat in &d.satisfies {
             let cname = &sat.ty;
             let (promises, c_bool, _c_st) = match promises_of(cname) {
                 Some(x) => x,
                 None => {
-                    out.push(Diagnostic::warning(d.span, format!("component `{}` claims to satisfy `{}`, but no such contract is declared.", d.name, cname)));
+                    out.push(Diagnostic::warning(d.span, format!("{kw} `{}` claims to satisfy `{}`, but no such contract is declared.", d.name, cname)));
                     continue;
                 }
             };
@@ -545,16 +546,16 @@ pub fn refinement(module: &Module, src: &str) -> Vec<Diagnostic> {
                 } else {
                     " This holds wherever those invariants hold (a declarative component; no actions to check for preservation)."
                 };
-                out.push(Diagnostic::warning(d.span, format!("component `{}` SATISFIES contract `{}`: its invariants entail every promise ({}).{}", d.name, cname, entailed.join(", "), footing)));
+                out.push(Diagnostic::warning(d.span, format!("{kw} `{}` SATISFIES contract `{}`: its invariants entail every promise ({}).{}", d.name, cname, entailed.join(", "), footing)));
             } else {
                 for f in &failed {
-                    out.push(Diagnostic::warning(d.span, format!("component `{}` does NOT satisfy contract `{}`: promise `{}` is not entailed by its invariants — the detailed layer does not guarantee the abstract contract.", d.name, cname, f)));
+                    out.push(Diagnostic::warning(d.span, format!("{kw} `{}` does NOT satisfy contract `{}`: promise `{}` is not entailed by its invariants — the detailed layer does not guarantee the abstract contract.", d.name, cname, f)));
                 }
                 if !entailed.is_empty() {
-                    out.push(Diagnostic::warning(d.span, format!("component `{}` vs contract `{}`: entailed {}.", d.name, cname, entailed.join(", "))));
+                    out.push(Diagnostic::warning(d.span, format!("{kw} `{}` vs contract `{}`: entailed {}.", d.name, cname, entailed.join(", "))));
                 }
                 for s in &skipped {
-                    out.push(Diagnostic::warning(d.span, format!("component `{}` vs contract `{}`: promise `{}` not statically checked (outside the boolean fragment).", d.name, cname, s)));
+                    out.push(Diagnostic::warning(d.span, format!("{kw} `{}` vs contract `{}`: promise `{}` not statically checked (outside the boolean fragment).", d.name, cname, s)));
                 }
             }
         }
