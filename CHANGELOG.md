@@ -2,6 +2,10 @@
 
 Behaviour changes worth knowing before you upgrade. Releases ship from a single version tag, see `docs/releasing.md`.
 
+## Unreleased
+
+Member access is no longer mistaken for an import alias. The reference checker rereads `ident.UppercaseMember` member access as the legacy dotted import form `alias.TypeName`, and since 3.5.3 it errored `allium.reference.undefinedImportedAlias` on every such access whose identifier is not a `use` alias — so `properties.Status.status.name`, reading a capitalised key out of a `properties: Map<String, Any>` field, reddened the gate in a module with zero imports, naming an alias the author never wrote. The dotted reread now stands down when the identifier is a value name the module binds anywhere: a field or `name:` item of any block (entity, external entity, value, `given`, config, surface), a `variant` field, a `default` declaration's name, a `let`, a rule trigger parameter, a surface `context` binding, a lambda parameter or `for` binding — top-level `invariant` bodies included. A dotted qualifier bound nowhere still errors (the real legacy form with a missing `use`), a dotted qualifier that is a declared alias still gets its name checked against what the module offers, and the slash form `alias/Name` is unaffected. A `deferred` declaration's dotted path names a code location, not a value, so it is never exempt: a dangling legacy deferred reference keeps its error even when the module binds a value name spelled the same. This change only removes diagnostics; no previously green gate turns red (#97).
+
 ## 3.6.1
 
 Cross-module reference checking, new in 3.5.3, had three gaps. Closing them changes what `allium check` reports, and two of the changes can turn a previously green gate red on upgrade.

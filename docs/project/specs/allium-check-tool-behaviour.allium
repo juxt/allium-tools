@@ -496,9 +496,68 @@ rule UndeclaredImportAliasIsDiagnosedAtEveryReferenceSite {
 
     requires: QualifiedReferenceAppearsAtAnySite(alias, Name)
     requires: not UseDeclarationInModuleBinds(alias)
+    requires: not DottedRereadOfMemberAccessThroughLocallyBoundValueName(alias)
 
     ensures: FindingObserved(code: "allium.reference.undefinedImportedAlias", severity: error)
     ensures: FindingMessageAnchoredAtReferenceNamesUnknownAlias(alias)
+}
+
+-- The dotted reference form alias.TypeName is a heuristic reread of member
+-- access: the parser emits MemberAccess for ident.UppercaseField, never a
+-- qualified name (#97). When the identifier is a value name the module binds
+-- — an entity/external-entity/value field (a Map<String, Any> keyed by
+-- capitalised external names), a variant field declaration, a default
+-- declaration's name, a let binding, a given binding, a rule's trigger
+-- parameter, a surface context binding or projection, a config parameter, a
+-- lambda parameter or for-loop binding wherever it occurs (a top-level
+-- invariant body included) — the access navigates that binding's data and no
+-- alias is involved, so the unknown-alias error stands down. A dotted
+-- qualifier bound nowhere still errors: that is the real legacy dotted form
+-- with a missing use declaration. A dotted qualifier that IS a declared
+-- alias keeps flowing to the name-membership check, and the slash form
+-- alias/Name parses as a qualified name and is never exempt (#87's case C).
+-- A deferred declaration's dotted path names a code location, never member
+-- access on a value, so it is never exempt either: a value name spelled like
+-- its root does not silence the error on a dangling legacy deferred
+-- reference.
+
+rule MemberAccessOnLocallyBoundNameDrawsNoAliasError {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: MemberAccessReadsUppercaseMemberThroughIdentifier(binding, Name)
+    requires: ModuleBindsIdentifierAsLocalValueName(binding)
+    requires: not UseDeclarationInModuleBinds(binding)
+
+    ensures: FindingNotObserved(code: "allium.reference.undefinedImportedAlias", name: Name)
+}
+
+rule DottedReferenceThroughUnboundQualifierStillErrors {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: MemberAccessReadsUppercaseMemberThroughIdentifier(qualifier, Name)
+    requires: not ModuleBindsIdentifierAsLocalValueName(qualifier)
+    requires: not UseDeclarationInModuleBinds(qualifier)
+
+    ensures: FindingObserved(code: "allium.reference.undefinedImportedAlias", severity: error)
+}
+
+rule SlashFormReferenceNeverExemptFromAliasCheck {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: SlashQualifiedReferenceAppearsAtAnySite(alias, Name)
+    requires: not UseDeclarationInModuleBinds(alias)
+
+    ensures: FindingObserved(code: "allium.reference.undefinedImportedAlias", severity: error)
+}
+
+rule DeferredPathThroughBoundNameStillErrors {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: DeferredDeclarationPathReadsDottedNameThroughIdentifier(qualifier, Name)
+    requires: ModuleBindsIdentifierAsLocalValueName(qualifier)
+    requires: not UseDeclarationInModuleBinds(qualifier)
+
+    ensures: FindingObserved(code: "allium.reference.undefinedImportedAlias", severity: error)
 }
 
 -- Beyond the alias, the name itself must resolve: with a valid alias whose
