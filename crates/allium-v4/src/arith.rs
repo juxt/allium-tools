@@ -1520,6 +1520,14 @@ mod tests {
         // establish, so no false alarm.
         let free = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state count(O) : Number\n  init means outcome(o) = success\n  invariant ok means outcome(o) = success implies count(o) >= 0\n  action noop\n    requires outcome(o) = failure\n    ensures count(o) = count(o)\nend\n";
         assert!(!any(&egp(free), "does not establish state-guarded"), "free input at init: {:#?}", egp(free));
+
+        // Guarded MONOTONICITY (an `old`-based bound under a guard): while healthy the watermark never
+        // decreases. `retreat` breaks it; `advance` does not (old grounds to the pre-value).
+        let mhdr2 = "-- allium: 4\ncomponent L\n  entity S\n  observable state status(S) : { healthy | corrupted }\n  observable state wm(S) : Number\n  invariant advances means status(s) = healthy implies wm(s) >= old(wm(s))\n";
+        let retreat = format!("{mhdr2}  action retreat\n    requires status(s) = healthy\n    ensures wm(s) = old(wm(s)) - 1\nend\n");
+        assert!(any(&egp(&retreat), "`retreat` in `L` can break state-guarded invariant `advances`"), "{:#?}", egp(&retreat));
+        let advance = format!("{mhdr2}  action advance\n    requires status(s) = healthy\n    ensures wm(s) = old(wm(s)) + 1\nend\n");
+        assert!(!any(&egp(&advance), "can break state-guarded"), "{:#?}", egp(&advance));
     }
 
     #[test]
