@@ -93,6 +93,9 @@ fn resolve_names(module: &Module, src: &str) -> Vec<Diagnostic> {
                 scope.insert(n.clone());
             }
         }
+        // Payload fields of a sum/variant state observable are names too (`outputs` of `{ success
+        // { outputs } | … }`); their guarded-access is checked separately by `variant_access`.
+        scope.extend(crate::analyse::variant_fields_of(d, src).into_keys());
 
         // Resolve each predicate body in the declaration.
         for it in &d.items {
