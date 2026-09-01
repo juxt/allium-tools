@@ -809,7 +809,7 @@ fn substitute(e: &Expr, map: &HashMap<String, Expr>) -> Expr {
 /// Inline calls to defined givens (`f(params) means body`, an OCaml-style pure reference function) by
 /// substituting arguments into the body. Lets invariants use reference-oracle definitions; nested
 /// definition calls resolve by re-inlining the substituted body.
-fn inline_defs(e: &Expr, defs: &HashMap<String, (Vec<String>, Expr)>) -> Expr {
+pub(crate) fn inline_defs(e: &Expr, defs: &HashMap<String, (Vec<String>, Expr)>) -> Expr {
     match e {
         Expr::App { head, args } => {
             let iargs: Vec<Expr> = args.iter().map(|a| inline_defs(a, defs)).collect();
@@ -841,7 +841,7 @@ fn inline_defs(e: &Expr, defs: &HashMap<String, (Vec<String>, Expr)>) -> Expr {
 /// True when a parsed given-body is a COMPUTATION (a reference definition) rather than a type
 /// annotation. `given x : Money` parses to a bare Name/App (type); `given x means a*b/c` parses to an
 /// arithmetic expression. Lets us inline 0-ary reference constants without mistaking `: T` for a def.
-fn is_computation(e: &Expr) -> bool {
+pub(crate) fn is_computation(e: &Expr) -> bool {
     matches!(e, Expr::Binary { .. } | Expr::Unary { .. } | Expr::Int(_) | Expr::Dec(_, _) | Expr::Sum { .. })
 }
 

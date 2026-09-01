@@ -469,6 +469,23 @@ pub fn refinement(module: &Module, src: &str) -> Vec<Diagnostic> {
             .filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given))
             .filter_map(|it| Some((it.name.clone()?, it.body?.slice(src).trim().to_string())))
             .collect();
+        // The component's own `given` definitions, used as the VOCABULARY MAPPING between the abstract
+        // contract and the detail: a promise phrased in abstract terms (`funded`) is rewritten into detail
+        // terms (`cash_moved and sec_moved`) by inlining these before the entailment check. Reuses the
+        // existing `given … means …` construct — no new syntax — so layers may use different words.
+        let x_defs: HashMap<String, (Vec<String>, Expr)> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Given && it.body.is_some())
+            .filter_map(|it| {
+                let name = it.name.clone()?;
+                let body = parse_predicate(it.body?.slice(src)).0;
+                if it.params.is_empty() && !crate::monitor::is_computation(&body) {
+                    return None; // a type annotation, not a definition
+                }
+                Some((name, (it.params.clone(), body)))
+            })
+            .collect();
 
         for sat in &d.satisfies {
             let cname = &sat.ty;
@@ -487,7 +504,9 @@ pub fn refinement(module: &Module, src: &str) -> Vec<Diagnostic> {
             let mut failed = Vec::new();
             let mut skipped = Vec::new();
             for (pname, promise) in &promises {
-                let pn = normalize(promise);
+                // Rewrite the promise from abstract to detail vocabulary via the component's definitions.
+                let mapped = crate::monitor::inline_defs(promise, &x_defs);
+                let pn = normalize(&mapped);
                 // Only the boolean fragment for now; classify others out honestly.
                 let body = universal_body(&pn).map(|(_, b)| b).unwrap_or_else(|| pn.clone());
                 if !has_quant(&body) && boolean_fragment_rel(&body, &x_bool, &all_obs) {
@@ -1759,6 +1778,16 @@ mod tests {
         let ok = "-- allium: 4\ncontract Settle\n  entity T\n  observable state settled(T) : bool\n  observable state funded(T) : bool\n  guarantee sif means settled(t) implies funded(t)\nend\ncomponent Impl satisfies (s : Settle)\n  entity T\n  observable state settled(T) : bool\n  observable state cash(T) : bool\n  observable state funded(T) : bool\n  invariant a means settled(t) implies cash(t)\n  invariant b means cash(t) implies funded(t)\nend\n";
         assert!(any(ok, "`Impl` SATISFIES contract `Settle`"), "{:?}", msgs(ok));
         let bad = "-- allium: 4\ncontract Settle\n  entity T\n  observable state settled(T) : bool\n  observable state funded(T) : bool\n  guarantee sif means settled(t) implies funded(t)\nend\ncomponent Impl satisfies (s : Settle)\n  entity T\n  observable state settled(T) : bool\n  observable state cash(T) : bool\n  observable state funded(T) : bool\n  invariant a means settled(t) implies cash(t)\nend\n";
+        assert!(any(bad, "does NOT satisfy contract `Settle`"), "{:?}", msgs(bad));
+    }
+
+    #[test]
+    fn refinement_across_vocabularies_via_given_mapping() {
+        // The abstract `funded` is bridged to detail terms by a `given` definition (no new construct);
+        // refinement inlines it, so the layers may use different words. Dropping a leg breaks it.
+        let ok = "-- allium: 4\ncontract Settle\n  entity T\n  observable state settled(T) : bool\n  observable state funded(T) : bool\n  guarantee sf means settled(t) implies funded(t)\nend\ncomponent Impl satisfies (s : Settle)\n  entity T\n  observable state settled(T) : bool\n  observable state cash(T) : bool\n  observable state sec(T) : bool\n  given funded(t) means cash(t) and sec(t)\n  invariant a means settled(t) implies cash(t)\n  invariant b means settled(t) implies sec(t)\nend\n";
+        assert!(any(ok, "`Impl` SATISFIES contract `Settle`"), "{:?}", msgs(ok));
+        let bad = "-- allium: 4\ncontract Settle\n  entity T\n  observable state settled(T) : bool\n  observable state funded(T) : bool\n  guarantee sf means settled(t) implies funded(t)\nend\ncomponent Impl satisfies (s : Settle)\n  entity T\n  observable state settled(T) : bool\n  observable state cash(T) : bool\n  observable state sec(T) : bool\n  given funded(t) means cash(t) and sec(t)\n  invariant a means settled(t) implies cash(t)\nend\n";
         assert!(any(bad, "does NOT satisfy contract `Settle`"), "{:?}", msgs(bad));
     }
 
