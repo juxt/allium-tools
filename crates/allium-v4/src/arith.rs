@@ -1528,9 +1528,9 @@ mod tests {
             let m = parse(src).module;
             super::arith_preservation(&m, src).into_iter().map(|d| d.message).collect()
         };
-        // init sets balance = -5, contradicting the refinement balance >= 0.
-        let bad = "-- allium: 4\ncomponent B\n  entity A\n  observable state balance(A) : Money where balance(a) >= 0\n  init means balance(a) = 0 - 5\n  action dep\n    ensures balance(a) = balance(a) + 1\nend\n";
-        assert!(any(&run_ap(bad), "`init` in `B` does not establish arithmetic invariant `refine[balance]`"), "{:#?}", run_ap(bad));
+        // init sets balance = -5, contradicting the invariant balance >= 0.
+        let bad = "-- allium: 4\ncomponent B\n  entity A\n  observable state balance(A) : Money\n  observable state floor(A) : Money\n  init means balance(a) = 0 - 5 and floor(a) = 0\n  invariant nonneg means balance(a) >= floor(a)\n  action dep\n    ensures balance(a) = balance(a) + 1\nend\n";
+        assert!(any(&run_ap(bad), "`init` in `B` does not establish arithmetic invariant `nonneg`"), "{:#?}", run_ap(bad));
         // A good init (balance = 0) does not.
         let good = bad.replace("balance(a) = 0 - 5", "balance(a) = 0");
         assert!(!any(&run_ap(&good), "does not establish arithmetic"), "{:#?}", run_ap(&good));
