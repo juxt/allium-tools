@@ -37,6 +37,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source));
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source));
+    r.diagnostics.append(&mut tier_report(&r.module, source));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
     // "jointly satisfiable" while the (stronger) arithmetic tier reports it CONTRADICTORY or
     // VACUOUSLY. That dual message is misleading and the elicit gate reads it. The arithmetic
@@ -420,6 +421,146 @@ fn as_literals(e: &Expr, state: &HashSet<String>, out: &mut Vec<(Expr, bool)>) -
         }
         _ => false,
     }
+}
+
+/// The reasoning tier an invariant needs, decided syntactically (cheap and sound: it only classifies; the
+/// proofs come from the other passes). This is the "which rung" of the reasoning ladder, made explicit so
+/// coverage is transparent rather than silently skipped.
+enum Tier {
+    /// Boolean logic (flags, guards, entity equality) — the SAT rung.
+    Boolean,
+    /// Linear arithmetic — the LRA rung (add, subtract, multiply-by-constant, comparisons, sums).
+    LinearArith,
+    /// Beyond the statically-decidable rungs we ship; carry the reason and the runtime fallback.
+    NotStatic(String),
+}
+
+/// Names of numeric-typed state/given items in a declaration (for classifying arithmetic as linear).
+fn numeric_names_of(d: &crate::ast::Decl, src: &str) -> HashSet<String> {
+    d.items
+        .iter()
+        .filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given))
+        .filter_map(|it| {
+            let name = it.name.clone()?;
+            crate::arith::numeric(it.body?.slice(src).trim()).then_some(name)
+        })
+        .collect()
+}
+
+/// Does `e` mention a numeric variable (an application/name whose head is a numeric state/given)?
+fn has_num_var(e: &Expr, num: &HashSet<String>) -> bool {
+    match e {
+        Expr::Name(n) => num.contains(n),
+        Expr::App { head, args } => matches!(&**head, Expr::Name(h) if num.contains(h)) || has_num_var(head, num) || args.iter().any(|a| has_num_var(a, num)),
+        Expr::Field { name, base } => num.contains(name) || has_num_var(base, num),
+        Expr::Unary { e, .. } => has_num_var(e, num),
+        Expr::Binary { lhs, rhs, .. } => has_num_var(lhs, num) || has_num_var(rhs, num),
+        Expr::Cond { cond, then_, els } => has_num_var(cond, num) || has_num_var(then_, num) || has_num_var(els, num),
+        _ => false,
+    }
+}
+
+/// The first nonlinear construct in `e`, if any: a product of two unknowns, a division by an unknown, or a
+/// power. These are outside the linear-arithmetic rung and are checked only at runtime by `monitor`.
+fn nonlinear_reason(e: &Expr, num: &HashSet<String>) -> Option<String> {
+    match e {
+        Expr::Binary { op: BinOp::Pow, .. } => Some("a power (`^`)".into()),
+        Expr::Binary { op: BinOp::Mul, lhs, rhs } if has_num_var(lhs, num) && has_num_var(rhs, num) => {
+            Some(format!("a product of two unknowns (`{}`)", canon(e)))
+        }
+        Expr::Binary { op: BinOp::Div, lhs, rhs } if has_num_var(rhs, num) => {
+            let _ = lhs;
+            Some(format!("a division by an unknown (`{}`)", canon(e)))
+        }
+        Expr::Binary { lhs, rhs, .. } => nonlinear_reason(lhs, num).or_else(|| nonlinear_reason(rhs, num)),
+        Expr::Unary { e, .. } => nonlinear_reason(e, num),
+        Expr::Cond { cond, then_, els } => nonlinear_reason(cond, num).or_else(|| nonlinear_reason(then_, num)).or_else(|| nonlinear_reason(els, num)),
+        Expr::App { args, .. } => args.iter().find_map(|a| nonlinear_reason(a, num)),
+        Expr::Sum { body, .. } => nonlinear_reason(body, num),
+        _ => None,
+    }
+}
+
+/// Classify an invariant by the rung it needs. Existential quantifiers and 3+ entity variables are honestly
+/// reported as not-statically-covered; a nonlinear term names its shape; otherwise boolean or linear.
+fn classify(inv: &Expr, bool_base: &HashSet<String>, all_obs: &HashSet<String>, num: &HashSet<String>) -> Tier {
+    // Peel universal quantifiers; an existential anywhere is beyond the bounded static fragment.
+    if contains_existential(inv) {
+        return Tier::NotStatic("an existential quantifier (`some`/`exists`)".into());
+    }
+    let (vars, body) = universal_body(inv).unwrap_or_else(|| (Vec::new(), inv.clone()));
+    if vars.len() > 2 {
+        return Tier::NotStatic(format!("{}-way quantification (static support covers up to two entities)", vars.len()));
+    }
+    if let Some(r) = nonlinear_reason(&body, num) {
+        return Tier::NotStatic(r);
+    }
+    if boolean_fragment_rel(&body, bool_base, all_obs) {
+        Tier::Boolean
+    } else {
+        Tier::LinearArith
+    }
+}
+
+/// Does `e` contain an existential/exists-one quantifier anywhere?
+fn contains_existential(e: &Expr) -> bool {
+    match e {
+        Expr::Quant { q, body, .. } => !matches!(q, Quant::Every | Quant::No) || contains_existential(body),
+        Expr::Binary { lhs, rhs, .. } => contains_existential(lhs) || contains_existential(rhs),
+        Expr::Unary { e, .. } => contains_existential(e),
+        Expr::Cond { cond, then_, els } => contains_existential(cond) || contains_existential(then_) || contains_existential(els),
+        Expr::App { args, .. } => args.iter().any(contains_existential),
+        Expr::Sum { body, .. } => contains_existential(body),
+        _ => false,
+    }
+}
+
+/// Transparent tiering. For each component, report which reasoning rung each invariant was checked at, and
+/// name every invariant that falls outside the statically-decidable rungs together with the reason and the
+/// runtime fallback. This turns silent skips into an explicit coverage account: the spec stays natural, and
+/// the tool says exactly what it proved and what it could not reach. The "no vacuous filler" promise.
+pub fn tier_report(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let bool_base = bool_names_of(d, src);
+        let all_obs: HashSet<String> =
+            d.items.iter().filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given)).filter_map(|it| it.name.clone()).collect();
+        let num = numeric_names_of(d, src);
+        let invs: Vec<(String, Expr)> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Invariant)
+            .filter_map(|it| Some((it.name.clone()?, parse_predicate(it.body?.slice(src)).0)))
+            .collect();
+        if invs.is_empty() {
+            continue;
+        }
+        let mut boolean = Vec::new();
+        let mut linear = Vec::new();
+        let mut runtime = Vec::new();
+        for (name, inv) in &invs {
+            match classify(inv, &bool_base, &all_obs, &num) {
+                Tier::Boolean => boolean.push(name.clone()),
+                Tier::LinearArith => linear.push(name.clone()),
+                Tier::NotStatic(reason) => runtime.push(format!("{name} ({reason})")),
+            }
+        }
+        let mut parts = Vec::new();
+        if !boolean.is_empty() {
+            parts.push(format!("boolean tier: {}", boolean.join(", ")));
+        }
+        if !linear.is_empty() {
+            parts.push(format!("linear-arithmetic tier: {}", linear.join(", ")));
+        }
+        if !runtime.is_empty() {
+            parts.push(format!("NOT statically checked, verify with `monitor` against real traces: {}", runtime.join("; ")));
+        }
+        out.push(Diagnostic::warning(
+            d.span,
+            format!("analysis coverage for `{}` ({} invariant(s)) — {}.", d.name, invs.len(), parts.join(" | ")),
+        ));
+    }
+    out
 }
 
 /// A second canonical entity, distinct from `ENT`, for relational (two-entity) invariants.
@@ -1504,6 +1645,19 @@ mod tests {
         assert!(any(bad, "can break relational invariant `at_most_one`"), "{:?}", msgs(bad));
         let release = "-- allium: 4\ncomponent L\n  entity H\n  observable state active(H) : bool\n  action release\n    requires active(h)\n    ensures not active(h)\n  invariant at_most_one means every a :: every b :: (active(a) and active(b)) implies a = b\nend\n";
         assert!(!any(release, "can break relational"), "deactivation cannot break at-most-one: {:?}", msgs(release));
+    }
+
+    #[test]
+    fn tier_report_classifies_each_invariant_transparently() {
+        // A boolean invariant, a linear-arithmetic one, and a nonlinear one (rate x balance). The coverage
+        // report must place the first two at their tiers and name the third as not-statically-checked with
+        // its reason — no silent skip.
+        let src = "-- allium: 4\ncomponent C\n  entity P\n  observable state paid(P) : bool\n  observable state settled(P) : bool\n  observable state bal(P) : Money\n  observable state amt(P) : Money\n  observable state rate(P) : Rate\n  observable state interest(P) : Money\n  invariant flag_ok means every p :: settled(p) implies paid(p)\n  invariant sum_ok means every p :: bal(p) = amt(p)\n  invariant int_ok means every p :: interest(p) = rate(p) * bal(p)\nend\n";
+        let cov = msgs(src).into_iter().find(|m| m.contains("analysis coverage")).unwrap();
+        assert!(cov.contains("boolean tier: flag_ok"), "{cov}");
+        assert!(cov.contains("linear-arithmetic tier: sum_ok"), "{cov}");
+        assert!(cov.contains("int_ok (a product of two unknowns"), "{cov}");
+        assert!(cov.contains("verify with `monitor`"), "{cov}");
     }
 
     #[test]

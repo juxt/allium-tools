@@ -383,7 +383,7 @@ fn is_rate(t: &str) -> bool {
     let h = head(t);
     matches!(h.as_str(), "rate" | "ratio" | "factor" | "percent" | "percentage")
 }
-fn numeric(t: &str) -> bool {
+pub(crate) fn numeric(t: &str) -> bool {
     let h = head(t);
     matches!(
         h.as_str(),
@@ -392,7 +392,7 @@ fn numeric(t: &str) -> bool {
             | "scalar" | "mass" | "length" | "duration" | "weight" | "distance" | "quantity" | "volume"
     )
 }
-fn head(t: &str) -> String {
+pub(crate) fn head(t: &str) -> String {
     t.trim().split('(').next().unwrap_or("").trim().to_lowercase()
 }
 
