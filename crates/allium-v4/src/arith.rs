@@ -882,11 +882,18 @@ pub fn aggregate_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
             if let Some(g) = &guard_raw {
                 crate::analyse::collect_entity_vars(g, &mut ev);
             }
-            if ev.len() > 1 {
-                continue; // 2-entity transfers are out of this slice
+            if ev.len() > 2 {
+                continue; // single actions, 2-entity transfers, and total-only actions; 3+ out of scope
             }
-            let ensures = crate::analyse::rename_entity(&ensures_raw, &ev);
-            let guard = guard_raw.map(|g| crate::analyse::rename_entity(&g, &ev));
+            // Map the action's (up to two) entities to distinct markers _e, _f, so a transfer's two
+            // contributions to the sum are kept separate (their deltas cancel when balanced).
+            let mut evs: Vec<String> = ev.into_iter().collect();
+            evs.sort();
+            let markers: Vec<&str> = ["_e", "_f"][..evs.len()].to_vec();
+            let ent_map: HashMap<String, String> =
+                evs.iter().zip(markers.iter()).map(|(v, m)| (v.clone(), m.to_string())).collect();
+            let ensures = crate::analyse::rename_vars(&ensures_raw, &ent_map);
+            let guard = guard_raw.map(|g| crate::analyse::rename_vars(&g, &ent_map));
             let mut modified = HashSet::new();
             crate::analyse::collect_writes(&ensures, false, &state_names, &mut modified);
             let modified_num: HashSet<String> =
@@ -917,27 +924,34 @@ pub fn aggregate_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
             };
 
             for c in &cons_invs {
-                // The summed body for the action's entity, and how it changes.
-                let ent: HashSet<String> = [c.sum_var.clone()].into();
-                let body_e = crate::analyse::rename_entity(&c.sum_body, &ent);
+                // The change to the sum = the sum over the action's entities of that entity's body delta.
+                let mut delta = Expr::Int(0);
+                let mut body_modified = false;
+                for m in &markers {
+                    let map: HashMap<String, String> = [(c.sum_var.clone(), m.to_string())].into();
+                    let body_m = crate::analyse::rename_vars(&c.sum_body, &map);
+                    if !crate::analyse::mentions_any(&body_m, &modified_num) {
+                        continue; // this entity's contribution is unchanged
+                    }
+                    body_modified = true;
+                    let body_m_post = crate::analyse::prime(&body_m, &modified_num, false);
+                    delta = Expr::Binary {
+                        op: BinOp::Add,
+                        lhs: Box::new(delta),
+                        rhs: Box::new(Expr::Binary { op: BinOp::Sub, lhs: Box::new(body_m_post), rhs: Box::new(body_m) }),
+                    };
+                }
                 let inv_pre_check = replace_sum(&c.body_qf, &Expr::Name("__S".into()));
-                // The action is relevant if it changes the summed quantity OR the total side. If it touches
-                // neither, conservation is untouched.
-                if !crate::analyse::mentions_any(&body_e, &modified_num)
-                    && !crate::analyse::mentions_any(&inv_pre_check, &modified_num)
-                {
+                // Relevant if the action changes the summed quantity OR the total side; else conservation
+                // is untouched.
+                if !body_modified && !crate::analyse::mentions_any(&inv_pre_check, &modified_num) {
                     continue;
                 }
-                let body_e_post = crate::analyse::prime(&body_e, &modified_num, false);
-                // S' = S + (body'(e) - body(e))
+                // S' = S + delta
                 let s_update = Expr::Binary {
                     op: BinOp::Eq,
                     lhs: Box::new(Expr::Name("__S'".into())),
-                    rhs: Box::new(Expr::Binary {
-                        op: BinOp::Add,
-                        lhs: Box::new(Expr::Name("__S".into())),
-                        rhs: Box::new(Expr::Binary { op: BinOp::Sub, lhs: Box::new(body_e_post), rhs: Box::new(body_e) }),
-                    }),
+                    rhs: Box::new(Expr::Binary { op: BinOp::Add, lhs: Box::new(Expr::Name("__S".into())), rhs: Box::new(delta) }),
                 };
                 let inv_pre = replace_sum(&c.body_qf, &Expr::Name("__S".into()));
                 let inv_post = crate::analyse::prime(&replace_sum(&c.body_qf, &Expr::Name("__S'".into())), &modified_num, false);
@@ -1934,6 +1948,11 @@ mod tests {
         // Adjusting total to match the balance change preserves it.
         let deposit = format!("{hdr}  action deposit\n    ensures balance(a) = old(balance(a)) + 1 and total = old(total) + 1\nend\n");
         assert!(!any(&agg(&deposit), "can break conservation"), "{:#?}", agg(&deposit));
+        // A balanced 2-entity transfer preserves conservation (deltas cancel); an unbalanced one breaks it.
+        let transfer = format!("{hdr}  action transfer\n    ensures balance(a) = old(balance(a)) - 1 and balance(b) = old(balance(b)) + 1\nend\n");
+        assert!(!any(&agg(&transfer), "can break conservation"), "balanced transfer: {:#?}", agg(&transfer));
+        let skew = format!("{hdr}  action transfer\n    ensures balance(a) = old(balance(a)) - 1 and balance(b) = old(balance(b)) + 2\nend\n");
+        assert!(any(&agg(&skew), "`transfer` in `Bank` can break conservation invariant `conserved`"), "unbalanced: {:#?}", agg(&skew));
     }
 
     #[test]

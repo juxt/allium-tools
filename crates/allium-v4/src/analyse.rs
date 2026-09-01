@@ -1111,7 +1111,7 @@ fn universal_body(inv: &Expr) -> Option<(Vec<String>, Expr)> {
 }
 
 /// Rename bare variable names via `map`.
-fn rename_vars(e: &Expr, map: &HashMap<String, String>) -> Expr {
+pub(crate) fn rename_vars(e: &Expr, map: &HashMap<String, String>) -> Expr {
     match e {
         Expr::Name(n) => Expr::Name(map.get(n).cloned().unwrap_or_else(|| n.clone())),
         Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(rename_vars(e, map)) },
