@@ -530,7 +530,17 @@ pub fn refinement(module: &Module, src: &str) -> Vec<Diagnostic> {
                 }
             }
             if failed.is_empty() && skipped.is_empty() && !entailed.is_empty() {
-                out.push(Diagnostic::warning(d.span, format!("component `{}` SATISFIES contract `{}`: its invariants entail every promise ({}).", d.name, cname, entailed.join(", "))));
+                // The guarantee is conditional on the entailing invariants holding. For a state machine
+                // that condition is discharged by the preservation pass (each invariant proved INDUCTIVE);
+                // for a purely declarative component the invariants are assumed. Say so, so the reader
+                // knows the guarantee's footing rather than over-reading "SATISFIES".
+                let is_machine = d.items.iter().any(|it| it.kind == ItemKind::Action);
+                let footing = if is_machine {
+                    " Provided those invariants are maintained (the preservation pass checks each action; see any findings above), the contract holds in every reachable state."
+                } else {
+                    " This holds wherever those invariants hold (a declarative component; no actions to check for preservation)."
+                };
+                out.push(Diagnostic::warning(d.span, format!("component `{}` SATISFIES contract `{}`: its invariants entail every promise ({}).{}", d.name, cname, entailed.join(", "), footing)));
             } else {
                 for f in &failed {
                     out.push(Diagnostic::warning(d.span, format!("component `{}` does NOT satisfy contract `{}`: promise `{}` is not entailed by its invariants — the detailed layer does not guarantee the abstract contract.", d.name, cname, f)));
