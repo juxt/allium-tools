@@ -1355,3 +1355,187 @@ fn a_trigger_the_provider_never_emits_still_warns() {
         "a trigger the provider never mentions must still warn.\n{stdout}"
     );
 }
+
+// ===========================================================================
+// related-surface links resolve through an alias
+// ===========================================================================
+
+const RELATED_PROVIDER: &str = r#"-- allium: 3
+entity User {
+    name: String
+}
+
+surface MergeWizard {
+    facing admin: User
+
+    context source: User
+
+    exposes:
+        source.name
+}
+"#;
+
+// The related: entry is the documented construct for linking to another
+// surface, and qualified names are the documented cross-module reference
+// form; the expression selects the instance the target's context binds to.
+const RELATED_CONSUMER: &str = r#"-- allium: 3
+use "./provider.allium" as merge
+
+entity Refusal {
+    sso_user: merge/User?
+    label: String
+}
+
+surface RefusalQueue {
+    facing admin: merge/User
+
+    context refusal: Refusal
+
+    exposes:
+        refusal.label
+
+    related:
+        merge/MergeWizard(refusal.sso_user) when refusal.sso_user != null
+}
+"#;
+
+#[test]
+fn qualified_related_surface_link_resolves() {
+    let dir = TempDir::new("related-surface");
+    dir.write("provider.allium", RELATED_PROVIDER);
+    dir.write("consumer.allium", RELATED_CONSUMER);
+
+    let (ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    let false_positives: Vec<_> = parse_diagnostics(&stdout)
+        .into_iter()
+        .filter(|d| {
+            d.code == "allium.reference.unknownName"
+                || d.code == "allium.surface.relatedUndefined"
+        })
+        .collect();
+    assert!(
+        false_positives.is_empty(),
+        "a related: link to a surface the imported module declares must resolve.\nGot: {:?}",
+        false_positives.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    assert!(ok, "check on the pair should exit 0.\n{stdout}");
+}
+
+#[test]
+fn merged_single_file_oracle_accepts_the_related_link() {
+    // The merged one-file control: the pair above must produce exactly what
+    // this produces (nothing).
+    let dir = TempDir::new("related-surface-oracle");
+    dir.write(
+        "merged.allium",
+        "-- allium: 3\nentity User {\n    name: String\n}\n\n\
+         entity Refusal {\n    sso_user: User?\n    label: String\n}\n\n\
+         surface MergeWizard {\n    facing admin: User\n\n    context source: User\n\n    exposes:\n        source.name\n}\n\n\
+         surface RefusalQueue {\n    facing admin: User\n\n    context refusal: Refusal\n\n    exposes:\n        refusal.label\n\n    related:\n        MergeWizard(refusal.sso_user) when refusal.sso_user != null\n}\n",
+    );
+
+    let (ok, stdout) = run("check", &[&dir.file("merged.allium")]);
+    assert!(
+        !parse_diagnostics(&stdout).iter().any(|d| {
+            d.code == "allium.surface.relatedUndefined"
+                || d.code == "allium.reference.unknownName"
+        }),
+        "the one-file control must accept the same link.\n{stdout}"
+    );
+    assert!(ok, "check on the merged file should exit 0.\n{stdout}");
+}
+
+#[test]
+fn a_related_link_to_a_surface_the_provider_never_declares_still_warns() {
+    // Don't overcorrect: membership still fails for a surface name the
+    // provider never mentions.
+    let dir = TempDir::new("related-surface-guard");
+    dir.write("provider.allium", RELATED_PROVIDER);
+    dir.write(
+        "consumer.allium",
+        "-- allium: 3\nuse \"./provider.allium\" as merge\n\n\
+         entity Refusal {\n    sso_user: merge/User?\n    label: String\n}\n\n\
+         surface RefusalQueue {\n    facing admin: merge/User\n\n    context refusal: Refusal\n\n    exposes:\n        refusal.label\n\n    related:\n        merge/NoSuchSurface(refusal.sso_user) when refusal.sso_user != null\n}\n",
+    );
+
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        parse_diagnostics(&stdout)
+            .iter()
+            .any(|d| d.code == "allium.reference.unknownName" && d.message.contains("NoSuchSurface")),
+        "a surface name the provider never declares must still warn.\n{stdout}"
+    );
+}
+
+#[test]
+fn unqualified_related_link_stays_local() {
+    // The local check is untouched: an unqualified related: entry resolves
+    // against this file's surfaces only, import or no import.
+    let dir = TempDir::new("related-surface-local");
+    dir.write("provider.allium", RELATED_PROVIDER);
+    dir.write(
+        "consumer.allium",
+        "-- allium: 3\nuse \"./provider.allium\" as merge\n\n\
+         entity Refusal {\n    sso_user: merge/User?\n    label: String\n}\n\n\
+         surface RefusalQueue {\n    facing admin: merge/User\n\n    context refusal: Refusal\n\n    exposes:\n        refusal.label\n\n    related:\n        MergeWizard(refusal.sso_user) when refusal.sso_user != null\n}\n",
+    );
+
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        parse_diagnostics(&stdout)
+            .iter()
+            .any(|d| d.code == "allium.surface.relatedUndefined" && d.message.contains("MergeWizard")),
+        "an unqualified related: entry must still resolve locally only.\n{stdout}"
+    );
+}
+
+#[test]
+fn a_qualified_surface_name_outside_related_is_disclosed_behaviour() {
+    // Disclosed side effect of offering surfaces: membership is a
+    // name-existence check, not a kind check, so a qualified reference to a
+    // surface name draws no unknownName even where a surface makes no sense
+    // (here a when: subscription). A future kind-aware refinement should
+    // flip this pin consciously.
+    let dir = TempDir::new("related-surface-kindless");
+    dir.write("provider.allium", RELATED_PROVIDER);
+    dir.write(
+        "consumer.allium",
+        "-- allium: 3\nuse \"./provider.allium\" as merge\n\n\
+         rule ReactsToWizard {\n    when: merge/MergeWizard(user)\n\n    ensures: Logged(user: user)\n}\n",
+    );
+
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        !parse_diagnostics(&stdout)
+            .iter()
+            .any(|d| d.code == "allium.reference.unknownName" && d.message.contains("MergeWizard")),
+        "surface names are offered by name-existence, not by kind.\n{stdout}"
+    );
+}
+
+#[test]
+fn a_default_typed_to_an_imported_surface_is_disclosed_behaviour() {
+    // The other disclosed position: a default literal typed to an imported
+    // surface loses its unknownName warning along with every other qualified
+    // reference to the name, and nothing replaces it — surfaces carry no
+    // field schema, so the literal's fields go unvalidated
+    // (allium.default.unknownField fires only for entity-typed defaults).
+    // Deferred-root-typed defaults already behave the same way. A future
+    // kind-aware refinement should flip this pin consciously.
+    let dir = TempDir::new("related-surface-default");
+    dir.write("provider.allium", RELATED_PROVIDER);
+    dir.write(
+        "consumer.allium",
+        "-- allium: 3\nuse \"./provider.allium\" as merge\n\n\
+         default merge/MergeWizard fallback = { nam: \"typo\" }\n",
+    );
+
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        !parse_diagnostics(&stdout).iter().any(|d| {
+            (d.code == "allium.reference.unknownName" && d.message.contains("MergeWizard"))
+                || d.code == "allium.default.unknownField"
+        }),
+        "a surface-typed default resolves by name and gets no field validation.\n{stdout}"
+    );
+}

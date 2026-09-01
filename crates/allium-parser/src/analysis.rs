@@ -4731,8 +4731,10 @@ pub fn collect_trigger_outputs(module: &Module) -> HashSet<String> {
 /// Collect every name a module *offers* to importers: declared type names
 /// (`collect_declared_names`), every trigger name it references — provided,
 /// emitted (`collect_trigger_outputs`), or listened for in `when:` clauses —
-/// its `deferred` declarations, and `config` when it declares a config block
-/// (the language reference's "Config parameter references" makes
+/// its `deferred` declarations, its surface names (a `related:` entry in an
+/// importing module links to them qualified, and any qualified reference to a
+/// surface the module declares resolves), and `config` when it declares a
+/// config block (the language reference's "Config parameter references" makes
 /// `alias/config.param` a documented reference form, checker rule 46).
 /// Used by multi-file checking to validate a qualified reference `alias/Name`
 /// against the aliased module — a name it never mentions is a resolution error
@@ -4754,6 +4756,16 @@ pub fn collect_referenced_trigger_names(module: &Module) -> HashSet<String> {
             }
             Decl::Block(b) if b.kind == BlockKind::Config => {
                 names.insert("config".to_string());
+            }
+            // A surface is a navigation target: an importing module's
+            // `related:` entry links to it qualified (`alias/Surface(expr)`),
+            // and any qualified reference to a surface the module declares
+            // resolves — membership is a name-existence check, not a kind
+            // check.
+            Decl::Block(b) if b.kind == BlockKind::Surface => {
+                if let Some(n) = &b.name {
+                    names.insert(n.name.clone());
+                }
             }
             Decl::Block(b) if b.kind == BlockKind::Rule => {
                 for item in &b.items {
@@ -6085,7 +6097,9 @@ impl Ctx<'_> {
                 .and_then(|m| m.get(r.qualifier))
             {
                 // The alias resolves into the check set: the name must be one the
-                // aliased module offers (a declared type or a referenced trigger).
+                // aliased module offers (a declared type, a referenced trigger, a
+                // surface, `config`, or a deferred root —
+                // `collect_referenced_trigger_names` is the authoritative set).
                 // A target outside the check set is unknowable and left alone.
                 // Collection references (`for t in alias/Things`) name a
                 // pluralised entity form the offered set cannot hold, so the
@@ -8096,6 +8110,15 @@ surface AccountManagement {
         let names = collect_referenced_trigger_names(&result.module);
         assert!(!names.contains("config"), "no config block, no config offering");
         assert!(!names.contains("ExternalHelper"));
+    }
+
+    #[test]
+    fn surface_names_are_offered_to_importers() {
+        let input = "-- allium: 3\nentity User {\n    name: String\n}\n\nsurface MergeWizard {\n    facing admin: User\n\n    context source: User\n}\n";
+        let result = parse(input);
+        let names = collect_referenced_trigger_names(&result.module);
+        assert!(names.contains("MergeWizard"), "a declared surface is referenceable as alias/Surface (a related: link)");
+        assert!(!names.contains("NoSuchSurface"), "a surface name the module never declares is not offered");
     }
 
     #[test]
