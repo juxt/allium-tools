@@ -214,6 +214,38 @@ pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
     out
 }
 
+/// Linear-arithmetic entailment for refinement: do the component's invariants `x_invs` entail `promise`?
+/// Returns `Some(true)` if every way the promise could fail is inconsistent with the invariants,
+/// `Some(false)` with the first counterexample shape it finds, or `None` if the promise is not linearisable
+/// (the caller then reports it as not-statically-checked). Reuses the same `_e`-normalisation and simplex
+/// as arithmetic preservation, so it is sound: only cleanly-linear invariants contribute as hypotheses.
+pub fn entails_linear(x_invs: &[Expr], promise: &Expr, st: &HashMap<String, String>) -> Option<bool> {
+    let mut x_cons: Vec<Con> = Vec::new();
+    for inv in x_invs {
+        if let Some(body) = arith_reduce(inv) {
+            let (c, notes) = ground(&body, st);
+            if !notes {
+                x_cons.extend(c);
+            }
+        }
+    }
+    let body = arith_reduce(promise)?;
+    let (p_cons, p_notes) = ground(&body, st);
+    if p_notes || p_cons.is_empty() {
+        return None;
+    }
+    for pc in &p_cons {
+        for neg in negate_con(pc) {
+            let mut q = x_cons.clone();
+            q.push(neg);
+            if let Outcome::Sat(_) = solve(&q) {
+                return Some(false);
+            }
+        }
+    }
+    Some(true)
+}
+
 /// Reduce an invariant to the entity-normalised quantifier-free body the LRA preservation check runs:
 /// a plain invariant, or a single-variable `every p :: body` (a universal safety property). Existential,
 /// multi-variable, and nested-quantifier invariants are out of scope (None).

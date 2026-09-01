@@ -434,7 +434,7 @@ fn as_literals(e: &Expr, state: &HashSet<String>, out: &mut Vec<(Expr, bool)>) -
 /// design decision; this ships the entailment reading with a proposal note (ladders/REFINEMENT-NOTE.md).
 pub fn refinement(module: &Module, src: &str) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    let promises_of = |name: &str| -> Option<(Vec<(String, Expr)>, HashSet<String>, HashSet<String>)> {
+    let promises_of = |name: &str| -> Option<(Vec<(String, Expr)>, HashSet<String>, HashMap<String, String>)> {
         let c = module.decls.iter().find(|d| d.name == name)?;
         let ps = c
             .items
@@ -442,7 +442,13 @@ pub fn refinement(module: &Module, src: &str) -> Vec<Diagnostic> {
             .filter(|it| matches!(it.kind, ItemKind::Invariant | ItemKind::Axiom | ItemKind::Guarantee))
             .filter_map(|it| Some((it.name.clone().unwrap_or_else(|| "<anon>".into()), parse_predicate(it.body?.slice(src)).0)))
             .collect();
-        Some((ps, bool_names_of(c, src), numeric_names_of(c, src)))
+        let c_st: HashMap<String, String> = c
+            .items
+            .iter()
+            .filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given))
+            .filter_map(|it| Some((it.name.clone()?, it.body?.slice(src).trim().to_string())))
+            .collect();
+        Some((ps, bool_names_of(c, src), c_st))
     };
     for d in &module.decls {
         if d.satisfies.is_empty() {
@@ -456,10 +462,17 @@ pub fn refinement(module: &Module, src: &str) -> Vec<Diagnostic> {
             .filter_map(|it| Some(normalize(&parse_predicate(it.body?.slice(src)).0)))
             .collect();
         let x_bool = bool_names_of(d, src);
+        // Numeric type map spanning X (and, added per-contract below, C), for linear-arithmetic promises.
+        let x_st: HashMap<String, String> = d
+            .items
+            .iter()
+            .filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given))
+            .filter_map(|it| Some((it.name.clone()?, it.body?.slice(src).trim().to_string())))
+            .collect();
 
         for sat in &d.satisfies {
             let cname = &sat.ty;
-            let (promises, c_bool, _c_num) = match promises_of(cname) {
+            let (promises, c_bool, _c_st) = match promises_of(cname) {
                 Some(x) => x,
                 None => {
                     out.push(Diagnostic::warning(d.span, format!("component `{}` claims to satisfy `{}`, but no such contract is declared.", d.name, cname)));
@@ -477,16 +490,24 @@ pub fn refinement(module: &Module, src: &str) -> Vec<Diagnostic> {
                 let pn = normalize(promise);
                 // Only the boolean fragment for now; classify others out honestly.
                 let body = universal_body(&pn).map(|(_, b)| b).unwrap_or_else(|| pn.clone());
-                if has_quant(&body) || !boolean_fragment_rel(&body, &x_bool, &all_obs) {
-                    skipped.push(pname.clone());
-                    continue;
-                }
-                let neg = Expr::Unary { op: UnOp::Not, e: Box::new(body.clone()) };
-                let mut es: Vec<&Expr> = x_guar.iter().collect();
-                es.push(&neg);
-                match crate::sat::satisfiable(&es, &bnames) {
-                    None => entailed.push(pname.clone()),
-                    Some(_) => failed.push(pname.clone()),
+                if !has_quant(&body) && boolean_fragment_rel(&body, &x_bool, &all_obs) {
+                    // Boolean promise: entailment via SAT.
+                    let neg = Expr::Unary { op: UnOp::Not, e: Box::new(body.clone()) };
+                    let mut es: Vec<&Expr> = x_guar.iter().collect();
+                    es.push(&neg);
+                    match crate::sat::satisfiable(&es, &bnames) {
+                        None => entailed.push(pname.clone()),
+                        Some(_) => failed.push(pname.clone()),
+                    }
+                } else {
+                    // Linear-arithmetic promise: entailment via the simplex. The type map spans X and C.
+                    let mut st = x_st.clone();
+                    st.extend(_c_st.clone());
+                    match crate::arith::entails_linear(&x_guar, &pn, &st) {
+                        Some(true) => entailed.push(pname.clone()),
+                        Some(false) => failed.push(pname.clone()),
+                        None => skipped.push(pname.clone()),
+                    }
                 }
             }
             if failed.is_empty() && skipped.is_empty() && !entailed.is_empty() {
@@ -1739,6 +1760,16 @@ mod tests {
         assert!(any(ok, "`Impl` SATISFIES contract `Settle`"), "{:?}", msgs(ok));
         let bad = "-- allium: 4\ncontract Settle\n  entity T\n  observable state settled(T) : bool\n  observable state funded(T) : bool\n  guarantee sif means settled(t) implies funded(t)\nend\ncomponent Impl satisfies (s : Settle)\n  entity T\n  observable state settled(T) : bool\n  observable state cash(T) : bool\n  observable state funded(T) : bool\n  invariant a means settled(t) implies cash(t)\nend\n";
         assert!(any(bad, "does NOT satisfy contract `Settle`"), "{:?}", msgs(bad));
+    }
+
+    #[test]
+    fn refinement_arithmetic_entailment_via_lra() {
+        // Contract promises net >= 0; the component defines net = assets - liabilities and asserts
+        // assets >= liabilities. The simplex proves the promise entailed; dropping coverage breaks it.
+        let ok = "-- allium: 4\ncontract Solvent\n  entity A\n  observable state net(A) : Money\n  guarantee nn means every a :: net(a) >= 0\nend\ncomponent Impl satisfies (s : Solvent)\n  entity A\n  observable state assets(A) : Money\n  observable state liabilities(A) : Money\n  observable state net(A) : Money\n  invariant d means every a :: net(a) = assets(a) - liabilities(a)\n  invariant c means every a :: assets(a) >= liabilities(a)\nend\n";
+        assert!(any(ok, "`Impl` SATISFIES contract `Solvent`"), "{:?}", msgs(ok));
+        let bad = "-- allium: 4\ncontract Solvent\n  entity A\n  observable state net(A) : Money\n  guarantee nn means every a :: net(a) >= 0\nend\ncomponent Impl satisfies (s : Solvent)\n  entity A\n  observable state assets(A) : Money\n  observable state liabilities(A) : Money\n  observable state net(A) : Money\n  invariant d means every a :: net(a) = assets(a) - liabilities(a)\nend\n";
+        assert!(any(bad, "does NOT satisfy contract `Solvent`"), "{:?}", msgs(bad));
     }
 
     #[test]
