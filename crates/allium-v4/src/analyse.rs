@@ -53,6 +53,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut preservation(&r.module, source));
     r.diagnostics.append(&mut relational_preservation(&r.module, source));
     r.diagnostics.append(&mut bmc(&r.module, source));
+    r.diagnostics.append(&mut bmc_enum(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source));
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source));
@@ -1483,6 +1484,197 @@ pub fn bmc(module: &Module, src: &str) -> Vec<Diagnostic> {
     out
 }
 
+/// Evaluate an enum/boolean predicate against a concrete single-representative assignment of enum
+/// observables to variant tags. Returns None when the expression falls outside the evaluable fragment
+/// (arithmetic, aggregates, unresolved names): the caller declines rather than guess.
+fn eval_enum(e: &Expr, st: &HashMap<String, String>) -> Option<bool> {
+    match e {
+        Expr::Binary { op, lhs, rhs } => match op {
+            BinOp::And => Some(eval_enum(lhs, st)? && eval_enum(rhs, st)?),
+            BinOp::Or => Some(eval_enum(lhs, st)? || eval_enum(rhs, st)?),
+            BinOp::Implies => Some(!eval_enum(lhs, st)? || eval_enum(rhs, st)?),
+            BinOp::Eq | BinOp::Ne => {
+                let obs = atom_head(lhs)?;
+                let val = match rhs.as_ref() {
+                    Expr::Name(v) => v,
+                    _ => return None,
+                };
+                let eq = st.get(&obs)? == val;
+                Some(if *op == BinOp::Eq { eq } else { !eq })
+            }
+            _ => None,
+        },
+        Expr::Unary { op: UnOp::Not, e } => Some(!eval_enum(e, st)?),
+        // A universal over the single representative entity is just its body; matches how the rest of the
+        // analysis reasons over one entity. `some`/`no` are not evaluated on one representative.
+        Expr::Quant { q: Quant::Every, body, .. } => eval_enum(body, st),
+        Expr::Name(n) if n == "true" => Some(true),
+        Expr::Name(n) if n == "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// Collect `obs = tag` enum assignments from a conjunction (an `init` or an action `ensures`). Returns
+/// false if any conjunct is not such an assignment over a declared enum observable, so a body mixing in
+/// arithmetic or a non-enum effect makes the caller decline the whole declaration.
+fn enum_assignments(e: &Expr, evals: &HashMap<String, Vec<String>>, out: &mut HashMap<String, String>) -> bool {
+    match e {
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            enum_assignments(lhs, evals, out) && enum_assignments(rhs, evals, out)
+        }
+        Expr::Binary { op: BinOp::Eq, lhs, rhs } => {
+            if let (Some(obs), Expr::Name(val)) = (atom_head(lhs), rhs.as_ref()) {
+                if evals.get(&obs).is_some_and(|vs| vs.contains(val)) {
+                    out.insert(obs, val.clone());
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Explicit-state reachability for enum lifecycles — the counterexample-trace complement to preservation,
+/// for the state machines the SAT-based [`bmc`] declines (its states must all be boolean). When every
+/// `observable state` is enum-typed, `init` pins them all, and actions are guarded enum transitions, this
+/// walks the reachable state graph breadth-first from `init` (deduping visited states) and reports the
+/// shortest action sequence that reaches a state violating an invariant. Exact, not an over-approximation:
+/// a reported trace is a real execution. Silence is not a proof — preservation and k-induction prove; this
+/// witnesses. Transition invariants (`old`) are excluded (a single reached state cannot represent `old`).
+pub fn bmc_enum(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let evals = enum_values_of(d, src, false);
+        if evals.is_empty() {
+            continue;
+        }
+        let states: Vec<String> =
+            d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
+        // Every state must be enum-typed to enumerate the graph; a Money/Number state cannot be walked.
+        if states.is_empty() || states.iter().any(|s| !evals.contains_key(s)) {
+            continue;
+        }
+        let init_body = match d.items.iter().find(|it| it.kind == ItemKind::Init).and_then(|it| it.body) {
+            Some(sp) => {
+                let t = sp.slice(src);
+                parse_predicate(t.trim().strip_prefix("means").unwrap_or(t)).0
+            }
+            None => continue,
+        };
+        let mut init_state = HashMap::new();
+        if !enum_assignments(&normalize(&init_body), &evals, &mut init_state) {
+            continue;
+        }
+        if states.iter().any(|s| !init_state.contains_key(s)) {
+            continue; // init leaves a state free: reachability would be an over-approximation
+        }
+
+        struct Act {
+            name: String,
+            guard: Option<Expr>,
+            eff: HashMap<String, String>,
+        }
+        let mut acts: Vec<Act> = Vec::new();
+        let mut ok = true;
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
+            let ens = match it.ensures {
+                Some(sp) => normalize(&parse_predicate(sp.slice(src)).0),
+                None => continue,
+            };
+            let mut eff = HashMap::new();
+            if !enum_assignments(&ens, &evals, &mut eff) {
+                ok = false;
+                break;
+            }
+            let guard = it.requires.map(|sp| normalize(&parse_predicate(sp.slice(src)).0));
+            acts.push(Act { name: it.name.clone().unwrap_or_else(|| "<anon>".into()), guard, eff });
+        }
+        if !ok || acts.is_empty() {
+            continue;
+        }
+
+        let invs: Vec<(String, Expr)> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Invariant)
+            .filter_map(|it| {
+                let raw = parse_predicate(it.body?.slice(src)).0;
+                if uses_old_expr(&raw) {
+                    return None;
+                }
+                Some((it.name.clone().unwrap_or_else(|| "<anon>".into()), normalize(&raw)))
+            })
+            .collect();
+        if invs.is_empty() {
+            continue;
+        }
+
+        let key = |st: &HashMap<String, String>| {
+            let mut v: Vec<(String, String)> = st.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            v.sort();
+            v
+        };
+        let mut reported: HashSet<String> = HashSet::new();
+        let mut seen: HashSet<Vec<(String, String)>> = HashSet::new();
+        seen.insert(key(&init_state));
+        let mut frontier: Vec<(HashMap<String, String>, Vec<String>)> = vec![(init_state, Vec::new())];
+        for depth in 0..=BMC_MAX {
+            let mut next = Vec::new();
+            for (st, path) in &frontier {
+                for (iname, inv) in &invs {
+                    if reported.contains(iname) {
+                        continue;
+                    }
+                    if eval_enum(inv, st) == Some(false) {
+                        let trace = if path.is_empty() {
+                            "init".to_string()
+                        } else {
+                            format!("init -> {}", path.join(" -> "))
+                        };
+                        out.push(Diagnostic::warning(
+                            d.span,
+                            format!(
+                                "invariant `{iname}` in `{}` is REACHABLY VIOLATED in {} step(s): {} reaches a state where it fails. A concrete counterexample, not just a non-inductive warning.",
+                                d.name,
+                                path.len(),
+                                trace
+                            ),
+                        ));
+                        reported.insert(iname.clone());
+                    }
+                }
+                if depth == BMC_MAX {
+                    continue; // check the states reached at the bound, but do not expand past it
+                }
+                for act in &acts {
+                    let fires = match &act.guard {
+                        Some(g) => eval_enum(g, st) == Some(true),
+                        None => true,
+                    };
+                    if !fires {
+                        continue;
+                    }
+                    let mut ns = st.clone();
+                    for (k, v) in &act.eff {
+                        ns.insert(k.clone(), v.clone());
+                    }
+                    if seen.insert(key(&ns)) {
+                        let mut np = path.clone();
+                        np.push(act.name.clone());
+                        next.push((ns, np));
+                    }
+                }
+            }
+            if reported.len() == invs.len() || next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+    }
+    out
+}
+
 /// A canonical single entity: all entity variables are normalised to this so an invariant written over
 /// `p` and an action written over `t` line up (an action touches one entity, so the interesting instance
 /// of a universal invariant is that entity). Underscore-led so it cannot clash with a real spec name.
@@ -2316,6 +2508,27 @@ mod tests {
         let src = "-- allium: 4\ncomponent F\n  entity I\n  observable state fee(I) : Money\n  observable state on(I) : bool\n  invariant cap means every i :: on(i) implies fee(i) <= 10\n  invariant floor means every i :: on(i) implies fee(i) >= 20\nend\n";
         assert!(any(src, "VACUO"), "{:?}", msgs(src));
         assert!(!any(src, "jointly satisfiable"), "{:?}", msgs(src));
+    }
+
+    #[test]
+    fn bmc_enum_witnesses_a_reachable_lifecycle_violation() {
+        // A one-step reachable violation: `ship` from `created` reaches `shipped` without `paid`.
+        let bad = "-- allium: 4\ncomponent Order\n  entity O\n  observable state status(O) : { created | paid | shipped }\n  init means status(o) = created\n  action pay\n    requires status(o) = created\n    ensures status(o) = paid\n  action ship\n    requires status(o) = created\n    ensures status(o) = shipped\n  invariant no_unpaid_ship means status(o) = shipped implies status(o) = paid\nend\n";
+        assert!(any(bad, "`no_unpaid_ship` in `Order` is REACHABLY VIOLATED in 1 step(s): init -> ship"), "{:?}", msgs(bad));
+    }
+
+    #[test]
+    fn bmc_enum_reports_the_shortest_trace() {
+        // The only route to `bad` is a -> b -> bad; BFS must report the 2-step trace, not a longer one.
+        let src = "-- allium: 4\ncomponent Flow\n  entity F\n  observable state s(F) : { a | b | bad }\n  init means s(f) = a\n  action t1\n    requires s(f) = a\n    ensures s(f) = b\n  action t2\n    requires s(f) = b\n    ensures s(f) = bad\n  invariant never_bad means s(f) <> bad\nend\n";
+        assert!(any(src, "REACHABLY VIOLATED in 2 step(s): init -> t1 -> t2"), "{:?}", msgs(src));
+    }
+
+    #[test]
+    fn bmc_enum_is_silent_on_a_safe_lifecycle() {
+        // A monotone lifecycle with no reachable violation must produce no trace (no false counterexample).
+        let good = "-- allium: 4\ncomponent Cyc\n  entity C\n  observable state status(C) : { partitioning | processing | delivering }\n  init means status(c) = partitioning\n  action partition\n    requires status(c) = partitioning\n    ensures status(c) = processing\n  action deliver\n    requires status(c) = processing\n    ensures status(c) = delivering\n  invariant deliver_after_process means status(c) = delivering implies status(c) <> partitioning\nend\n";
+        assert!(!any(good, "REACHABLY VIOLATED"), "no reachable violation exists: {:?}", msgs(good));
     }
 
     #[test]
