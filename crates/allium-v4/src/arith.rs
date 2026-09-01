@@ -242,31 +242,32 @@ fn finite_atom(e: &Expr, st: &HashMap<String, String>) -> Option<(String, String
     }
 }
 
-/// Collect a conjunction of finite-state atoms into `out`; false if any conjunct is not a finite atom.
-fn finite_conjuncts(e: &Expr, st: &HashMap<String, String>, out: &mut Vec<(String, String)>) -> bool {
+/// Split a conjunctive guard into finite-state atoms (`conds`) and arithmetic conjuncts (`arith`).
+fn split_ante(e: &Expr, st: &HashMap<String, String>, conds: &mut Vec<(String, String)>, arith: &mut Vec<Expr>) {
     match e {
         Expr::Binary { op: BinOp::And, lhs, rhs } => {
-            finite_conjuncts(lhs, st, out) && finite_conjuncts(rhs, st, out)
+            split_ante(lhs, st, conds, arith);
+            split_ante(rhs, st, conds, arith);
         }
         _ => match finite_atom(e, st) {
-            Some(a) => {
-                out.push(a);
-                true
-            }
-            None => false,
+            Some(a) => conds.push(a),
+            None => arith.push(e.clone()),
         },
     }
 }
 
-/// Extract `(conds, A)` from a reduced body `finite-guard implies A`, where the guard is a conjunction of
-/// finite-state atoms (enum equalities and boolean flags) and `A` is the arithmetic consequent.
-fn finite_guarded_inv(qf: &Expr, st: &HashMap<String, String>) -> Option<(Vec<(String, String)>, Expr)> {
+/// Extract `(conds, arith_guard, A)` from a reduced body `guard implies A`, where the guard is a
+/// conjunction of finite-state atoms (enum equalities and boolean flags) and optional arithmetic
+/// conditions, and `A` is the arithmetic consequent. At least one finite condition is required.
+fn finite_guarded_inv(qf: &Expr, st: &HashMap<String, String>) -> Option<(Vec<(String, String)>, Vec<Expr>, Expr)> {
     let Expr::Binary { op: BinOp::Implies, lhs, rhs } = qf else { return None };
     let mut conds = Vec::new();
-    if !finite_conjuncts(lhs, st, &mut conds) || conds.is_empty() {
+    let mut arith = Vec::new();
+    split_ante(lhs, st, &mut conds, &mut arith);
+    if conds.is_empty() {
         return None;
     }
-    Some((conds, (**rhs).clone()))
+    Some((conds, arith, (**rhs).clone()))
 }
 
 /// The tag an `ensures` conjunction assigns to `obs` (`obs = tag`, or a bare/negated boolean flag), if any.
@@ -328,7 +329,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
 
         // Enum-guarded linear invariants, and the unconditional linear invariants (pre-hypotheses that
         // rule out impossible pre-states, so a break is only reported from a genuinely reachable one).
-        let mut guarded: Vec<(String, Vec<(String, String)>, Expr)> = Vec::new();
+        let mut guarded: Vec<(String, Vec<(String, String)>, Vec<Expr>, Expr)> = Vec::new();
         let mut uncond_pre: Vec<Con> = Vec::new();
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
             let (name, body) = match (&it.name, it.body) {
@@ -339,12 +340,17 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                 Some(e) => e,
                 None => continue,
             };
-            if let Some((conds, a)) = finite_guarded_inv(&qf, &st) {
+            if let Some((conds, arith_guard, a)) = finite_guarded_inv(&qf, &st) {
                 let (acons, anotes) = ground(&a, &st);
                 if anotes || acons.is_empty() {
                     continue; // consequent not purely linear
                 }
-                guarded.push((name, conds, a));
+                // The arithmetic part of the guard must ground cleanly too (else we cannot model when the
+                // guard is active), otherwise skip the invariant rather than reason unsoundly.
+                if arith_guard.iter().any(|g| ground(g, &st).1) {
+                    continue;
+                }
+                guarded.push((name, conds, arith_guard, a));
             } else {
                 let (c, n) = ground(&qf, &st);
                 if !n {
@@ -411,7 +417,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
             // the action requires `healthy`) would false-alarm. Sound: the action can only fire when its
             // requires hold, so those guards hold before it.
             let mut guarded_pre: Vec<Con> = Vec::new();
-            for (_, jconds, jbound) in &guarded {
+            for (_, jconds, _, jbound) in &guarded {
                 let all_required = jconds.iter().all(|(o, t)| {
                     guard.as_ref().and_then(|g| required_enum_tag(g, o, &st)).as_deref() == Some(t.as_str())
                 });
@@ -423,7 +429,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                 }
             }
 
-            'inv: for (iname, conds, a) in &guarded {
+            'inv: for (iname, conds, arith_guard, a) in &guarded {
                 // The action must touch the invariant to be able to affect it — either a guard observable
                 // (which could turn the guard on) or a numeric state in the bound. Otherwise it is trivially
                 // preserved and should not be reported as engaged (a vacuous PRESERVED over-claims).
@@ -461,22 +467,69 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                 if apn || apostn || a_post_cons.is_empty() {
                     continue;
                 }
+                // The arithmetic part of the guard, grounded pre (unprimed) and post (primed). It must hold
+                // AFTER for the bound to apply (garith_post in the VC); its PRE form conditions the
+                // pre-invariant `Garith_pre -> A_pre`.
+                let mut garith_pre: Vec<Con> = Vec::new();
+                let mut garith_post: Vec<Con> = Vec::new();
+                let mut garith_ok = true;
+                for g in arith_guard {
+                    let (cpre, npre) = ground(g, &st);
+                    let (cpost, npost) = ground(&crate::analyse::prime(g, &modified_numeric, false), &st2);
+                    if npre || npost {
+                        garith_ok = false;
+                        break;
+                    }
+                    garith_pre.extend(cpre);
+                    garith_post.extend(cpost);
+                }
+                if !garith_ok {
+                    continue; // an unmodellable arithmetic guard -> skip, do not risk a false alarm
+                }
                 engaged.insert(iname.clone());
+                // Base constraints common to every violation query: effect, the action's arithmetic guard,
+                // other bounds known pre, and the arithmetic guard holding AFTER the action.
+                let base: Vec<Con> = guarded_pre
+                    .iter()
+                    .chain(uncond_pre.iter())
+                    .chain(guard_cons.iter())
+                    .chain(effect_cons.iter())
+                    .chain(garith_post.iter())
+                    .cloned()
+                    .collect();
                 let mut witness: Option<String> = None;
                 'search: for pc in &a_post_cons {
                     for neg in negate_con(pc) {
-                        let mut q: Vec<Con> = Vec::new();
+                        // Try to satisfy the violation `¬A_post` together with the pre-invariant. When the
+                        // finite guard held before (a_pre), the pre-invariant is `Garith_pre -> A_pre`, a
+                        // disjunction checked as two branches; otherwise A is not assumed to have held.
+                        let mut queries: Vec<Vec<Con>> = Vec::new();
                         if a_pre {
+                            // Branch (ii): the arithmetic guard held before and so did the bound.
+                            let mut q = base.clone();
+                            q.extend(garith_pre.clone());
                             q.extend(a_pre_cons.clone());
+                            q.push(neg.clone());
+                            queries.push(q);
+                            // Branch (i): the arithmetic guard did NOT hold before (so A was unconstrained).
+                            for gc in &garith_pre {
+                                for gneg in negate_con(gc) {
+                                    let mut q = base.clone();
+                                    q.push(gneg);
+                                    q.push(neg.clone());
+                                    queries.push(q);
+                                }
+                            }
+                        } else {
+                            let mut q = base.clone();
+                            q.push(neg.clone());
+                            queries.push(q);
                         }
-                        q.extend(guarded_pre.clone());
-                        q.extend(uncond_pre.clone());
-                        q.extend(guard_cons.clone());
-                        q.extend(effect_cons.clone());
-                        q.push(neg);
-                        if let Outcome::Sat(m) = solve(&q) {
-                            witness = Some(schedule(&m, &st2));
-                            break 'search;
+                        for q in queries {
+                            if let Outcome::Sat(m) = solve(&q) {
+                                witness = Some(schedule(&m, &st2));
+                                break 'search;
+                            }
                         }
                     }
                 }
@@ -494,7 +547,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
             }
         }
         // An invariant every action engaged but none broke is preserved under its guard — a positive result.
-        for (iname, _, _) in &guarded {
+        for (iname, _, _, _) in &guarded {
             if engaged.contains(iname) && !broken.contains(iname) {
                 out.push(Diagnostic::warning(
                     d.span,
@@ -1349,6 +1402,15 @@ mod tests {
         assert!(any(&egp(&safe2), "state-guarded invariant `ok` in `E` is PRESERVED"), "{:#?}", egp(&safe2));
         // When some action breaks it, there is no PRESERVED verdict.
         assert!(!any(&egp(&botch), "is PRESERVED"), "{:#?}", egp(&botch));
+
+        // A MIXED guard (finite + arithmetic): the bound applies only when the finite guard holds AND the
+        // arithmetic condition holds. `advance_past` sets `wm = off + 1` while `healthy` -> breaks it; a
+        // guarded advance to `off` does not.
+        let ghdr = "-- allium: 4\ncomponent L\n  entity S\n  observable state status(S) : { healthy | corrupted }\n  observable state wm(S) : Number\n  given off : Number\n  invariant b means status(s) = healthy and wm(s) >= 0 implies wm(s) <= off\n";
+        let past = format!("{ghdr}  action advance_past\n    requires status(s) = healthy\n    ensures wm(s) = off + 1\nend\n");
+        assert!(any(&egp(&past), "`advance_past` in `L` can break state-guarded invariant `b`"), "{:#?}", egp(&past));
+        let ok = format!("{ghdr}  action advance\n    requires status(s) = healthy and wm(s) < off\n    ensures wm(s) = off\nend\n");
+        assert!(!any(&egp(&ok), "can break state-guarded"), "{:#?}", egp(&ok));
 
         // Cross-invariant pre-hypothesis: `begin_compact` sets `compacting` but not the watermark; because
         // `wm_bounded` (guard `healthy`, which the action requires) already pins `wm <= off`, the compacting
