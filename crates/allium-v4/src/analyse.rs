@@ -161,7 +161,12 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         let mut broken = vec![false; invariants.len()];
         if let Some(init) = &init_pred {
             for (i, (iname, inv)) in invariants.iter().enumerate() {
-                let neg = Expr::Unary { op: UnOp::Not, e: Box::new(inv.clone()) };
+                // At the initial state there is no prior step, so `old(X)` reads the current `X` (a
+                // stutter). Stripping `old` gives that: a transition invariant like `old(settled) implies
+                // settled` becomes `settled implies settled`, trivially established, rather than a false
+                // init-violation from treating `old settled` as a free atom.
+                let inv0 = strip_old(inv);
+                let neg = Expr::Unary { op: UnOp::Not, e: Box::new(inv0) };
                 if let Some(m) = crate::sat::satisfiable(&[init, &neg], &bnames) {
                     established[i] = false;
                     let w: Vec<String> = m.iter().map(|(k, v)| format!("{k}={}", if *v { "T" } else { "F" })).collect();
@@ -981,7 +986,14 @@ pub fn bmc(module: &Module, src: &str) -> Vec<Diagnostic> {
             .filter(|it| it.kind == ItemKind::Invariant)
             .filter_map(|it| {
                 let sp = it.body?;
-                checkable_invariant(&parse_predicate(sp.slice(src)).0, &bool_base, &all_obs)
+                let raw = parse_predicate(sp.slice(src)).0;
+                // Exclude transition invariants (they use `old`): BMC's per-step state model cannot
+                // represent `old`, so it would treat it as a free atom and could report a false trace.
+                // Action-preservation checks these soundly instead.
+                if uses_old_expr(&raw) {
+                    return None;
+                }
+                checkable_invariant(&raw, &bool_base, &all_obs)
                     .map(|e| (it.name.clone().unwrap_or_else(|| "<anon>".into()), e))
             })
             .collect();
@@ -1205,6 +1217,38 @@ fn checkable_invariant(inv: &Expr, bool_base: &HashSet<String>, obs: &HashSet<St
         return None;
     }
     Some(rename_entity(&body, &ev))
+}
+
+/// Replace `old(sub)` with `sub` throughout — the reading at the initial state, where there is no prior
+/// step, so `old(X)` is just the current `X` (a stutter). Used to check init-establishment of a
+/// transition invariant without treating `old X` as a free atom.
+fn strip_old(e: &Expr) -> Expr {
+    match e {
+        Expr::Unary { op: UnOp::Old, e } => strip_old(e),
+        Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(strip_old(e)) },
+        Expr::Binary { op, lhs, rhs } => Expr::Binary { op: op.clone(), lhs: Box::new(strip_old(lhs)), rhs: Box::new(strip_old(rhs)) },
+        Expr::App { head, args } => Expr::App { head: Box::new(strip_old(head)), args: args.iter().map(strip_old).collect() },
+        Expr::Field { base, name } => Expr::Field { base: Box::new(strip_old(base)), name: name.clone() },
+        Expr::Cond { cond, then_, els } => Expr::Cond { cond: Box::new(strip_old(cond)), then_: Box::new(strip_old(then_)), els: Box::new(strip_old(els)) },
+        other => other.clone(),
+    }
+}
+
+/// Does `e` mention `old(...)` anywhere? Such an invariant is a two-state TRANSITION invariant (e.g.
+/// finality, `old(settled) implies settled`), handled soundly by action-preservation (via `prime`, which
+/// maps `old`→pre and bare→post) but NOT by the reachability model of BMC/k-induction, whose per-step
+/// state atoms cannot represent `old` — so those passes exclude it rather than risk a false counterexample.
+fn uses_old_expr(e: &Expr) -> bool {
+    match e {
+        Expr::Unary { op: UnOp::Old, .. } => true,
+        Expr::Unary { e, .. } => uses_old_expr(e),
+        Expr::Binary { lhs, rhs, .. } => uses_old_expr(lhs) || uses_old_expr(rhs),
+        Expr::App { head, args } => uses_old_expr(head) || args.iter().any(uses_old_expr),
+        Expr::Field { base, .. } => uses_old_expr(base),
+        Expr::Cond { cond, then_, els } => uses_old_expr(cond) || uses_old_expr(then_) || uses_old_expr(els),
+        Expr::Quant { body, .. } | Expr::Sum { body, .. } => uses_old_expr(body),
+        _ => false,
+    }
 }
 
 /// True if `e` contains an explicit quantifier or aggregate (deferred by the preservation check).
@@ -1822,6 +1866,20 @@ mod tests {
         assert!(cov.contains("linear-arithmetic tier: sum_ok"), "{cov}");
         assert!(cov.contains("int_ok (a product of two unknowns"), "{cov}");
         assert!(cov.contains("verify with `monitor`"), "{cov}");
+    }
+
+    #[test]
+    fn finality_transition_invariant() {
+        // `old(settled) implies settled` (finality: never un-settle). An `unsettle` action breaks it; with
+        // no such action it is INDUCTIVE. Crucially, init is NOT falsely reported as violating it (old at
+        // init reads the current value), and BMC does not fabricate a violation from an idle step.
+        let bad = "-- allium: 4\ncomponent L\n  entity T\n  observable state settled(T) : bool\n  init means not settled(t)\n  action settle\n    requires not settled(t)\n    ensures settled(t)\n  action unsettle\n    requires settled(t)\n    ensures not settled(t)\n  invariant finality means old(settled(t)) implies settled(t)\nend\n";
+        assert!(any(bad, "`unsettle` in `L` can break invariant `finality`"), "{:?}", msgs(bad));
+        assert!(!any(bad, "does not establish invariant `finality`"), "init must not falsely fail: {:?}", msgs(bad));
+        let good = "-- allium: 4\ncomponent L\n  entity T\n  observable state settled(T) : bool\n  observable state logged(T) : bool\n  init means not settled(t) and not logged(t)\n  action settle\n    requires not settled(t)\n    ensures settled(t)\n  action log\n    ensures logged(t)\n  invariant finality means old(settled(t)) implies settled(t)\nend\n";
+        assert!(any(good, "`finality` in `L` is INDUCTIVE"), "{:?}", msgs(good));
+        assert!(!any(good, "can break"), "no false break from an idle step: {:?}", msgs(good));
+        assert!(!any(good, "REACHABLY VIOLATED"), "BMC must not fabricate a transition-invariant trace: {:?}", msgs(good));
     }
 
     #[test]
