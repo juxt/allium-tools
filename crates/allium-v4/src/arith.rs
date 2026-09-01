@@ -1211,22 +1211,26 @@ mod tests {
 
     #[test]
     fn enum_guarded_preservation_catches_and_spares_correctly() {
+        let egp = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            enum_guarded_preservation(&m, src).into_iter().map(|d| d.message).collect()
+        };
         let hdr = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state count(O) : Number\n  invariant ok means outcome(o) = success implies count(o) >= 0\n";
         // Breaks: sets count negative while success holds after.
         let botch = format!("{hdr}  action botch\n    requires outcome(o) = success\n    ensures count(o) = 0 - 1\nend\n");
-        assert!(any(&run(&botch), "`botch` in `E` can break enum-guarded invariant `ok`"), "{:#?}", run(&botch));
+        assert!(any(&egp(&botch), "`botch` in `E` can break enum-guarded invariant `ok`"), "{:#?}", egp(&botch));
         // Breaks: transitions failure->success while setting count negative (must establish the bound).
         let finish = format!("{hdr}  action finish\n    requires outcome(o) = failure\n    ensures outcome(o) = success and count(o) = 0 - 1\nend\n");
-        assert!(any(&run(&finish), "`finish` in `E` can break enum-guarded invariant `ok`"), "{:#?}", run(&finish));
+        assert!(any(&egp(&finish), "`finish` in `E` can break enum-guarded invariant `ok`"), "{:#?}", egp(&finish));
         // Safe: maintains the bound under success.
         let safe = format!("{hdr}  action safe\n    requires outcome(o) = success\n    ensures count(o) = 5\nend\n");
-        assert!(!any(&run(&safe), "can break enum-guarded"), "{:#?}", run(&safe));
+        assert!(!any(&egp(&safe), "can break enum-guarded"), "{:#?}", egp(&safe));
         // Safe: acts under failure (guard inactive), so a negative count is fine.
         let onfail = format!("{hdr}  action onfail\n    requires outcome(o) = failure\n    ensures count(o) = 0 - 1\nend\n");
-        assert!(!any(&run(&onfail), "can break enum-guarded"), "{:#?}", run(&onfail));
+        assert!(!any(&egp(&onfail), "can break enum-guarded"), "{:#?}", egp(&onfail));
         // Safe: transitions success->failure (guard inactive after), so a negative count is fine.
         let failit = format!("{hdr}  action failit\n    ensures outcome(o) = failure and count(o) = 0 - 1\nend\n");
-        assert!(!any(&run(&failit), "can break enum-guarded"), "{:#?}", run(&failit));
+        assert!(!any(&egp(&failit), "can break enum-guarded"), "{:#?}", egp(&failit));
     }
 
     #[test]
