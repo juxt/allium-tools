@@ -24,6 +24,13 @@ fn is_starter(s: &str) -> bool {
     ITEM_STARTERS.contains(&s)
 }
 
+/// Stops for reading a type: the item starters plus `where`, which begins a refinement clause.
+const TYPE_STOPS: &[&str] = &[
+    "entity", "observable", "state", "given", "let", "action", "init", "invariant",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
+    "pub", "abstract", "readable", "contract", "component", "use", "end", "satisfies", "where",
+];
+
 pub fn parse(source: &str) -> ParseResult {
     let tokens = lex(source);
     let mut p = Parser { source, tokens, pos: 0, diagnostics: Vec::new() };
@@ -369,7 +376,11 @@ impl<'s> Parser<'s> {
         it.params = self.capture_params();
         if matches!(self.cur().tok, Tok::Colon) {
             self.advance();
-            it.body = self.read_raw(ITEM_STARTERS, false); // raw type text
+            it.body = self.read_raw(TYPE_STOPS, false); // raw type text, stopping at `where`
+            // Optional refinement: `: T where <pred>` constrains the value.
+            if self.eat_ident("where") {
+                it.where_pred = self.read_raw(ITEM_STARTERS, false);
+            }
         } else if self.eat_ident("means") {
             // A defined relation/value: `name(args) means <pred>` (the head-once
             // `means` definitional form, DECISIONS 2026-07-31).

@@ -26,8 +26,27 @@ use crate::parser::ParseResult;
 const MAX_ATOMS: usize = 16;
 
 /// Parse + well-formedness + name resolution + case-split + rule-set consistency.
+/// Desugar `state x : T where <pred>` refinement clauses into synthetic invariants, so every pass checks
+/// them: the value is constrained by the predicate, an invariant to establish and maintain. Run once after
+/// parsing, before analysis. (A refinement type is an invariant pinned to the declaration.)
+fn desugar_where(module: &mut Module) {
+    for d in &mut module.decls {
+        let mut synth = Vec::new();
+        for it in &d.items {
+            if let (Some(name), Some(wp)) = (&it.name, it.where_pred) {
+                let mut inv = crate::ast::Item::new(ItemKind::Invariant, it.span);
+                inv.name = Some(format!("refine[{name}]"));
+                inv.body = Some(wp);
+                synth.push(inv);
+            }
+        }
+        d.items.extend(synth);
+    }
+}
+
 pub fn analyse(source: &str) -> ParseResult {
     let mut r = crate::check::check(source);
+    desugar_where(&mut r.module);
     r.diagnostics.append(&mut coverage(&r.module, source));
     r.diagnostics.append(&mut consistency(&r.module, source));
     r.diagnostics.append(&mut feasibility(&r.module, source));
@@ -2297,6 +2316,16 @@ mod tests {
         let src = "-- allium: 4\ncomponent F\n  entity I\n  observable state fee(I) : Money\n  observable state on(I) : bool\n  invariant cap means every i :: on(i) implies fee(i) <= 10\n  invariant floor means every i :: on(i) implies fee(i) >= 20\nend\n";
         assert!(any(src, "VACUO"), "{:?}", msgs(src));
         assert!(!any(src, "jointly satisfiable"), "{:?}", msgs(src));
+    }
+
+    #[test]
+    fn refinement_type_where_clause() {
+        // `state balance : Money where balance(a) >= 0` pins the invariant to the type; an unguarded
+        // withdraw that could go negative breaks it, a guarded one does not.
+        let bad = "-- allium: 4\ncomponent Acct\n  entity A\n  observable state balance(A) : Money where balance(a) >= 0\n  observable state amt(A) : Money\n  action withdraw\n    ensures balance(a) = old(balance(a)) - amt(a)\nend\n";
+        assert!(any(bad, "`withdraw` in `Acct` can break arithmetic invariant `refine[balance]`"), "{:?}", msgs(bad));
+        let good = "-- allium: 4\ncomponent Acct\n  entity A\n  observable state balance(A) : Money where balance(a) >= 0\n  observable state amt(A) : Money\n  action withdraw\n    requires amt(a) >= 0 and amt(a) <= balance(a)\n    ensures balance(a) = old(balance(a)) - amt(a)\nend\n";
+        assert!(!any(good, "can break arithmetic invariant `refine[balance]`"), "a guarded withdraw preserves it: {:?}", msgs(good));
     }
 
     #[test]

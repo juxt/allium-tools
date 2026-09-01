@@ -86,6 +86,9 @@ pub struct Item {
     pub ensures: Option<Span>,
     /// `establish … by a, b` witnesses.
     pub witnesses: Vec<String>,
+    /// A `where <pred>` refinement clause on a typed declaration (`state balance : Money where balance >= 0`):
+    /// the value is constrained by the predicate. Desugars to an invariant over the observable.
+    pub where_pred: Option<Span>,
 }
 
 impl Item {
@@ -100,6 +103,7 @@ impl Item {
             requires: None,
             ensures: None,
             witnesses: Vec::new(),
+            where_pred: None,
         }
     }
 }
