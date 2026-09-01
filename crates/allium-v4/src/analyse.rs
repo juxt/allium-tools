@@ -362,6 +362,23 @@ pub(crate) fn variant_fields_of(d: &crate::ast::Decl, src: &str) -> HashMap<Stri
     out
 }
 
+/// Variant PAYLOAD field types across a declaration: field name -> declared type text. So the arithmetic
+/// tiers can treat a numeric payload (`out` of `{ success { out : Number } | … }`) as a numeric state.
+pub(crate) fn variant_field_types(d: &crate::ast::Decl, src: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for it in d.items.iter().filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given)) {
+        let Some(bsp) = it.body else { continue };
+        if let Some(variants) = parse_variants(bsp.slice(src).trim()) {
+            for (_tag, fields) in variants {
+                for (fname, fty) in fields {
+                    out.insert(fname, fty);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Names of the boolean-typed state/given items in a declaration, so the SAT encoder can tell a
 /// boolean `=` (a biconditional it must encode) from an arithmetic one (an opaque atom for the LRA path).
 pub(crate) fn bool_names_of(d: &crate::ast::Decl, src: &str) -> std::collections::HashSet<String> {

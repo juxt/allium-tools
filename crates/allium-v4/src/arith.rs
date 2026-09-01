@@ -302,8 +302,15 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                 }
             }
         }
-        let state_names: HashSet<String> =
+        // A numeric variant payload field (`out` of `{ success { out : Number } | … }`) is a numeric state
+        // for the arithmetic tier — its presence is already guard-checked by variant_access.
+        let payload = crate::analyse::variant_field_types(d, src);
+        for (f, t) in &payload {
+            st.entry(f.clone()).or_insert_with(|| t.clone());
+        }
+        let mut state_names: HashSet<String> =
             d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
+        state_names.extend(payload.into_keys());
 
         // Enum-guarded linear invariants, and the unconditional linear invariants (pre-hypotheses that
         // rule out impossible pre-states, so a break is only reported from a genuinely reachable one).
@@ -1231,6 +1238,13 @@ mod tests {
         // Safe: transitions success->failure (guard inactive after), so a negative count is fine.
         let failit = format!("{hdr}  action failit\n    ensures outcome(o) = failure and count(o) = 0 - 1\nend\n");
         assert!(!any(&egp(&failit), "can break enum-guarded"), "{:#?}", egp(&failit));
+
+        // A numeric sum-type PAYLOAD field is a numeric state: a variant-guarded bound over it is checked.
+        let phdr = "-- allium: 4\ncomponent V\n  entity O\n  observable state outcome(O) : { success { out : Number } | failure { err : Number } }\n  invariant outok means outcome(o) = success implies out(o) >= 0\n";
+        let bad = format!("{phdr}  action rec\n    requires outcome(o) = success\n    ensures out(o) = 0 - 3\nend\n");
+        assert!(any(&egp(&bad), "`rec` in `V` can break enum-guarded invariant `outok`"), "{:#?}", egp(&bad));
+        let good = format!("{phdr}  action rec\n    requires outcome(o) = success\n    ensures out(o) = 4\nend\n");
+        assert!(!any(&egp(&good), "can break enum-guarded"), "{:#?}", egp(&good));
     }
 
     #[test]
