@@ -1140,6 +1140,7 @@ pub fn relational_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
 
         // Two-entity universal invariants, each as its two ordered instances (pre and unprimed).
         let mut invs: Vec<(String, Expr, Expr)> = Vec::new(); // (name, inst_ef, inst_fe)
+        let mut unchecked: Vec<String> = Vec::new(); // 2-entity invariants beyond the boolean fragment
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
             let (name, body) = match (&it.name, it.body) {
                 (Some(n), Some(b)) => (n.clone(), parse_predicate(b.slice(src)).0),
@@ -1153,6 +1154,10 @@ pub fn relational_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                 continue; // single-entity handled elsewhere; 3+ out of scope
             }
             if !boolean_fragment_rel(&qf, &bool_base, &all_obs) {
+                // A two-entity invariant over a numeric key (uniqueness/ordering) is beyond the boolean
+                // relational fragment, and nothing else checks it (arith preservation is single-entity).
+                // Record it so its preservation is reported as unchecked rather than silently assumed.
+                unchecked.push(name);
                 continue;
             }
             let map_ef: HashMap<String, String> = [(vars[0].clone(), ENT.into()), (vars[1].clone(), ENT2.into())].into();
@@ -1160,6 +1165,17 @@ pub fn relational_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
             let inst_ef = simplify(&resolve_entity_eq(&rename_vars(&qf, &map_ef)));
             let inst_fe = simplify(&resolve_entity_eq(&rename_vars(&qf, &map_fe)));
             invs.push((name, inst_ef, inst_fe));
+        }
+        // Report any two-entity invariant whose preservation is not checked, so the coverage report does
+        // not over-claim. Only meaningful when an action exists that could disturb it.
+        let has_action = d.items.iter().any(|it| it.kind == ItemKind::Action);
+        if has_action {
+            for name in &unchecked {
+                out.push(Diagnostic::warning(
+                    d.span,
+                    format!("relational invariant `{name}` in `{}` is NOT preservation-checked: a two-entity property over a numeric key is beyond the boolean relational fragment, and the arithmetic tier is single-entity. Its consistency may be reported, but no action is verified to preserve it (a rule that duplicates the key would pass silently).", d.name),
+                ));
+            }
         }
         if invs.is_empty() {
             continue;
@@ -2738,6 +2754,17 @@ mod tests {
         // A genuine decision table (actions derive an output from disjoint input guards) still is one.
         let table = "-- allium: 4\ncomponent Rate\n  entity L\n  observable state tier(L) : Number\n  observable state rate(L) : Number\n  action low\n    requires tier(l) < 100\n    ensures rate(l) = 2\n  action high\n    requires tier(l) >= 100\n    ensures rate(l) = 5\nend\n";
         assert!(any(table, "case-split in `Rate`"), "a decision table is still checked: {:?}", msgs(table));
+    }
+
+    #[test]
+    fn numeric_key_relational_uniqueness_is_reported_unchecked() {
+        // A 2-entity uniqueness over a numeric key is beyond the boolean relational fragment; its
+        // preservation is unchecked and must be reported so, not silently implied covered.
+        let numeric = "-- allium: 4\ncomponent Clerk\n  entity Copy\n  observable state prio(Copy) : Number\n  observable state reg(Copy) : bool\n  invariant unique_prio means every a :: every b :: reg(a) and reg(b) and a <> b implies prio(a) <> prio(b)\n  action register\n    ensures reg(a) and prio(a) = 5\nend\n";
+        assert!(any(numeric, "relational invariant `unique_prio` in `Clerk` is NOT preservation-checked"), "{:?}", msgs(numeric));
+        // A boolean relational uniqueness IS checked, so it must NOT carry the unchecked note.
+        let boolean = "-- allium: 4\ncomponent C\n  entity X\n  observable state leader(X) : bool\n  invariant one means every a :: every b :: leader(a) and leader(b) implies a = b\n  action elect\n    ensures leader(a)\nend\n";
+        assert!(!any(boolean, "NOT preservation-checked"), "boolean relational is checked: {:?}", msgs(boolean));
     }
 
     #[test]
