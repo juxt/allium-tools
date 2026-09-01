@@ -277,14 +277,42 @@ fn finite_atom(e: &Expr, st: &HashMap<String, String>) -> Option<(String, String
     }
 }
 
-/// Split a conjunctive guard into finite-state atoms (`conds`) and arithmetic conjuncts (`arith`).
-fn split_ante(e: &Expr, st: &HashMap<String, String>, conds: &mut Vec<(String, String)>, arith: &mut Vec<Expr>) {
+/// Read a finite GUARD atom as `(obs, tag, positive)`: `obs = tag` and a bare flag are positive
+/// (`obs == tag`); `obs <> tag` and `not flag` are negated (`obs != tag`). Unlike [`finite_atom`], which
+/// reads a concrete assignment, a guard may be a not-equal condition (a disjunction over the other tags).
+fn guard_atom(e: &Expr, st: &HashMap<String, String>) -> Option<(String, String, bool)> {
+    match e {
+        Expr::Binary { op: op @ (BinOp::Eq | BinOp::Ne), lhs, rhs } => {
+            let h = app_head(lhs).filter(|h| finite_typed(h, st))?;
+            match rhs.as_ref() {
+                Expr::Name(t) => Some((h.to_string(), t.clone(), *op == BinOp::Eq)),
+                _ => None,
+            }
+        }
+        Expr::Unary { op: UnOp::Not, e } => {
+            let h = app_head(e).filter(|h| bool_typed(h, st))?;
+            Some((h.to_string(), "true".into(), false))
+        }
+        _ => {
+            let h = app_head(e).filter(|h| bool_typed(h, st))?;
+            Some((h.to_string(), "true".into(), true))
+        }
+    }
+}
+
+/// True if a finite observable holding value `v` activates a guard condition `(tag, positive)`.
+fn cond_active(v: &str, tag: &str, positive: bool) -> bool {
+    positive == (v == tag)
+}
+
+/// Split a conjunctive guard into finite-state atoms (`conds`, with polarity) and arithmetic conjuncts.
+fn split_ante(e: &Expr, st: &HashMap<String, String>, conds: &mut Vec<(String, String, bool)>, arith: &mut Vec<Expr>) {
     match e {
         Expr::Binary { op: BinOp::And, lhs, rhs } => {
             split_ante(lhs, st, conds, arith);
             split_ante(rhs, st, conds, arith);
         }
-        _ => match finite_atom(e, st) {
+        _ => match guard_atom(e, st) {
             Some(a) => conds.push(a),
             None => arith.push(e.clone()),
         },
@@ -292,9 +320,9 @@ fn split_ante(e: &Expr, st: &HashMap<String, String>, conds: &mut Vec<(String, S
 }
 
 /// Extract `(conds, arith_guard, A)` from a reduced body `guard implies A`, where the guard is a
-/// conjunction of finite-state atoms (enum equalities and boolean flags) and optional arithmetic
+/// conjunction of finite-state atoms (enum (dis)equalities and boolean flags) and optional arithmetic
 /// conditions, and `A` is the arithmetic consequent. At least one finite condition is required.
-fn finite_guarded_inv(qf: &Expr, st: &HashMap<String, String>) -> Option<(Vec<(String, String)>, Vec<Expr>, Expr)> {
+fn finite_guarded_inv(qf: &Expr, st: &HashMap<String, String>) -> Option<(Vec<(String, String, bool)>, Vec<Expr>, Expr)> {
     let Expr::Binary { op: BinOp::Implies, lhs, rhs } = qf else { return None };
     let mut conds = Vec::new();
     let mut arith = Vec::new();
@@ -364,7 +392,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
 
         // Enum-guarded linear invariants, and the unconditional linear invariants (pre-hypotheses that
         // rule out impossible pre-states, so a break is only reported from a genuinely reachable one).
-        let mut guarded: Vec<(String, Vec<(String, String)>, Vec<Expr>, Expr)> = Vec::new();
+        let mut guarded: Vec<(String, Vec<(String, String, bool)>, Vec<Expr>, Expr)> = Vec::new();
         let mut uncond_pre: Vec<Con> = Vec::new();
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
             let (name, body) = match (&it.name, it.body) {
@@ -415,7 +443,11 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
             crate::analyse::collect_writes(&init, false, &state_names, &mut init_states);
             if !init_notes {
                 for (iname, conds, arith_guard, a) in &guarded {
-                    let active = conds.iter().all(|(o, t)| assigned_enum_tag(&init, o, &st).as_deref() == Some(t.as_str()));
+                    // The guard is definitely active at init only if init pins each condition's observable
+                    // to a value that activates it.
+                    let active = conds.iter().all(|(o, t, pos)| {
+                        assigned_enum_tag(&init, o, &st).map(|v| cond_active(&v, t, *pos)).unwrap_or(false)
+                    });
                     // Only a bound over a numeric state init assigns can be contradicted by init.
                     if !active || !crate::analyse::mentions_any(a, &init_states) {
                         continue;
@@ -444,7 +476,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                         })
                     });
                     if violated {
-                        let guard_desc = conds.iter().map(|(o, t)| format!("{o} = {t}")).collect::<Vec<_>>().join(" and ");
+                        let guard_desc = conds.iter().map(|(o, t, pos)| format!("{o} {} {t}", if *pos { "=" } else { "<>" })).collect::<Vec<_>>().join(" and ");
                         out.push(Diagnostic::warning(
                             d.span,
                             format!("`init` in `{}` does not establish state-guarded invariant `{iname}`: the initial state has `{guard_desc}` but can violate the arithmetic bound.", d.name),
@@ -512,8 +544,8 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
             // requires hold, so those guards hold before it.
             let mut guarded_pre: Vec<Con> = Vec::new();
             for (_, jconds, _, jbound) in &guarded {
-                let all_required = jconds.iter().all(|(o, t)| {
-                    guard.as_ref().and_then(|g| required_enum_tag(g, o, &st)).as_deref() == Some(t.as_str())
+                let all_required = jconds.iter().all(|(o, t, pos)| {
+                    guard.as_ref().and_then(|g| required_enum_tag(g, o, &st)).map(|r| cond_active(&r, t, *pos)).unwrap_or(false)
                 });
                 if all_required {
                     let (c, n) = ground(jbound, &st);
@@ -527,25 +559,29 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                 // The action must touch the invariant to be able to affect it — either a guard observable
                 // (which could turn the guard on) or a numeric state in the bound. Otherwise it is trivially
                 // preserved and should not be reported as engaged (a vacuous PRESERVED over-claims).
-                let touches = conds.iter().any(|(o, _)| modified.contains(o)) || crate::analyse::mentions_any(a, &modified);
+                let touches = conds.iter().any(|(o, _, _)| modified.contains(o)) || crate::analyse::mentions_any(a, &modified);
                 if !touches {
                     continue;
                 }
                 // Every guard condition must still hold after the action for the bound to be required
                 // (active_post), and all must have held before for A to be assumed to have held (a_pre).
                 let mut a_pre = true;
-                for (obs, tag) in conds {
+                for (obs, tag, pos) in conds {
                     let required = guard.as_ref().and_then(|g| required_enum_tag(g, obs, &st));
                     let (active_i, pre_i) = if modified.contains(obs) {
                         match assigned_enum_tag(&ensures, obs, &st) {
-                            Some(v) if &v == tag => (true, required.as_deref() == Some(tag.as_str())),
-                            Some(_) => (false, false), // set to another tag -> this condition inactive after
+                            // set to a value that activates this condition; the bound held before only if
+                            // the pre-value (from `requires`) also activated it.
+                            Some(v) if cond_active(&v, tag, *pos) => {
+                                (true, required.as_deref().map(|r| cond_active(r, tag, *pos)).unwrap_or(false))
+                            }
+                            Some(_) => (false, false), // set to a value that deactivates it -> inactive after
                             None => continue 'inv,     // conditional/opaque enum set -> cannot decide soundly
                         }
                     } else {
                         // unchanged: active after iff it held before; the action must be able to fire then,
-                        // so a different required tag on this observable rules the case out.
-                        if required.as_deref().map(|r| r != tag).unwrap_or(false) {
+                        // so a required value that deactivates this condition rules the case out.
+                        if required.as_deref().map(|r| !cond_active(r, tag, *pos)).unwrap_or(false) {
                             continue 'inv;
                         }
                         (true, true)
@@ -629,7 +665,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                 }
                 if let Some(w) = witness {
                     broken.insert(iname.clone());
-                    let guard_desc = conds.iter().map(|(o, t)| format!("{o} = {t}")).collect::<Vec<_>>().join(" and ");
+                    let guard_desc = conds.iter().map(|(o, t, pos)| format!("{o} {} {t}", if *pos { "=" } else { "<>" })).collect::<Vec<_>>().join(" and ");
                     out.push(Diagnostic::warning(
                         it.span,
                         crate::analyse::pretty(&format!(
@@ -1536,6 +1572,18 @@ mod tests {
         // Established by init AND preserved -> the stronger INDUCTIVE verdict.
         let ind = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state count(O) : Number\n  init means outcome(o) = success and count(o) = 0\n  invariant ok means outcome(o) = success implies count(o) >= 0\n  action inc\n    requires outcome(o) = success\n    ensures count(o) = count(o) + 1\nend\n";
         assert!(any(&egp(ind), "state-guarded invariant `ok` in `E` is INDUCTIVE"), "{:#?}", egp(ind));
+
+        // A NEGATED enum guard (`phase <> pending`): the bound applies once out of pending. Breaks under
+        // active; not under pending; a transition into active must respect it; out to pending is exempt.
+        let nhdr = "-- allium: 4\ncomponent E\n  entity O\n  observable state phase(O) : { pending | active | done }\n  observable state bal(O) : Number\n  invariant nonneg means phase(o) <> pending implies bal(o) >= 0\n";
+        let under_active = format!("{nhdr}  action botch\n    requires phase(o) = active\n    ensures bal(o) = 0 - 1\nend\n");
+        assert!(any(&egp(&under_active), "`botch` in `E` can break state-guarded invariant `nonneg`"), "{:#?}", egp(&under_active));
+        let under_pending = format!("{nhdr}  action botch\n    requires phase(o) = pending\n    ensures bal(o) = 0 - 1\nend\n");
+        assert!(!any(&egp(&under_pending), "can break state-guarded"), "guard inactive under pending: {:#?}", egp(&under_pending));
+        let into_active = format!("{nhdr}  action activate\n    requires phase(o) = pending\n    ensures phase(o) = active and bal(o) = 0 - 1\nend\n");
+        assert!(any(&egp(&into_active), "`activate` in `E` can break state-guarded invariant `nonneg`"), "turning the guard on must respect it: {:#?}", egp(&into_active));
+        let out_to_pending = format!("{nhdr}  action reset\n    requires phase(o) = active\n    ensures phase(o) = pending and bal(o) = 0 - 1\nend\n");
+        assert!(!any(&egp(&out_to_pending), "can break state-guarded"), "guard off after -> exempt: {:#?}", egp(&out_to_pending));
 
         // Guarded MONOTONICITY (an `old`-based bound under a guard): while healthy the watermark never
         // decreases. `retreat` breaks it; `advance` does not (old grounds to the pre-value).
