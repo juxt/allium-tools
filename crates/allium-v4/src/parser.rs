@@ -16,7 +16,7 @@ pub struct ParseResult {
 /// Item keywords that terminate a raw predicate / type at bracket depth 0.
 const ITEM_STARTERS: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
     "pub", "abstract", "readable", "contract", "component", "use", "end", "satisfies",
 ];
 
@@ -324,6 +324,12 @@ impl<'s> Parser<'s> {
                 it.body = self.read_raw(ITEM_STARTERS, false);
                 it
             }
+            Some("terminal") => {
+                self.advance();
+                let mut it = Item::new(ItemKind::Terminal, start);
+                it.body = self.read_raw(ITEM_STARTERS, false);
+                it
+            }
             Some(role) if role_kind(role).is_some() => {
                 let kind = role_kind(role).unwrap();
                 self.advance();
@@ -483,14 +489,14 @@ impl<'s> Parser<'s> {
 
 const ITEM_STARTERS_PLUS_ENSURES: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
     "pub", "abstract", "readable", "contract", "component", "use", "end",
     "satisfies", "ensures",
 ];
 
 const ITEM_STARTERS_PLUS_BY: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
     "pub", "abstract", "readable", "contract", "component", "use", "end",
     "satisfies", "by",
 ];

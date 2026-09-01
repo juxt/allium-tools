@@ -61,6 +61,10 @@ pub enum ItemKind {
     Rely,
     Establish,
     Init,
+    /// `terminal <state-condition>` — declares a lifecycle end state. Desugars to a finality invariant
+    /// (`old(cond) implies cond`, the state is never left) and marks the state as an intended dead-end so
+    /// deadlock detection does not flag it.
+    Terminal,
 }
 
 #[derive(Debug, Clone, Serialize)]

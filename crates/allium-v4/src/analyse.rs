@@ -149,7 +149,7 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         let enum_names: HashSet<String> = evals.keys().cloned().collect();
         // Each invariant reduced to an entity-normalised boolean body (plain, or a single-variable
         // universal). Arithmetic, multi-entity, and existential invariants are skipped (sound).
-        let invariants: Vec<(String, Expr)> = d
+        let mut invariants: Vec<(String, Expr)> = d
             .items
             .iter()
             .filter(|it| it.kind == ItemKind::Invariant)
@@ -160,6 +160,20 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                     .map(|e| (it.name.clone().unwrap_or_else(|| "<anon>".into()), e))
             })
             .collect();
+        // `terminal <cond>` desugars to a finality invariant: once the state holds, it is never left.
+        // `old(cond) implies cond` is exactly the transition/finality form the preservation pass checks.
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Terminal) {
+            let Some(sp) = it.body else { continue };
+            let cond = parse_predicate(sp.slice(src)).0;
+            let finality = Expr::Binary {
+                op: BinOp::Implies,
+                lhs: Box::new(Expr::Unary { op: UnOp::Old, e: Box::new(cond.clone()) }),
+                rhs: Box::new(cond.clone()),
+            };
+            if let Some(e) = checkable_invariant_e(&finality, &bool_base, &all_obs, &enum_names) {
+                invariants.push((format!("terminal[{}]", canon(&cond)), e));
+            }
+        }
         if invariants.is_empty() {
             continue;
         }
@@ -2045,6 +2059,16 @@ mod tests {
         let src = "-- allium: 4\ncomponent F\n  entity I\n  observable state fee(I) : Money\n  observable state on(I) : bool\n  invariant cap means every i :: on(i) implies fee(i) <= 10\n  invariant floor means every i :: on(i) implies fee(i) >= 20\nend\n";
         assert!(any(src, "VACUO"), "{:?}", msgs(src));
         assert!(!any(src, "jointly satisfiable"), "{:?}", msgs(src));
+    }
+
+    #[test]
+    fn terminal_marker_desugars_to_finality() {
+        // `terminal status = delivered` means the state is never left. Proven INDUCTIVE for a legal
+        // machine; a `reopen` action that leaves it is caught.
+        let ok = "-- allium: 4\ncomponent O\n  entity X\n  observable state status(X) : { created | paid | delivered }\n  init means status(x) = created\n  action pay\n    requires status(x) = created\n    ensures status(x) = paid\n  action deliver\n    requires status(x) = paid\n    ensures status(x) = delivered\n  terminal status(x) = delivered\nend\n";
+        assert!(any(ok, "`terminal[status(x) = delivered]` in `O` is INDUCTIVE"), "{:?}", msgs(ok));
+        let bad = "-- allium: 4\ncomponent O\n  entity X\n  observable state status(X) : { created | paid | delivered }\n  init means status(x) = created\n  action pay\n    requires status(x) = created\n    ensures status(x) = paid\n  action deliver\n    requires status(x) = paid\n    ensures status(x) = delivered\n  action reopen\n    requires status(x) = delivered\n    ensures status(x) = created\n  terminal status(x) = delivered\nend\n";
+        assert!(any(bad, "`reopen` in `O` can break invariant `terminal[status(x) = delivered]`"), "{:?}", msgs(bad));
     }
 
     #[test]
