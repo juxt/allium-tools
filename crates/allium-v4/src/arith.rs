@@ -362,6 +362,57 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
             continue;
         }
 
+        // Base case: does `init` establish each guarded bound? For an invariant `Gfin ∧ Garith → A` whose
+        // finite guard `init` definitely activates (init pins each finite condition to its tag), check
+        // whether the initial arithmetic state can still violate `A` (with the arithmetic guard). If so the
+        // bound does not hold at init — the induction has no base. Only report when the finite guard is
+        // definitely active at init, so an unpinned enum never yields a false alarm.
+        if let Some(init_it) = d.items.iter().find(|it| it.kind == ItemKind::Init).and_then(|it| it.body) {
+            let init_raw = parse_predicate(init_it.slice(src).trim().strip_prefix("means").unwrap_or(init_it.slice(src))).0;
+            let mut iev = HashSet::new();
+            crate::analyse::collect_entity_vars(&init_raw, &mut iev);
+            let init = crate::analyse::rename_entity(&init_raw, &iev);
+            let (init_arith, init_notes) = ground(&strip_enum_conjuncts(&init, &st), &st);
+            if !init_notes {
+                for (iname, conds, arith_guard, a) in &guarded {
+                    let active = conds.iter().all(|(o, t)| assigned_enum_tag(&init, o, &st).as_deref() == Some(t.as_str()));
+                    if !active {
+                        continue;
+                    }
+                    let (acons, an) = ground(a, &st);
+                    if an || acons.is_empty() {
+                        continue;
+                    }
+                    let mut garith = Vec::new();
+                    if arith_guard.iter().any(|g| {
+                        let (c, n) = ground(g, &st);
+                        garith.extend(c);
+                        n
+                    }) {
+                        continue;
+                    }
+                    let violated = acons.iter().any(|c| {
+                        negate_con(c).into_iter().any(|neg| {
+                            // Include the unconditional invariants and `where`-refinements (input
+                            // assumptions), which hold at init too, so a bound the spec's own assumptions
+                            // guarantee is not falsely reported unestablished.
+                            let mut q: Vec<Con> =
+                                init_arith.iter().chain(garith.iter()).chain(uncond_pre.iter()).cloned().collect();
+                            q.push(neg);
+                            matches!(solve(&q), Outcome::Sat(_))
+                        })
+                    });
+                    if violated {
+                        let guard_desc = conds.iter().map(|(o, t)| format!("{o} = {t}")).collect::<Vec<_>>().join(" and ");
+                        out.push(Diagnostic::warning(
+                            d.span,
+                            format!("`init` in `{}` does not establish state-guarded invariant `{iname}`: the initial state has `{guard_desc}` but can violate the arithmetic bound.", d.name),
+                        ));
+                    }
+                }
+            }
+        }
+
         // Track which invariants an action actually engaged (ran the VC for) and which were broken, so a
         // state-guarded invariant that survives every action gets a positive PRESERVED verdict.
         let mut engaged: HashSet<String> = HashSet::new();
@@ -1418,6 +1469,15 @@ mod tests {
         let mhdr = "-- allium: 4\ncomponent L\n  entity S\n  observable state status(S) : { healthy | corrupted }\n  observable state wm(S) : Number\n  observable state compacting(S) : bool\n  given off : Number\n  invariant wm_bounded means status(s) = healthy implies wm(s) <= off\n  invariant compact_frozen means compacting(s) implies wm(s) <= off\n";
         let bc = format!("{mhdr}  action begin_compact\n    requires status(s) = healthy\n    ensures compacting(s)\nend\n");
         assert!(!any(&egp(&bc), "can break state-guarded invariant `compact_frozen`"), "cross-invariant pre-hypothesis: {:#?}", egp(&bc));
+
+        // Base case: init that activates the guard but violates the bound is caught; a good init is not; a
+        // guard inactive at init is not (the bound does not apply there).
+        let ib = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state count(O) : Number\n  init means outcome(o) = success and count(o) = 0 - 1\n  invariant ok means outcome(o) = success implies count(o) >= 0\n  action noop\n    requires outcome(o) = failure\n    ensures count(o) = count(o)\nend\n";
+        assert!(any(&egp(ib), "`init` in `E` does not establish state-guarded invariant `ok`"), "{:#?}", egp(ib));
+        let ig = ib.replace("count(o) = 0 - 1", "count(o) = 0");
+        assert!(!any(&egp(&ig), "does not establish state-guarded"), "{:#?}", egp(&ig));
+        let inact = ib.replace("outcome(o) = success and count(o) = 0 - 1", "outcome(o) = failure and count(o) = 0 - 1");
+        assert!(!any(&egp(&inact), "does not establish state-guarded"), "guard inactive at init: {:#?}", egp(&inact));
     }
 
     #[test]
