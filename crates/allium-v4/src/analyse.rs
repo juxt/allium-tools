@@ -896,7 +896,11 @@ pub fn refinement(module: &Module, src: &str) -> Vec<Diagnostic> {
                     // Linear-arithmetic promise: entailment via the simplex. The type map spans X and C.
                     let mut st = x_st.clone();
                     st.extend(_c_st.clone());
-                    match crate::arith::entails_linear(&x_guar, &pn, &st) {
+                    // A state-guarded promise (`status = active implies balance >= min`) is checked by
+                    // case-splitting on the finite guard (the SMT rung); a plain linear promise directly.
+                    let verdict = crate::arith::entails_guarded_linear(&x_guar, &pn, &st)
+                        .or_else(|| crate::arith::entails_linear(&x_guar, &pn, &st));
+                    match verdict {
                         Some(true) => entailed.push(pname.clone()),
                         Some(false) => failed.push(pname.clone()),
                         None => skipped.push(pname.clone()),
@@ -2639,6 +2643,19 @@ mod tests {
         assert!(any(ok, "`Impl` SATISFIES contract `Solvent`"), "{:?}", msgs(ok));
         let bad = "-- allium: 4\ncontract Solvent\n  entity A\n  observable state net(A) : Money\n  guarantee nn means every a :: net(a) >= 0\nend\ncomponent Impl satisfies (s : Solvent)\n  entity A\n  observable state assets(A) : Money\n  observable state liabilities(A) : Money\n  observable state net(A) : Money\n  invariant d means every a :: net(a) = assets(a) - liabilities(a)\nend\n";
         assert!(any(bad, "does NOT satisfy contract `Solvent`"), "{:?}", msgs(bad));
+    }
+
+    #[test]
+    fn refinement_state_guarded_promise() {
+        // A guarded promise `active => balance >= 0`: a component whose bound under the same guard is
+        // stronger (>= 100) or unconditional (>= 100) satisfies it; a weaker guarded bound (>= -50) does not.
+        let c = "-- allium: 4\ncontract Solvent\n  entity A\n  observable state active(A) : bool\n  observable state balance(A) : Money\n  guarantee solvent means active(a) implies balance(a) >= 0\nend\n";
+        let strong = format!("{c}component Account satisfies (s : Solvent)\n  entity A\n  observable state active(A) : bool\n  observable state balance(A) : Money\n  invariant strong means active(a) implies balance(a) >= 100\nend\n");
+        assert!(any(&strong, "`Account` SATISFIES contract `Solvent`"), "{:?}", msgs(&strong));
+        let uncond = format!("{c}component Account satisfies (s : Solvent)\n  entity A\n  observable state active(A) : bool\n  observable state balance(A) : Money\n  invariant always means balance(a) >= 100\nend\n");
+        assert!(any(&uncond, "`Account` SATISFIES contract `Solvent`"), "{:?}", msgs(&uncond));
+        let weak = format!("{c}component Account satisfies (s : Solvent)\n  entity A\n  observable state active(A) : bool\n  observable state balance(A) : Money\n  invariant weak means active(a) implies balance(a) >= 0 - 50\nend\n");
+        assert!(any(&weak, "does NOT satisfy contract `Solvent`"), "{:?}", msgs(&weak));
     }
 
     #[test]

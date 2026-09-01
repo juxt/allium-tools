@@ -728,6 +728,29 @@ pub fn entails_linear(x_invs: &[Expr], promise: &Expr, st: &HashMap<String, Stri
     Some(true)
 }
 
+/// Entailment for a STATE-GUARDED linear promise `Gfin implies A_c` (the SMT rung applied to refinement).
+/// A contract promise that couples a finite state to an arithmetic bound is entailed by X iff, whenever the
+/// guard holds, X's invariants entail the bound. The hypotheses valid under the guard are X's unconditional
+/// linear invariants plus the bounds of X's invariants guarded by the SAME finite condition, plus the
+/// promise's own arithmetic guard. None if the promise is not a finite-guarded linear form (caller falls
+/// back to [`entails_linear`]). Sound: only cleanly-linear hypotheses contribute.
+pub fn entails_guarded_linear(x_invs: &[Expr], promise: &Expr, st: &HashMap<String, String>) -> Option<bool> {
+    let pqf = arith_reduce(promise)?;
+    let (pconds, parith, pa) = finite_guarded_inv(&pqf, st)?;
+    let mut hyps: Vec<Expr> = Vec::new();
+    for inv in x_invs {
+        let Some(iqf) = arith_reduce(inv) else { continue };
+        match finite_guarded_inv(&iqf, st) {
+            // An X invariant guarded by the same finite condition contributes its bound under the guard.
+            Some((iconds, _, ia)) if iconds == pconds => hyps.push(ia),
+            Some(_) => {} // guarded by a different condition: does not apply under this guard
+            None => hyps.push(iqf), // unconditional: always holds
+        }
+    }
+    hyps.extend(parith); // the promise's own arithmetic guard is assumed when it holds
+    entails_linear(&hyps, &pa, st)
+}
+
 /// Reduce an invariant to the entity-normalised quantifier-free body the LRA preservation check runs:
 /// a plain invariant, or a single-variable `every p :: body` (a universal safety property). Existential,
 /// multi-variable, and nested-quantifier invariants are out of scope (None).
