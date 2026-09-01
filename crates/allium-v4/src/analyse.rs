@@ -78,6 +78,29 @@ fn first_backtick(msg: &str) -> Option<String> {
     Some(msg[a..b].to_string())
 }
 
+/// Enum-typed state/given observables and their declared value sets. An inline enum type `{ a | b | c }`
+/// gives `{a, b, c}`; the SAT encoder uses this to make `status = a` and `status = b` mutually exclusive
+/// (an enum observable takes exactly one value). `with_primes` also registers the post-state name `X'`.
+pub(crate) fn enum_values_of(d: &crate::ast::Decl, src: &str, with_primes: bool) -> HashMap<String, Vec<String>> {
+    let mut out = HashMap::new();
+    for it in d.items.iter().filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given)) {
+        let (Some(name), Some(bsp)) = (&it.name, it.body) else { continue };
+        let ty = bsp.slice(src).trim();
+        // Inline enum: `{ a | b | c }`. Named enums are not yet declared in v4, so only this form.
+        if let (Some(inner), true) = (ty.strip_prefix('{'), ty.ends_with('}')) {
+            let inner = inner.trim_end_matches('}');
+            let vals: Vec<String> = inner.split('|').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            if vals.len() >= 2 {
+                if with_primes {
+                    out.insert(format!("{name}'"), vals.clone());
+                }
+                out.insert(name.clone(), vals);
+            }
+        }
+    }
+    out
+}
+
 /// Names of the boolean-typed state/given items in a declaration, so the SAT encoder can tell a
 /// boolean `=` (a biconditional it must encode) from an arithmetic one (an opaque atom for the LRA path).
 pub(crate) fn bool_names_of(d: &crate::ast::Decl, src: &str) -> std::collections::HashSet<String> {
@@ -1559,12 +1582,13 @@ pub fn consistency(module: &Module, src: &str) -> Vec<Diagnostic> {
             continue;
         }
         let bnames = bool_names_of(d, src);
+        let evals = enum_values_of(d, src, false);
 
         // Joint satisfiability via the dependency-free SAT engine (scales past enumeration).
         let subset = |active: &[bool]| -> Vec<&Expr> {
             rules.iter().enumerate().filter(|(k, _)| active[*k]).map(|(_, (_, e))| e).collect()
         };
-        match crate::sat::satisfiable(&subset(&vec![true; rules.len()]), &bnames) {
+        match crate::sat::satisfiable_enum(&subset(&vec![true; rules.len()]), &bnames, &evals) {
             Some(m) => out.push(Diagnostic::warning(
                 d.span,
                 format!("rule set in `{}` is jointly satisfiable (e.g. {}).", d.name, crate::sat::describe(&m)),
@@ -1574,7 +1598,7 @@ pub fn consistency(module: &Module, src: &str) -> Vec<Diagnostic> {
                 let mut active = vec![true; rules.len()];
                 for k in 0..rules.len() {
                     active[k] = false;
-                    if crate::sat::satisfiable(&subset(&active), &bnames).is_some() {
+                    if crate::sat::satisfiable_enum(&subset(&active), &bnames, &evals).is_some() {
                         active[k] = true;
                     }
                 }
@@ -1615,12 +1639,13 @@ pub fn feasibility(module: &Module, src: &str) -> Vec<Diagnostic> {
             continue;
         }
         let bnames = bool_names_of(d, src);
+        let evals = enum_values_of(d, src, false);
 
         // Does some report satisfy `req` together with every active axiom? (SAT engine.)
         let sat = |rexpr: &Expr, active: &[bool]| -> Option<BTreeMap<String, bool>> {
             let mut es: Vec<&Expr> = axioms.iter().enumerate().filter(|(k, _)| active[*k]).map(|(_, (_, e))| e).collect();
             es.push(rexpr);
-            crate::sat::satisfiable(&es, &bnames)
+            crate::sat::satisfiable_enum(&es, &bnames, &evals)
         };
 
         for (rname, rexpr) in &reqs {
@@ -1984,6 +2009,17 @@ mod tests {
         let src = "-- allium: 4\ncomponent F\n  entity I\n  observable state fee(I) : Money\n  observable state on(I) : bool\n  invariant cap means every i :: on(i) implies fee(i) <= 10\n  invariant floor means every i :: on(i) implies fee(i) >= 20\nend\n";
         assert!(any(src, "VACUO"), "{:?}", msgs(src));
         assert!(!any(src, "jointly satisfiable"), "{:?}", msgs(src));
+    }
+
+    #[test]
+    fn enum_state_exactly_one_value() {
+        // An enum observable takes exactly one value, so `flag` forcing status to be both `created` and
+        // `paid` is INFEASIBLE — before enum support, those were independent atoms and it looked feasible.
+        let bad = "-- allium: 4\ncomponent C\n  entity O\n  observable state status(O) : { created | paid | shipped }\n  observable state flag(O) : bool\n  axiom a1 means flag(o) implies status(o) = created\n  axiom a2 means flag(o) implies status(o) = paid\n  requirement r means flag(o)\nend\n";
+        assert!(any(bad, "requirement `r` in `C` is INFEASIBLE"), "{:?}", msgs(bad));
+        // Forcing a single value is fine (feasible).
+        let ok = "-- allium: 4\ncomponent C\n  entity O\n  observable state status(O) : { created | paid | shipped }\n  observable state flag(O) : bool\n  axiom a1 means flag(o) implies status(o) = created\n  requirement r means flag(o)\nend\n";
+        assert!(any(ok, "requirement `r` in `C` is feasible"), "{:?}", msgs(ok));
     }
 
     #[test]

@@ -44,11 +44,54 @@ struct CnfBuilder<'a> {
     nvars: i32,
     overflow: bool,
     bool_names: &'a HashSet<String>,
+    /// Enum-typed observable name -> its declared value set. An equality `status(e) = paid` over one of
+    /// these is a proposition, and `status` takes EXACTLY ONE value, so `status=created` and `status=paid`
+    /// are mutually exclusive and one of them holds. Without this the encoder treats each `=` as an
+    /// independent opaque atom and misses the state-machine structure.
+    enum_vals: &'a HashMap<String, Vec<String>>,
+    /// Enum-equality groups that appeared (canon(lhs) -> (lhs expr, value set)), for the exactly-one axiom.
+    enum_groups: HashMap<String, (Expr, Vec<String>)>,
 }
 
 impl<'a> CnfBuilder<'a> {
-    fn new(bool_names: &'a HashSet<String>) -> Self {
-        CnfBuilder { clauses: Vec::new(), atom_index: HashMap::new(), nvars: 0, overflow: false, bool_names }
+    fn new(bool_names: &'a HashSet<String>, enum_vals: &'a HashMap<String, Vec<String>>) -> Self {
+        CnfBuilder { clauses: Vec::new(), atom_index: HashMap::new(), nvars: 0, overflow: false, bool_names, enum_vals, enum_groups: HashMap::new() }
+    }
+
+    /// If `e` is an application (or bare name) whose head is a declared enum observable, its name.
+    fn enum_head(&self, e: &Expr) -> Option<String> {
+        match e {
+            Expr::App { head, .. } => match &**head {
+                Expr::Name(h) if self.enum_vals.contains_key(h) => Some(h.clone()),
+                _ => None,
+            },
+            Expr::Name(n) if self.enum_vals.contains_key(n) => Some(n.clone()),
+            _ => None,
+        }
+    }
+
+    /// Emit the exactly-one-value axiom for every enum-equality group that appeared: at least one value
+    /// holds, and no two hold at once. Makes an enum observable a genuine one-of-N state.
+    fn finalize_enums(&mut self) {
+        let groups: Vec<(Expr, Vec<String>)> = self.enum_groups.values().cloned().collect();
+        for (lhs, vals) in groups {
+            let lits: Vec<i32> = vals
+                .iter()
+                .map(|v| {
+                    let atom = format!("{} = {}", canon(&lhs), v);
+                    self.atom(atom)
+                })
+                .collect();
+            if lits.len() < 2 {
+                continue;
+            }
+            self.clauses.push(lits.clone()); // at least one
+            for i in 0..lits.len() {
+                for j in (i + 1)..lits.len() {
+                    self.clauses.push(vec![-lits[i], -lits[j]]); // at most one
+                }
+            }
+        }
     }
 
     fn fresh(&mut self) -> i32 {
@@ -126,6 +169,16 @@ impl<'a> CnfBuilder<'a> {
                 }
                 x
             }
+            // An equality `enum_obs(args) = value` is a proposition; register its group so the exactly-one
+            // axiom is added at finalize, then encode the whole equality as one atom.
+            Expr::Binary { op: BinOp::Eq, lhs, rhs }
+                if self.enum_head(lhs).is_some() && matches!(&**rhs, Expr::Name(_)) =>
+            {
+                let obs = self.enum_head(lhs).unwrap();
+                let vals = self.enum_vals[&obs].clone();
+                self.enum_groups.entry(canon(lhs)).or_insert(((**lhs).clone(), vals));
+                self.atom(canon(e))
+            }
             atom => self.atom(canon(atom)),
         }
     }
@@ -198,10 +251,21 @@ fn dpll(clauses: &[Vec<i32>], assign: &mut [i8]) -> bool {
 /// `None` if UNSAT. `None` is also returned on variable overflow (treated conservatively
 /// as "cannot certify SAT"); callers should note the cap.
 pub fn satisfiable(exprs: &[&Expr], bool_names: &HashSet<String>) -> Option<BTreeMap<String, bool>> {
-    let mut b = CnfBuilder::new(bool_names);
+    satisfiable_enum(exprs, bool_names, &HashMap::new())
+}
+
+/// As [`satisfiable`], plus the exactly-one-value axiom for each declared enum-typed observable
+/// (`enum_vals`: observable name -> its value set, including any primed post-state versions).
+pub fn satisfiable_enum(
+    exprs: &[&Expr],
+    bool_names: &HashSet<String>,
+    enum_vals: &HashMap<String, Vec<String>>,
+) -> Option<BTreeMap<String, bool>> {
+    let mut b = CnfBuilder::new(bool_names, enum_vals);
     for e in exprs {
         b.assert(e);
     }
+    b.finalize_enums();
     if b.overflow {
         return None;
     }
