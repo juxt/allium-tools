@@ -52,6 +52,12 @@ pub fn arithmetic(module: &Module, src: &str) -> Vec<Diagnostic> {
                 _ => continue,
             };
             let (e, _) = parse_predicate(body.slice(src));
+            // A transition invariant (`watermark >= old(watermark)`) is a two-state property. These
+            // single-state probes strip `old`, collapsing it to a tautology and misreporting it as
+            // redundant. Skip it here; arith_preservation checks it soundly across each action.
+            if crate::analyse::uses_old_expr(&e) {
+                continue;
+            }
             let mut cons = Vec::new();
             let mut env = HashMap::new();
             emit(&e, &mut env, &st, &name, &mut cons, &mut notes);
@@ -1012,5 +1018,15 @@ mod tests {
         );
         let m = run(&src);
         assert!(any(&m, "`monotone`") && any(&m, "ENTAILED"), "{m:#?}");
+    }
+
+    #[test]
+    fn old_based_transition_invariant_is_not_swept_into_the_entailment_probe() {
+        // `watermark >= old(watermark)` is a two-state monotonicity property. The single-state probe would
+        // strip `old`, collapse it to a tautology, and call it redundant. It must be excluded instead
+        // (arith_preservation checks it), so no ENTAILED/redundant verdict is emitted for it.
+        let src = "-- allium: 4\ncomponent Ledger\n  entity Shard\n  observable state watermark(Shard) : Number where watermark(s) >= -1\n  observable state proposed(Shard) : Number\n  action advance\n    requires proposed(s) > watermark(s)\n    ensures watermark(s) = proposed(s)\n  invariant mono means watermark(s) >= old(watermark(s))\nend\n";
+        let m = run(src);
+        assert!(!any(&m, "`mono` in `Ledger` is ENTAILED"), "old-based invariant must not be called redundant: {m:#?}");
     }
 }

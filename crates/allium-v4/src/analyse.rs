@@ -1926,7 +1926,7 @@ fn strip_old(e: &Expr) -> Expr {
 /// finality, `old(settled) implies settled`), handled soundly by action-preservation (via `prime`, which
 /// maps `old`→pre and bare→post) but NOT by the reachability model of BMC/k-induction, whose per-step
 /// state atoms cannot represent `old` — so those passes exclude it rather than risk a false counterexample.
-fn uses_old_expr(e: &Expr) -> bool {
+pub(crate) fn uses_old_expr(e: &Expr) -> bool {
     match e {
         Expr::Unary { op: UnOp::Old, .. } => true,
         Expr::Unary { e, .. } => uses_old_expr(e),
