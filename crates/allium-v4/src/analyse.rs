@@ -37,6 +37,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source));
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source));
+    r.diagnostics.append(&mut variant_access(&r.module, source));
     r.diagnostics.append(&mut tier_report(&r.module, source));
     r.diagnostics.append(&mut refinement(&r.module, source));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
@@ -78,23 +79,183 @@ fn first_backtick(msg: &str) -> Option<String> {
     Some(msg[a..b].to_string())
 }
 
-/// Enum-typed state/given observables and their declared value sets. An inline enum type `{ a | b | c }`
-/// gives `{a, b, c}`; the SAT encoder uses this to make `status = a` and `status = b` mutually exclusive
-/// (an enum observable takes exactly one value). `with_primes` also registers the post-state name `X'`.
+/// Split the inside of an enum/variant type on top-level `|`, ignoring `|` nested inside a variant's
+/// `{ field : type }` block. Returns the pipe-separated parts trimmed.
+fn split_variants(inner: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for c in inner.chars() {
+        match c {
+            '{' => { depth += 1; cur.push(c); }
+            '}' => { depth -= 1; cur.push(c); }
+            '|' if depth == 0 => { parts.push(cur.trim().to_string()); cur.clear(); }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        parts.push(cur.trim().to_string());
+    }
+    parts
+}
+
+/// The variants of an inline enum/sum type `{ a | paid { at : Time } | c }`: each part's tag (the name
+/// before any `{`) and its payload fields (`name : type` pairs inside the braces, empty for a bare tag).
+fn parse_variants(ty: &str) -> Option<Vec<(String, Vec<(String, String)>)>> {
+    let inner = ty.trim().strip_prefix('{')?.strip_suffix('}')?;
+    let mut out = Vec::new();
+    for part in split_variants(inner) {
+        if part.is_empty() {
+            continue;
+        }
+        let (tag, fields) = match part.split_once('{') {
+            Some((t, rest)) => {
+                let body = rest.trim_end_matches('}');
+                let fs: Vec<(String, String)> = body
+                    .split(',')
+                    .filter_map(|f| f.split_once(':').map(|(n, t)| (n.trim().to_string(), t.trim().to_string())))
+                    .collect();
+                (t.trim().to_string(), fs)
+            }
+            None => (part.trim().to_string(), Vec::new()),
+        };
+        if !tag.is_empty() {
+            out.push((tag, fields));
+        }
+    }
+    (out.len() >= 2).then_some(out)
+}
+
+/// Correct-by-construction check for sum/variant state: a payload field may only be READ where its
+/// discriminant is known to hold. `outputs` of `outcome : { success { outputs } | failure }` is present
+/// only when `outcome = success`, so reading `outputs(e)` outside that guard is ill-formed. This moves the
+/// "the field exists here" obligation from a proof into a well-formedness fact, which is why a sum type is
+/// stronger than a status field with per-field presence: the illegal read cannot be written.
+pub fn variant_access(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let fields = variant_fields_of(d, src);
+        if fields.is_empty() {
+            continue;
+        }
+        for it in &d.items {
+            // An action's `requires` establishes facts for its `ensures`; other items stand alone.
+            let (established0, bodies): (HashSet<String>, Vec<crate::span::Span>) = match it.kind {
+                ItemKind::Action => {
+                    let est = it.requires.map(|sp| discriminant_facts(&parse_predicate(sp.slice(src)).0)).unwrap_or_default();
+                    (est, it.ensures.into_iter().collect())
+                }
+                _ => (HashSet::new(), it.body.into_iter().collect()),
+            };
+            for sp in bodies {
+                let e = parse_predicate(sp.slice(src)).0;
+                check_access(&e, &established0, &fields, it.span, &d.name, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// The discriminant equalities an expression GUARANTEES (usable as established facts downstream): a bare
+/// `disc = tag`, or a conjunction of them. Implication, disjunction and negation guarantee nothing.
+fn discriminant_facts(e: &Expr) -> HashSet<String> {
+    match e {
+        Expr::Binary { op: BinOp::Eq, .. } => [canon(e)].into_iter().collect(),
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            let mut s = discriminant_facts(lhs);
+            s.extend(discriminant_facts(rhs));
+            s
+        }
+        _ => HashSet::new(),
+    }
+}
+
+/// Walk `e`, and for every read of a variant payload field verify its discriminant guard is established.
+fn check_access(e: &Expr, est: &HashSet<String>, fields: &HashMap<String, (String, String)>, span: crate::span::Span, comp: &str, out: &mut Vec<Diagnostic>) {
+    match e {
+        Expr::App { head, args } => {
+            if let Expr::Name(h) = &**head {
+                if let Some((disc, tag)) = fields.get(h) {
+                    // Required guard: `disc(args) = tag` with the field's own args.
+                    let guard = Expr::Binary {
+                        op: BinOp::Eq,
+                        lhs: Box::new(Expr::App { head: Box::new(Expr::Name(disc.clone())), args: args.clone() }),
+                        rhs: Box::new(Expr::Name(tag.clone())),
+                    };
+                    if !est.contains(&canon(&guard)) {
+                        out.push(Diagnostic::error(
+                            span,
+                            format!("in `{comp}`: field `{h}` is only present when `{}`, but it is read without that guard. Guard the access (e.g. `{} implies …`).", canon(&guard), canon(&guard)),
+                        ));
+                    }
+                }
+            }
+            for a in args {
+                check_access(a, est, fields, span, comp, out);
+            }
+        }
+        Expr::Binary { op: BinOp::Implies, lhs, rhs } => {
+            check_access(lhs, est, fields, span, comp, out);
+            let mut est2 = est.clone();
+            est2.extend(discriminant_facts(lhs));
+            check_access(rhs, &est2, fields, span, comp, out);
+        }
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            let mut for_l = est.clone();
+            for_l.extend(discriminant_facts(rhs));
+            let mut for_r = est.clone();
+            for_r.extend(discriminant_facts(lhs));
+            check_access(lhs, &for_l, fields, span, comp, out);
+            check_access(rhs, &for_r, fields, span, comp, out);
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            check_access(lhs, est, fields, span, comp, out);
+            check_access(rhs, est, fields, span, comp, out);
+        }
+        Expr::Unary { e, .. } => check_access(e, est, fields, span, comp, out),
+        Expr::Quant { body, .. } | Expr::Sum { body, .. } => check_access(body, est, fields, span, comp, out),
+        Expr::Cond { cond, then_, els } => {
+            check_access(cond, est, fields, span, comp, out);
+            let mut est2 = est.clone();
+            est2.extend(discriminant_facts(cond));
+            check_access(then_, &est2, fields, span, comp, out);
+            check_access(els, est, fields, span, comp, out);
+        }
+        Expr::Field { base, .. } => check_access(base, est, fields, span, comp, out),
+        _ => {}
+    }
+}
+
+/// Enum-typed state/given observables and their declared value (variant tag) sets. An inline enum
+/// `{ a | b | c }` gives `{a, b, c}`; a sum `{ ok { x : T } | err }` gives `{ok, err}` (tags only). The
+/// SAT encoder uses this to make an enum observable take exactly one value. `with_primes` adds `X'`.
 pub(crate) fn enum_values_of(d: &crate::ast::Decl, src: &str, with_primes: bool) -> HashMap<String, Vec<String>> {
     let mut out = HashMap::new();
     for it in d.items.iter().filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given)) {
         let (Some(name), Some(bsp)) = (&it.name, it.body) else { continue };
-        let ty = bsp.slice(src).trim();
-        // Inline enum: `{ a | b | c }`. Named enums are not yet declared in v4, so only this form.
-        if let (Some(inner), true) = (ty.strip_prefix('{'), ty.ends_with('}')) {
-            let inner = inner.trim_end_matches('}');
-            let vals: Vec<String> = inner.split('|').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-            if vals.len() >= 2 {
-                if with_primes {
-                    out.insert(format!("{name}'"), vals.clone());
+        if let Some(variants) = parse_variants(bsp.slice(src).trim()) {
+            let tags: Vec<String> = variants.into_iter().map(|(t, _)| t).collect();
+            if with_primes {
+                out.insert(format!("{name}'"), tags.clone());
+            }
+            out.insert(name.clone(), tags);
+        }
+    }
+    out
+}
+
+/// Variant PAYLOAD fields across a declaration: field name -> (discriminant observable, required tag).
+/// A payload field `outputs` of `outcome : { success { outputs : Text } | failure }` is present only when
+/// `outcome = success`; reading it elsewhere is ill-formed (a correct-by-construction guard).
+pub(crate) fn variant_fields_of(d: &crate::ast::Decl, src: &str) -> HashMap<String, (String, String)> {
+    let mut out = HashMap::new();
+    for it in d.items.iter().filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given)) {
+        let (Some(name), Some(bsp)) = (&it.name, it.body) else { continue };
+        if let Some(variants) = parse_variants(bsp.slice(src).trim()) {
+            for (tag, fields) in variants {
+                for (fname, _fty) in fields {
+                    out.insert(fname, (name.clone(), tag.clone()));
                 }
-                out.insert(name.clone(), vals);
             }
         }
     }
@@ -2059,6 +2220,15 @@ mod tests {
         let src = "-- allium: 4\ncomponent F\n  entity I\n  observable state fee(I) : Money\n  observable state on(I) : bool\n  invariant cap means every i :: on(i) implies fee(i) <= 10\n  invariant floor means every i :: on(i) implies fee(i) >= 20\nend\n";
         assert!(any(src, "VACUO"), "{:?}", msgs(src));
         assert!(!any(src, "jointly satisfiable"), "{:?}", msgs(src));
+    }
+
+    #[test]
+    fn variant_payload_field_guarded_access() {
+        // A sum type `outcome : { success { outputs } | failure { error } }`. Reading `outputs` under the
+        // `success` guard is well-formed; reading `error` without the `failure` guard is ill-formed.
+        let src = "-- allium: 4\ncomponent H\n  entity E\n  observable state outcome(E) : { success { outputs : Number } | failure { error : Number } }\n  observable state done(E) : bool\n  invariant ok means outcome(e) = success implies outputs(e) >= 0\n  invariant bad means done(e) implies error(e) >= 0\nend\n";
+        assert!(any(src, "field `error` is only present when `outcome(e) = failure`"), "{:?}", msgs(src));
+        assert!(!any(src, "field `outputs`"), "guarded read must be well-formed: {:?}", msgs(src));
     }
 
     #[test]
