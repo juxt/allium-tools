@@ -441,6 +441,32 @@ pub(crate) fn head(t: &str) -> String {
 }
 
 /// Bind quantifiers over the domain and emit a linear constraint per ground comparison.
+/// True if the state named `n` has an enum/variant type (`{ a | b | c }`), which the enum/SAT tier owns.
+fn enum_typed(n: &str, st: &HashMap<String, String>) -> bool {
+    st.get(n).map(|t| t.trim_start().starts_with('{')).unwrap_or(false)
+}
+
+/// True if `e` is a guard built purely from enum-observable (dis)equalities — `outcome = success`, and
+/// their and/or/not combinations. Such a guard is checked by the enum tier, not the arithmetic tier, so
+/// the arithmetic tier should drop it silently rather than report it as an unchecked nonlinear term.
+fn is_enum_guard(e: &Expr, st: &HashMap<String, String>) -> bool {
+    match e {
+        Expr::Binary { op: BinOp::Eq | BinOp::Ne, lhs, rhs } => {
+            let head_enum = |x: &Expr| match x {
+                Expr::App { head, .. } => matches!(&**head, Expr::Name(h) if enum_typed(h, st)),
+                Expr::Name(n) => enum_typed(n, st),
+                _ => false,
+            };
+            // an enum observable compared to a bare tag (Name) on either side
+            (head_enum(lhs) && matches!(rhs.as_ref(), Expr::Name(_)))
+                || (head_enum(rhs) && matches!(lhs.as_ref(), Expr::Name(_)))
+        }
+        Expr::Binary { op: BinOp::And | BinOp::Or, lhs, rhs } => is_enum_guard(lhs, st) && is_enum_guard(rhs, st),
+        Expr::Unary { op: UnOp::Not, e } => is_enum_guard(e, st),
+        _ => false,
+    }
+}
+
 fn emit(
     e: &Expr,
     env: &mut HashMap<String, usize>,
@@ -461,6 +487,11 @@ fn emit(
         Expr::Binary { op: BinOp::Implies, lhs, rhs } => match eval_guard(lhs, env) {
             Some(true) => emit(rhs, env, st, label, out, notes),
             Some(false) => {}
+            // A guard the arithmetic tier cannot evaluate drops the whole implication (sound: it asserts
+            // nothing). Only note it as unchecked when it is a genuine arithmetic concern — a pure ENUM
+            // guard (`outcome = success`) is owned by the enum/SAT tier, so noting it here as "nonlinear
+            // not checked" double-accounts and misleads. Drop it silently.
+            None if is_enum_guard(lhs, st) => {}
             None => notes.push(format!("guard `{}`", crate::analyse::canon(lhs))),
         },
         Expr::Binary { op: op @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), lhs, rhs } => {
@@ -958,6 +989,16 @@ mod tests {
         let m = run(src);
         assert!(any(&m, "CONTRADICTORY"), "{m:#?}");
         assert!(!any(&m, "linearis"), "negative literal must not be an unchecked error: {m:#?}");
+    }
+
+    #[test]
+    fn enum_guard_is_not_reported_as_unchecked_nonlinear() {
+        // An enum-guarded arithmetic invariant (`outcome = success implies count >= 0`) is owned by the
+        // enum tier. The arithmetic tier must not report the enum guard as a nonlinear unchecked term; a
+        // genuinely nonlinear guard still is.
+        let enumg = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state count(O) : Number\n  observable state floor(O) : Number\n  invariant a means outcome(o) = success implies count(o) >= 0\n  invariant b means count(o) >= floor(o)\nend\n";
+        let m = run(enumg);
+        assert!(!any(&m, "NOT CHECKED"), "enum guard must not be an unchecked nonlinear term: {m:#?}");
     }
 
     #[test]
