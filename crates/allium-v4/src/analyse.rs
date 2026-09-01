@@ -54,6 +54,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut relational_preservation(&r.module, source));
     r.diagnostics.append(&mut bmc(&r.module, source));
     r.diagnostics.append(&mut bmc_enum(&r.module, source));
+    r.diagnostics.append(&mut transitions_notice(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source));
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source));
@@ -1535,6 +1536,22 @@ fn enum_assignments(e: &Expr, evals: &HashMap<String, Vec<String>>, out: &mut Ha
     }
 }
 
+/// Warn that a `transitions` block is parsed but not yet expanded to guarded actions, so the lifecycle it
+/// declares is not checked. Prevents the silent-no-op trap: the block used to shred into bogus items with
+/// no diagnostic. Until the sugar lands, the user should write an `action` per edge.
+pub fn transitions_notice(module: &Module, _src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Transitions) {
+            out.push(Diagnostic::warning(
+                it.span,
+                format!("`transitions` block in `{}` is parsed but not yet modelled: its edges are not checked. Express each edge as an `action` (guard = source state, ensures = target state) and mark the end state `terminal` for it to be verified.", d.name),
+            ));
+        }
+    }
+    out
+}
+
 /// Collect `obs = <tag-valued expr>` action effects from a conjunction. Like [`enum_assignments`] but the
 /// RHS may be an `if/then/else` over tags (a branching transition, e.g. `status = if ok then done else
 /// failed`), resolved to a concrete tag at fire time by [`resolve_tag`]. Returns false if any conjunct is
@@ -2661,6 +2678,15 @@ mod tests {
         assert!(!any(good, "REACHABLY VIOLATED"), "no reachable violation exists: {:?}", msgs(good));
         // The reachable graph closes (3 states), so the invariant is proven exactly, not just unwitnessed.
         assert!(any(good, "`deliver_after_process` in `Cyc` is PROVED SAFE"), "graph closes → exact proof: {:?}", msgs(good));
+    }
+
+    #[test]
+    fn transitions_block_warns_and_does_not_shred() {
+        // The block is captured whole and warned about, and the invariant AFTER it still parses (proof
+        // that capture stops at the next real item, not mid-block on its inner `terminal:`).
+        let src = "-- allium: 4\ncomponent Node\n  entity I\n  observable state status(I) : { starting | running | dead }\n  init means status(i) = starting\n  transitions status(i)\n    starting -> running\n    running -> dead\n    terminal: dead\n  invariant sane means status(i) = dead implies status(i) <> starting\nend\n";
+        assert!(any(src, "`transitions` block in `Node` is parsed but not yet modelled"), "{:?}", msgs(src));
+        assert!(any(src, "invariant `sane` in `Node` is INDUCTIVE"), "the invariant after the block must still be analysed: {:?}", msgs(src));
     }
 
     #[test]

@@ -65,6 +65,10 @@ pub enum ItemKind {
     /// (`old(cond) implies cond`, the state is never left) and marks the state as an intended dead-end so
     /// deadlock detection does not flag it.
     Terminal,
+    /// `transitions <obs>(<var>) <edges> [terminal: <tag>]` — a declarative lifecycle edge block (the v3
+    /// idiom). Captured as a whole so it is not silently shredded into bogus items; not yet expanded to
+    /// guarded actions (that needs a synthesised-predicate body mechanism), so a pass warns it is inert.
+    Transitions,
 }
 
 #[derive(Debug, Clone, Serialize)]

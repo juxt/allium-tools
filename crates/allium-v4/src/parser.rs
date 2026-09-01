@@ -17,6 +17,14 @@ pub struct ParseResult {
 const ITEM_STARTERS: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
     "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
+    "transitions", "pub", "abstract", "readable", "contract", "component", "use", "end", "satisfies",
+];
+
+/// Stops for capturing a `transitions` block: every item starter and `end`, but NOT `terminal` — the
+/// block carries its own inner `terminal: <tag>` line, which must be captured, not treated as a new item.
+const TRANSITION_STOPS: &[&str] = &[
+    "entity", "observable", "state", "given", "let", "action", "init", "invariant",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "transitions",
     "pub", "abstract", "readable", "contract", "component", "use", "end", "satisfies",
 ];
 
@@ -28,7 +36,7 @@ fn is_starter(s: &str) -> bool {
 const TYPE_STOPS: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
     "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
-    "pub", "abstract", "readable", "contract", "component", "use", "end", "satisfies", "where",
+    "transitions", "pub", "abstract", "readable", "contract", "component", "use", "end", "satisfies", "where",
 ];
 
 pub fn parse(source: &str) -> ParseResult {
@@ -335,6 +343,15 @@ impl<'s> Parser<'s> {
                 self.advance();
                 let mut it = Item::new(ItemKind::Terminal, start);
                 it.body = self.read_raw(ITEM_STARTERS, false);
+                it
+            }
+            // `transitions <obs>(<var>)` then edge lines and an optional `terminal: <tag>`. Captured whole
+            // (stopping only at a real item starter or `end`, not at the block's own inner `terminal:`) so
+            // the block is not shredded into junk items; a pass warns it is not yet modelled.
+            Some("transitions") => {
+                self.advance();
+                let mut it = Item::new(ItemKind::Transitions, start);
+                it.body = self.read_raw(TRANSITION_STOPS, false);
                 it
             }
             Some(role) if role_kind(role).is_some() => {
