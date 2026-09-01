@@ -506,11 +506,19 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
             const_assignments(&init, &mut init_consts);
             if !init_notes {
                 for (iname, conds, arith_guard, a) in &guarded {
-                    // The guard is definitely active at init only if init pins each condition's observable
-                    // to a value that activates it.
-                    let active = conds.iter().all(|(o, t, pos)| {
-                        assigned_enum_tag(&init, o, &st).map(|v| cond_active(&v, t, *pos)).unwrap_or(false)
-                    });
+                    // Per-condition activation at init: Some(true/false) if init pins the observable,
+                    // None if init leaves it free.
+                    let statuses: Vec<Option<bool>> = conds
+                        .iter()
+                        .map(|(o, t, pos)| assigned_enum_tag(&init, o, &st).map(|v| cond_active(&v, t, *pos)))
+                        .collect();
+                    // A guard init definitely turns OFF (some condition pinned false) makes the invariant
+                    // hold vacuously at init — established, so it can earn INDUCTIVE if also preserved.
+                    if statuses.iter().any(|s| *s == Some(false)) {
+                        established.insert(iname.clone());
+                        continue;
+                    }
+                    let active = statuses.iter().all(|s| *s == Some(true));
                     // Only a bound over a numeric state init assigns can be contradicted by init.
                     if !active || !crate::analyse::mentions_any(a, &init_states) {
                         continue;
@@ -1668,6 +1676,11 @@ mod tests {
         // an input the spec has not constrained; the diagnostic names the missing assumption.
         let elicit = "-- allium: 4\ncomponent L\n  entity S\n  observable state status(S) : { healthy | corrupted }\n  observable state wm(S) : Number\n  given off : Number\n  invariant b means status(s) = healthy implies wm(s) <= off\n  init means status(s) = healthy and wm(s) = 0 - 1\n  action advance\n    requires status(s) = healthy and wm(s) < off\n    ensures wm(s) = off\nend\n";
         assert!(any(&egp(elicit), "holds at init only if `0 - 1 <= off`"), "{:#?}", egp(elicit));
+
+        // A guarded bound whose guard is OFF at init (init sets status=active, guard is `status=closed`)
+        // is vacuously established, so preserved => INDUCTIVE, not merely PRESERVED.
+        let vac = "-- allium: 4\ncomponent L\n  entity O\n  observable state status(O) : { active | closed }\n  observable state bal(O) : Number\n  init means status(o) = active and bal(o) = 5\n  invariant closed_zero means status(o) = closed implies bal(o) = 0\n  action close\n    requires status(o) = active and bal(o) = 0\n    ensures status(o) = closed\nend\n";
+        assert!(any(&egp(vac), "state-guarded invariant `closed_zero` in `L` is INDUCTIVE"), "vacuously established: {:#?}", egp(vac));
 
         // Established by init AND preserved -> the stronger INDUCTIVE verdict.
         let ind = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state count(O) : Number\n  init means outcome(o) = success and count(o) = 0\n  invariant ok means outcome(o) = success implies count(o) >= 0\n  action inc\n    requires outcome(o) = success\n    ensures count(o) = count(o) + 1\nend\n";
