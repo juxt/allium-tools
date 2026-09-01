@@ -220,6 +220,224 @@ pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
     out
 }
 
+/// True if `e` is `obs(..)` or `obs` for the given name.
+fn head_is(e: &Expr, name: &str) -> bool {
+    match e {
+        Expr::App { head, .. } => matches!(head.as_ref(), Expr::Name(h) if h == name),
+        Expr::Name(n) => n == name,
+        _ => false,
+    }
+}
+
+/// Extract `(enum_obs, tag, A)` from a reduced body of the shape `enum_obs(e) = tag implies A`, where
+/// `enum_obs` is an enum-typed observable, `tag` a bare variant tag, and `A` the arithmetic consequent.
+fn enum_guarded_inv(qf: &Expr, st: &HashMap<String, String>) -> Option<(String, String, Expr)> {
+    let Expr::Binary { op: BinOp::Implies, lhs, rhs } = qf else { return None };
+    let Expr::Binary { op: BinOp::Eq, lhs: el, rhs: er } = lhs.as_ref() else { return None };
+    let obs = match el.as_ref() {
+        Expr::App { head, .. } => match head.as_ref() {
+            Expr::Name(h) if enum_typed(h, st) => h.clone(),
+            _ => return None,
+        },
+        Expr::Name(n) if enum_typed(n, st) => n.clone(),
+        _ => return None,
+    };
+    let Expr::Name(tag) = er.as_ref() else { return None };
+    Some((obs, tag.clone(), (**rhs).clone()))
+}
+
+/// The tag an `ensures` conjunction assigns to `obs` unconditionally (`obs(..) = tag`), if any.
+fn assigned_enum_tag(e: &Expr, obs: &str) -> Option<String> {
+    match e {
+        Expr::Binary { op: BinOp::And, lhs, rhs } => assigned_enum_tag(lhs, obs).or_else(|| assigned_enum_tag(rhs, obs)),
+        Expr::Binary { op: BinOp::Eq, lhs, rhs } if head_is(lhs, obs) => match rhs.as_ref() {
+            Expr::Name(t) => Some(t.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The tag a guard conjunction requires for `obs` (`obs(..) = tag`), if any.
+fn required_enum_tag(e: &Expr, obs: &str) -> Option<String> {
+    match e {
+        Expr::Binary { op: BinOp::And, lhs, rhs } => required_enum_tag(lhs, obs).or_else(|| required_enum_tag(rhs, obs)),
+        Expr::Binary { op: BinOp::Eq, lhs, rhs } if head_is(lhs, obs) => match rhs.as_ref() {
+            Expr::Name(t) => Some(t.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Replace each enum-equality conjunct with `true`, leaving only the arithmetic part of a guard to ground.
+fn strip_enum_conjuncts(e: &Expr, st: &HashMap<String, String>) -> Expr {
+    match e {
+        Expr::Binary { op: BinOp::And, lhs, rhs } => Expr::Binary {
+            op: BinOp::And,
+            lhs: Box::new(strip_enum_conjuncts(lhs, st)),
+            rhs: Box::new(strip_enum_conjuncts(rhs, st)),
+        },
+        _ if is_enum_guard(e, st) => Expr::Name("true".into()),
+        other => other.clone(),
+    }
+}
+
+/// Enum-guarded arithmetic preservation — the first slice of mixed boolean+arithmetic reasoning. An
+/// invariant `enum_obs(e) = tag implies A(e)` (A linear) is owned by neither the pure-enum tier (A is
+/// arithmetic) nor the pure-LRA tier (the guard is an enum equality it drops). This checks it by
+/// case-splitting on the enum guard: for each action, decide whether `enum_obs = tag` still holds after it
+/// (from the action's enum effect and requirement) and whether A held before, then run the LRA VC
+/// `A(pre)? ∧ unconditional-invariants ∧ arith-guard ∧ effect ∧ ¬A(post)`. SOUND: any unmodellable term
+/// (nonlinear effect/guard, conditional enum set) abandons the pair rather than risk a false alarm; the
+/// enum requirement is honoured so an action that cannot fire under `tag` is not spuriously flagged.
+pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let mut st: HashMap<String, String> = HashMap::new();
+        for it in &d.items {
+            if matches!(it.kind, ItemKind::State | ItemKind::Given) {
+                if let (Some(n), Some(b)) = (&it.name, it.body) {
+                    st.insert(n.clone(), b.slice(src).trim().to_string());
+                }
+            }
+        }
+        let state_names: HashSet<String> =
+            d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
+
+        // Enum-guarded linear invariants, and the unconditional linear invariants (pre-hypotheses that
+        // rule out impossible pre-states, so a break is only reported from a genuinely reachable one).
+        let mut guarded: Vec<(String, String, String, Expr)> = Vec::new();
+        let mut uncond_pre: Vec<Con> = Vec::new();
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
+            let (name, body) = match (&it.name, it.body) {
+                (Some(n), Some(b)) => (n.clone(), b),
+                _ => continue,
+            };
+            let qf = match arith_reduce(&parse_predicate(body.slice(src)).0) {
+                Some(e) => e,
+                None => continue,
+            };
+            if let Some((obs, tag, a)) = enum_guarded_inv(&qf, &st) {
+                let (acons, anotes) = ground(&a, &st);
+                if anotes || acons.is_empty() {
+                    continue; // consequent not purely linear
+                }
+                guarded.push((name, obs, tag, a));
+            } else {
+                let (c, n) = ground(&qf, &st);
+                if !n {
+                    uncond_pre.extend(c);
+                }
+            }
+        }
+        if guarded.is_empty() {
+            continue;
+        }
+
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
+            let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
+            let ensures_raw = match it.ensures {
+                Some(sp) => parse_predicate(sp.slice(src)).0,
+                None => continue,
+            };
+            let guard_raw = it.requires.map(|sp| parse_predicate(sp.slice(src)).0);
+            let mut ev = HashSet::new();
+            crate::analyse::collect_entity_vars(&ensures_raw, &mut ev);
+            if let Some(g) = &guard_raw {
+                crate::analyse::collect_entity_vars(g, &mut ev);
+            }
+            if ev.len() > 1 {
+                continue;
+            }
+            let ensures = crate::analyse::rename_entity(&ensures_raw, &ev);
+            let guard = guard_raw.map(|g| crate::analyse::rename_entity(&g, &ev));
+            let mut modified = HashSet::new();
+            crate::analyse::collect_writes(&ensures, false, &state_names, &mut modified);
+            let modified_numeric: HashSet<String> =
+                modified.iter().filter(|m| st.get(*m).map(|t| numeric(t)).unwrap_or(false)).cloned().collect();
+            let mut st2 = st.clone();
+            for m in &modified_numeric {
+                if let Some(t) = st.get(m).cloned() {
+                    st2.insert(format!("{m}'"), t);
+                }
+            }
+            // Ground only the arithmetic part of the effect: the enum assignment (`outcome = success`) is
+            // accounted for by the case analysis below, not by the LRA solver, so strip it first.
+            let effect_expr = crate::analyse::prime(&strip_enum_conjuncts(&ensures, &st), &modified_numeric, false);
+            let (effect_cons, effect_notes) = ground(&effect_expr, &st2);
+            if effect_notes {
+                continue; // an unmodellable effect could hide a link -> skip, do not false-alarm
+            }
+            let guard_cons = match &guard {
+                Some(g) => {
+                    let (c, n) = ground(&strip_enum_conjuncts(g, &st), &st2);
+                    if n {
+                        continue;
+                    }
+                    c
+                }
+                None => Vec::new(),
+            };
+
+            for (iname, obs, tag, a) in &guarded {
+                let required = guard.as_ref().and_then(|g| required_enum_tag(g, obs));
+                // Decide whether `obs = tag` holds after the action, and whether A held before it.
+                let (active_post, a_pre) = if modified.contains(obs) {
+                    match assigned_enum_tag(&ensures, obs) {
+                        Some(v) if &v == tag => (true, required.as_deref() == Some(tag.as_str())),
+                        Some(_) => (false, false), // set to another tag -> guard inactive after
+                        None => continue,          // conditional/opaque enum set -> cannot decide soundly
+                    }
+                } else {
+                    // enum unchanged: the guard is active after iff it held before; the action must be able
+                    // to fire in that pre-state, so a different required tag rules the case out.
+                    if required.as_deref().map(|r| r != tag).unwrap_or(false) {
+                        continue;
+                    }
+                    (true, true)
+                };
+                if !active_post {
+                    continue;
+                }
+                let (a_pre_cons, apn) = ground(a, &st);
+                let a_post = crate::analyse::prime(a, &modified_numeric, false);
+                let (a_post_cons, apostn) = ground(&a_post, &st2);
+                if apn || apostn || a_post_cons.is_empty() {
+                    continue;
+                }
+                let mut witness: Option<String> = None;
+                'search: for pc in &a_post_cons {
+                    for neg in negate_con(pc) {
+                        let mut q: Vec<Con> = Vec::new();
+                        if a_pre {
+                            q.extend(a_pre_cons.clone());
+                        }
+                        q.extend(uncond_pre.clone());
+                        q.extend(guard_cons.clone());
+                        q.extend(effect_cons.clone());
+                        q.push(neg);
+                        if let Outcome::Sat(m) = solve(&q) {
+                            witness = Some(schedule(&m, &st2));
+                            break 'search;
+                        }
+                    }
+                }
+                if let Some(w) = witness {
+                    out.push(Diagnostic::warning(
+                        it.span,
+                        crate::analyse::pretty(&format!(
+                            "action `{aname}` in `{}` can break enum-guarded invariant `{iname}`: with `{obs} = {tag}` holding afterwards, the arithmetic bound is violated (e.g. {w}). Guard the action or maintain the bound under `{tag}`.",
+                            d.name
+                        )),
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Linear-arithmetic entailment for refinement: do the component's invariants `x_invs` entail `promise`?
 /// Returns `Some(true)` if every way the promise could fail is inconsistent with the invariants,
 /// `Some(false)` with the first counterexample shape it finds, or `None` if the promise is not linearisable
@@ -989,6 +1207,26 @@ mod tests {
         let m = run(src);
         assert!(any(&m, "CONTRADICTORY"), "{m:#?}");
         assert!(!any(&m, "linearis"), "negative literal must not be an unchecked error: {m:#?}");
+    }
+
+    #[test]
+    fn enum_guarded_preservation_catches_and_spares_correctly() {
+        let hdr = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state count(O) : Number\n  invariant ok means outcome(o) = success implies count(o) >= 0\n";
+        // Breaks: sets count negative while success holds after.
+        let botch = format!("{hdr}  action botch\n    requires outcome(o) = success\n    ensures count(o) = 0 - 1\nend\n");
+        assert!(any(&run(&botch), "`botch` in `E` can break enum-guarded invariant `ok`"), "{:#?}", run(&botch));
+        // Breaks: transitions failure->success while setting count negative (must establish the bound).
+        let finish = format!("{hdr}  action finish\n    requires outcome(o) = failure\n    ensures outcome(o) = success and count(o) = 0 - 1\nend\n");
+        assert!(any(&run(&finish), "`finish` in `E` can break enum-guarded invariant `ok`"), "{:#?}", run(&finish));
+        // Safe: maintains the bound under success.
+        let safe = format!("{hdr}  action safe\n    requires outcome(o) = success\n    ensures count(o) = 5\nend\n");
+        assert!(!any(&run(&safe), "can break enum-guarded"), "{:#?}", run(&safe));
+        // Safe: acts under failure (guard inactive), so a negative count is fine.
+        let onfail = format!("{hdr}  action onfail\n    requires outcome(o) = failure\n    ensures count(o) = 0 - 1\nend\n");
+        assert!(!any(&run(&onfail), "can break enum-guarded"), "{:#?}", run(&onfail));
+        // Safe: transitions success->failure (guard inactive after), so a negative count is fine.
+        let failit = format!("{hdr}  action failit\n    ensures outcome(o) = failure and count(o) = 0 - 1\nend\n");
+        assert!(!any(&run(&failit), "can break enum-guarded"), "{:#?}", run(&failit));
     }
 
     #[test]
