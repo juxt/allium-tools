@@ -469,7 +469,10 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                 let text = text.trim().strip_prefix("means").unwrap_or(text);
                 parse_predicate(text).0
             })
-            .filter(|e| boolean_fragment_e(e, &bool_base, &all_obs, &enum_names))
+            // Project init onto its boolean/enum fragment, dropping arithmetic conjuncts (e.g. `paid = 0`).
+            // A boolean/enum invariant's establishment cannot depend on an arithmetic init fact, so this is
+            // sound and lets enum terminals be certified even when init also pins numeric state.
+            .and_then(|e| boolean_project(&e, &bool_base, &all_obs, &enum_names))
             .map(|e| {
                 let mut ev = HashSet::new();
                 collect_entity_vars(&e, &mut ev);
@@ -581,6 +584,23 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
 /// observable it applies is boolean-typed. Anything else would rest on opaque atoms and could false-alarm.
 fn boolean_fragment(e: &Expr, bool_names: &HashSet<String>, obs: &HashSet<String>) -> bool {
     boolean_fragment_e(e, bool_names, obs, &HashSet::new())
+}
+
+/// Project a conjunction onto its boolean/enum-fragment conjuncts, dropping arithmetic ones. None if
+/// nothing survives (a purely arithmetic predicate). Used to keep the boolean/enum part of a mixed `init`
+/// so enum/boolean invariants can still be certified from it.
+fn boolean_project(e: &Expr, bool_names: &HashSet<String>, obs: &HashSet<String>, enum_names: &HashSet<String>) -> Option<Expr> {
+    if let Expr::Binary { op: BinOp::And, lhs, rhs } = e {
+        return match (
+            boolean_project(lhs, bool_names, obs, enum_names),
+            boolean_project(rhs, bool_names, obs, enum_names),
+        ) {
+            (Some(l), Some(r)) => Some(Expr::Binary { op: BinOp::And, lhs: Box::new(l), rhs: Box::new(r) }),
+            (Some(x), None) | (None, Some(x)) => Some(x),
+            (None, None) => None,
+        };
+    }
+    boolean_fragment_e(e, bool_names, obs, enum_names).then(|| e.clone())
 }
 
 /// True if `e` is `enum_obs(args) = value` (or `<>`) — an equality between a declared enum observable and
@@ -2758,6 +2778,14 @@ mod tests {
         // A tag set with no reserved words is clean.
         let good = "-- allium: 4\ncomponent Eval\n  entity E\n  observable state ok(E) : { good | bad }\n  init means ok(e) = good\nend\n";
         assert!(!any(good, "reserved word"), "clean tags must not be flagged: {:?}", msgs(good));
+    }
+
+    #[test]
+    fn enum_terminal_proved_despite_arithmetic_init_and_invariant() {
+        // A mixed spec: init pins both an enum state and a numeric one, and an arithmetic invariant is
+        // present. The enum terminal must still be certified INDUCTIVE (init is projected to its enum part).
+        let src = "-- allium: 4\ncomponent S\n  entity T\n  observable state phase(T) : { pending | settled }\n  observable state paid(T) : Money\n  observable state amount(T) : Money\n  init means phase(t) = pending and paid(t) = 0\n  invariant settled_paid means phase(t) = settled implies paid(t) >= amount(t)\n  action settle\n    requires phase(t) = pending\n    ensures phase(t) = settled and paid(t) = amount(t)\n  terminal phase(t) = settled\nend\n";
+        assert!(any(src, "invariant `terminal[phase(t) = settled]` in `S` is INDUCTIVE"), "{:?}", msgs(src));
     }
 
     #[test]
