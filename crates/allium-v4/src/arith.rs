@@ -869,6 +869,8 @@ pub fn aggregate_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         if cons_invs.is_empty() {
             continue;
         }
+        let has_action = d.items.iter().any(|it| it.kind == ItemKind::Action && it.ensures.is_some());
+        let mut broken_cons: HashSet<String> = HashSet::new();
 
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
             let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
@@ -976,9 +978,21 @@ pub fn aggregate_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                     }
                 }
                 if broke {
+                    broken_cons.insert(c.name.clone());
                     out.push(Diagnostic::warning(
                         it.span,
                         format!("action `{aname}` in `{}` can break conservation invariant `{}`: it changes the summed quantity without an equal change to the total, so the aggregate no longer balances. Adjust the total (or offset with a matching change).", d.name, c.name),
+                    ));
+                }
+            }
+        }
+        // A conservation invariant no action breaks is preserved (every action keeps the aggregate balanced).
+        if has_action {
+            for c in &cons_invs {
+                if !broken_cons.contains(&c.name) {
+                    out.push(Diagnostic::warning(
+                        d.span,
+                        format!("conservation invariant `{}` in `{}` is PRESERVED: every action keeps the total equal to the sum.", c.name, d.name),
                     ));
                 }
             }
