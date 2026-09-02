@@ -429,7 +429,19 @@ impl<'s> Parser<'s> {
         }
         self.eat(Tok::Semi);
         if self.eat_ident("ensures") {
-            it.ensures = self.read_raw(ITEM_STARTERS, false);
+            it.ensures = self.read_raw(ITEM_STARTERS_PLUS_CLAUSES, false);
+            // A second `ensures`/`requires` clause would be silently dropped (only the first
+            // survives), quietly changing the verdict. Reject it with a pointed message rather
+            // than mis-parse. Postconditions combine with `and`.
+            while self.cur_ident().map_or(false, |k| k == "ensures" || k == "requires") {
+                self.error(
+                    self.span(),
+                    "an action takes a single `ensures` clause; combine multiple postconditions \
+                     with `and` (e.g. `ensures a and b`). A separate clause here would be dropped.",
+                );
+                self.advance();
+                let _ = self.read_raw(ITEM_STARTERS_PLUS_CLAUSES, false);
+            }
         }
         it
     }
@@ -520,6 +532,13 @@ const ITEM_STARTERS_PLUS_ENSURES: &[&str] = &[
     "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
     "pub", "abstract", "readable", "contract", "component", "use", "end",
     "satisfies", "ensures",
+];
+
+const ITEM_STARTERS_PLUS_CLAUSES: &[&str] = &[
+    "entity", "observable", "state", "given", "let", "action", "init", "invariant",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
+    "pub", "abstract", "readable", "contract", "component", "use", "end",
+    "satisfies", "ensures", "requires",
 ];
 
 const ITEM_STARTERS_PLUS_BY: &[&str] = &[

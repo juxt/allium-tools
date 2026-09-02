@@ -2614,6 +2614,18 @@ mod tests {
     }
 
     #[test]
+    fn second_ensures_clause_is_rejected_not_dropped() {
+        // Two separate `ensures` lines used to keep only the first and silently drop the rest,
+        // quietly changing the verdict. The parser must now reject the second with a pointed message.
+        let bad = "-- allium: 4\ncomponent Book\n  entity Acct\n  observable state bal(Acct) : Money\n  observable state total : Money\n  invariant conserved means total = sum a :: bal(a)\n  action transfer\n    ensures bal(a) = old(bal(a)) - 100\n    ensures bal(b) = old(bal(b)) + 100\nend\n";
+        assert!(any(bad, "takes a single `ensures` clause"), "{:?}", msgs(bad));
+        // The `and`-joined form is accepted and the balanced transfer verifies as preserved.
+        let good = "-- allium: 4\ncomponent Book\n  entity Acct\n  observable state bal(Acct) : Money\n  observable state total : Money\n  invariant conserved means total = sum a :: bal(a)\n  action transfer\n    ensures bal(a) = old(bal(a)) - 100 and bal(b) = old(bal(b)) + 100 and total = old(total)\nend\n";
+        assert!(!any(good, "takes a single `ensures` clause"), "{:?}", msgs(good));
+        assert!(!any(good, "can break"), "balanced transfer should preserve conservation: {:?}", msgs(good));
+    }
+
+    #[test]
     fn preservation_suggests_the_weakest_guard() {
         let bad = "-- allium: 4\ncomponent Pay\n  entity Txn\n  observable state authed(Txn) : bool\n  observable state captured(Txn) : bool\n  action capture\n    ensures captured(t)\n  invariant no_cap_without_auth means captured(t) implies authed(t)\nend\n";
         assert!(any(bad, "requires authed(e)"), "should suggest the weakest guard: {:?}", msgs(bad));
