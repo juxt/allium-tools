@@ -1355,3 +1355,31 @@ fn a_trigger_the_provider_never_emits_still_warns() {
         "a trigger the provider never mentions must still warn.\n{stdout}"
     );
 }
+
+// --- #61: cross-module `given` bodies reach the arithmetic passes -----------
+const LIB_61: &str = "-- allium: 4\ncomponent Lib\n  given dbl(x) means x + x\nend\n";
+// `tie` says w = dbl(v) = 2v, but `bump` moves w by only 1 while v moves by 1 — a break, but only
+// visible once the imported `given` is inlined.
+const MAIN_61: &str = "-- allium: 4\nuse \"./lib.allium\"\ncomponent Main\n  entity X\n  observable state v(X) : Number\n  observable state w(X) : Number\n  invariant tie means w(x) = dbl(v(x))\n  action bump\n    ensures v(x) = old(v(x)) + 1 and w(x) = old(w(x)) + 1\nend\n";
+
+#[test]
+fn t61_cross_module_given_is_inlined_into_preservation() {
+    let dir = TempDir::new("61-given");
+    dir.write("lib.allium", LIB_61);
+    dir.write("main.allium", MAIN_61);
+
+    // Analysed as a pair, the imported `dbl` inlines and the break surfaces. (v4 arith diagnostics
+    // carry no `code`, so assert on the raw message rather than via `parse_diagnostics`.)
+    let (_ok, stdout) = run("analyse", &[dir.path().to_str().unwrap()]);
+    assert!(
+        stdout.contains("can break arithmetic invariant `tie`"),
+        "cross-module `given` dbl must inline so the break in `tie` is caught.\n{stdout}"
+    );
+
+    // The importer alone cannot resolve `dbl`, so it stays opaque — no break, no false verdict.
+    let (_ok2, stdout2) = run("analyse", &[&dir.file("main.allium")]);
+    assert!(
+        !stdout2.contains("can break arithmetic invariant `tie`"),
+        "the importer analysed alone must not manufacture a verdict it cannot justify.\n{stdout2}"
+    );
+}

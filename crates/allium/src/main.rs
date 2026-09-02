@@ -379,11 +379,20 @@ fn run_multi_file(
     // it is the 4a parse pass; check/analyse/monitor logic grows in the allium-v4
     // crate and is selected on `command` here.
     if has_v4 {
-        for (path, source, _) in files_src {
+        // Cross-module resolution (analyse only): a file that `use`s another sees the imported module's
+        // `given` definitions. Keyed by canonical path so `./x.allium` and `x.allium` resolve alike.
+        let by_path: std::collections::HashMap<PathBuf, String> = files_src
+            .iter()
+            .filter_map(|(p, s, _)| std::fs::canonicalize(p).ok().map(|c| (c, s.clone())))
+            .collect();
+        for (path, source, _) in &files_src {
             let result = match command {
-                "check" => allium_v4::check(&source),
-                "analyse" => allium_v4::analyse(&source),
-                _ => allium_v4::parse(&source),
+                "check" => allium_v4::check(source),
+                "analyse" => {
+                    let imports = resolve_v4_imports(path, source, &by_path);
+                    allium_v4::analyse_with_imports(source, &imports)
+                }
+                _ => allium_v4::parse(source),
             };
             // Exit non-zero on an error, and on a semantic verdict a gate must not pass:
             // CONTRADICTORY / VACUOUSLY / INFEASIBLE. These are warnings (so they don't lower the
@@ -779,6 +788,30 @@ fn cmd_check(args: &[String]) -> ExitCode {
         });
         FileResult { diagnostics, findings: vec![], has_issues }
     })
+}
+
+/// Resolve a v4 file's `use` imports to the definitions they bring into scope (given bodies today), by
+/// following each import path relative to the file and looking it up in the canonical-path map of the
+/// check set. Imports outside the set are silently skipped — resolution is best-effort, not a gate.
+fn resolve_v4_imports(
+    path: &std::path::Path,
+    source: &str,
+    by_path: &std::collections::HashMap<PathBuf, String>,
+) -> allium_v4::arith::Imports {
+    let mut imports = allium_v4::arith::Imports::default();
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    for d in &allium_v4::parse(source).module.decls {
+        if d.kind != allium_v4::ast::DeclKind::Import {
+            continue;
+        }
+        let target = d.name.trim().trim_matches('"');
+        if let Ok(rp) = std::fs::canonicalize(dir.join(target)) {
+            if let Some(src) = by_path.get(&rp) {
+                imports.givens.extend(allium_v4::arith::extract_givens(src));
+            }
+        }
+    }
+    imports
 }
 
 fn cmd_analyse(args: &[String]) -> ExitCode {

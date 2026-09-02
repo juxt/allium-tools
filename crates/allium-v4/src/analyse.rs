@@ -45,6 +45,12 @@ fn desugar_where(module: &mut Module) {
 }
 
 pub fn analyse(source: &str) -> ParseResult {
+    analyse_with_imports(source, &crate::arith::Imports::default())
+}
+
+/// As [`analyse`], but with definitions resolved from other modules via `use` (given bodies today).
+/// The CLI resolves the import graph and passes them; single-file callers use [`analyse`].
+pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> ParseResult {
     let mut r = crate::check::check(source);
     desugar_where(&mut r.module);
     r.diagnostics.append(&mut coverage(&r.module, source));
@@ -56,11 +62,11 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut bmc_enum(&r.module, source));
     r.diagnostics.append(&mut transitions_notice(&r.module, source));
     r.diagnostics.append(&mut reserved_tag_check(&r.module, source));
-    r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source));
+    r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source, imports));
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
-    r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source));
-    r.diagnostics.append(&mut crate::arith::enum_guarded_preservation(&r.module, source));
-    r.diagnostics.append(&mut crate::arith::aggregate_preservation(&r.module, source));
+    r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source, imports));
+    r.diagnostics.append(&mut crate::arith::enum_guarded_preservation(&r.module, source, imports));
+    r.diagnostics.append(&mut crate::arith::aggregate_preservation(&r.module, source, imports));
     r.diagnostics.append(&mut variant_access(&r.module, source));
     r.diagnostics.append(&mut stuck_states(&r.module, source));
     r.diagnostics.append(&mut dead_states(&r.module, source));
