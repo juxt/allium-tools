@@ -1599,7 +1599,9 @@ pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnos
                     // st with the two entity keys stripped to numeric leaves is what is_lin_cmp needs; the
                     // instances below are what actually get grounded, so a coarse check here is enough. The
                     // antecedent may be a linear comparison OR an enum-equality guard (`status(a) = tag`,
-                    // #72): the latter is decided per-action in the VC, not grounded.
+                    // #72): the latter is decided per-action in the VC, not grounded. A CONJUNCTIVE antecedent
+                    // is NOT admitted here: the hypothesis-negation (`branch_cons`) cannot soundly split a
+                    // multi-constraint antecedent's ¬(A∧B), so a break can be missed — see task #77.
                     let ante_ok = is_lin_cmp(&ante, &st) || (enum_guard_atom(&ante).is_some() && ground(&ante, &st).1);
                     if ante_ok && is_lin_cmp(&cons, &st) {
                         if let (Some(n),) = (it.name.clone(),) {
