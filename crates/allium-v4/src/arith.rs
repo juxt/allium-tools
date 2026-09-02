@@ -346,14 +346,18 @@ fn has_free_ref(e: &Expr) -> bool {
     }
 }
 
-/// Derived linear bounds from a `X = min(a, b, …)` / `X = max(…)` invariant: `min` gives `X <= each arg`,
-/// `max` gives `X >= each arg`. Sound consequences of the equality, so their preservation catches an
-/// action that pushes `X` past the cap/floor (the disjunctive `X = some arg` part is not derived).
+/// Derived linear bounds from a `X = min/max/abs(…)` invariant: `min` gives `X <= each arg`, `max` gives
+/// `X >= each arg`, `abs(a)` gives `X >= a`, `X >= -a`, `X >= 0`. Sound consequences of the equality, so
+/// their preservation catches an action that pushes `X` past the cap/floor (the disjunctive `X = some arg`
+/// part is not derived).
 fn minmax_bounds(inv: &Expr) -> Vec<Expr> {
     let is_mm = |e: &Expr| -> Option<(String, Vec<Expr>)> {
         if let Expr::App { head, args } = e {
             if let Expr::Name(f) = &**head {
                 if (f == "min" || f == "max") && args.len() >= 2 {
+                    return Some((f.clone(), args.clone()));
+                }
+                if f == "abs" && args.len() == 1 {
                     return Some((f.clone(), args.clone()));
                 }
             }
@@ -366,6 +370,12 @@ fn minmax_bounds(inv: &Expr) -> Vec<Expr> {
         (Some((f, a)), None) => ((**rhs).clone(), f, a),
         _ => return Vec::new(),
     };
+    let ge = |l: Expr, r: Expr| Expr::Binary { op: BinOp::Ge, lhs: Box::new(l), rhs: Box::new(r) };
+    if f == "abs" {
+        let a = args.into_iter().next().unwrap();
+        let neg = Expr::Binary { op: BinOp::Sub, lhs: Box::new(Expr::Int(0)), rhs: Box::new(a.clone()) };
+        return vec![ge(x.clone(), a), ge(x.clone(), neg), ge(x, Expr::Int(0))];
+    }
     let rel = if f == "min" { BinOp::Le } else { BinOp::Ge };
     args.into_iter()
         .map(|a| Expr::Binary { op: rel.clone(), lhs: Box::new(x.clone()), rhs: Box::new(a) })
@@ -2083,6 +2093,9 @@ mod tests {
         // With `due <= balance` stated, paying exactly the due respects both bounds.
         let safe = format!("-- allium: 4\ncomponent Pay\n  entity L\n  observable state due(L) : Money\n  observable state balance(L) : Money\n  observable state payment(L) : Money\n  invariant order means due(l) <= balance(l)\n  invariant capped means payment(l) = min(due(l), balance(l))\n  action pay_due\n    ensures payment(l) = due(l)\nend\n");
         assert!(!any(&run_ap(&safe), "can break arithmetic invariant `capped"), "{:#?}", run_ap(&safe));
+        // abs derives a non-negativity bound: setting the magnitude negative breaks it.
+        let absneg = "-- allium: 4\ncomponent A\n  entity X\n  observable state delta(X) : Money\n  observable state mag(X) : Money\n  invariant m means mag(x) = abs(delta(x))\n  action bad\n    ensures mag(x) = 0 - 1\nend\n";
+        assert!(any(&run_ap(absneg), "can break arithmetic invariant `m[bound"), "{:#?}", run_ap(absneg));
     }
 
     #[test]
