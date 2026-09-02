@@ -1405,6 +1405,10 @@ fn emit(
         Expr::Binary { op: op @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), lhs, rhs } => {
             let (l, r) = match (lower(lhs, env, st), lower(rhs, env, st)) {
                 (Some(l), Some(r)) => (l, r),
+                // A comparison over an `if <finite-cond> then A else B` is conditional (mixed), not
+                // nonlinear: the conditional-invariant expansion checks it via the SMT rung, so do not
+                // report it here as an unchecked nonlinear term.
+                _ if count_conds(e) == 1 && first_cond(e).map(|c| is_enum_guard(&c, st)).unwrap_or(false) => return,
                 _ => {
                     notes.push(format!("`{}`", crate::analyse::canon(e)));
                     return;
