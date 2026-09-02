@@ -1339,7 +1339,7 @@ fn entailment_probe(
                     out.push(Diagnostic::warning(
                         comp_span(),
                         format!(
-                            "invariant `{name}` in `{comp}` is NOT entailed by the others: counterexample {}. The spec relies on an unstated assumption (e.g. principal never negative / emi covers interest).",
+                            "invariant `{name}` in `{comp}` is NOT entailed by the others: they permit `{}`, which it forbids. So it relies on an assumption not captured by the other invariants (typically a sign or ordering constraint on an input) — state that assumption if it is meant to hold.",
                             schedule(&m, st)
                         ),
                     ));
