@@ -63,6 +63,7 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut crate::arith::aggregate_preservation(&r.module, source));
     r.diagnostics.append(&mut variant_access(&r.module, source));
     r.diagnostics.append(&mut stuck_states(&r.module, source));
+    r.diagnostics.append(&mut dead_states(&r.module, source));
     r.diagnostics.append(&mut tier_report(&r.module, source));
     r.diagnostics.append(&mut refinement(&r.module, source));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
@@ -219,6 +220,78 @@ pub fn stuck_states(module: &Module, src: &str) -> Vec<Diagnostic> {
                     out.push(Diagnostic::warning(
                         d.span,
                         pretty(&format!("state `{ckey}` in `{}` is reachable but no action can fire from it, and it is not `terminal` — a stuck state. Add an action to leave it, or mark it `terminal`.", d.name)),
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Dead enum states: a declared enum value that no `init` and no action `ensures` ever produces is
+/// unreachable — a spec smell (a lifecycle state that can never be entered). Conservative: a value that
+/// appears anywhere in an init/ensures body is considered producible, so only a truly-never-mentioned
+/// value is flagged.
+pub fn dead_states(module: &Module, src: &str) -> Vec<Diagnostic> {
+    fn collect_names(e: &Expr, out: &mut HashSet<String>) {
+        match e {
+            Expr::Name(n) => {
+                out.insert(n.clone());
+            }
+            Expr::App { head, args } => {
+                collect_names(head, out);
+                args.iter().for_each(|a| collect_names(a, out));
+            }
+            Expr::Field { base, .. } => collect_names(base, out),
+            Expr::Unary { e, .. } => collect_names(e, out),
+            Expr::Binary { lhs, rhs, .. } => {
+                collect_names(lhs, out);
+                collect_names(rhs, out);
+            }
+            Expr::Cond { cond, then_, els } => {
+                collect_names(cond, out);
+                collect_names(then_, out);
+                collect_names(els, out);
+            }
+            Expr::Quant { body, .. } | Expr::Sum { body, .. } => collect_names(body, out),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let evals = enum_values_of(d, src, false);
+        if evals.is_empty() {
+            continue;
+        }
+        // Values any init/ensures can produce (over-approximated by every name that appears there), and
+        // the enum observables an init/action actually WRITES (only those are lifecycle states — an enum
+        // input that no action sets has all its values valid, so it must not be flagged).
+        let enum_names: HashSet<String> = evals.keys().cloned().collect();
+        let mut produced: HashSet<String> = HashSet::new();
+        let mut written: HashSet<String> = HashSet::new();
+        for it in &d.items {
+            let spans = match it.kind {
+                ItemKind::Init => it.body.into_iter().collect::<Vec<_>>(),
+                ItemKind::Action => it.ensures.into_iter().collect(),
+                _ => Vec::new(),
+            };
+            for sp in spans {
+                let t = sp.slice(src);
+                let t = t.trim().strip_prefix("means").unwrap_or(t);
+                let e = parse_predicate(t).0;
+                collect_names(&e, &mut produced);
+                collect_writes(&e, false, &enum_names, &mut written);
+            }
+        }
+        for (obs, tags) in &evals {
+            if !written.contains(obs) {
+                continue; // an enum input, not a lifecycle state — all its values are valid
+            }
+            for tag in tags {
+                if !produced.contains(tag) {
+                    out.push(Diagnostic::warning(
+                        d.span,
+                        format!("enum value `{tag}` of `{obs}` in `{}` is never produced by `init` or any action — it is unreachable (a dead lifecycle state). Add an action that reaches it, or remove the value.", d.name),
                     ));
                 }
             }
@@ -2796,6 +2869,17 @@ mod tests {
         // A tag set with no reserved words is clean.
         let good = "-- allium: 4\ncomponent Eval\n  entity E\n  observable state ok(E) : { good | bad }\n  init means ok(e) = good\nend\n";
         assert!(!any(good, "reserved word"), "clean tags must not be flagged: {:?}", msgs(good));
+    }
+
+    #[test]
+    fn dead_enum_state_is_flagged_but_not_inputs() {
+        // `archived` is declared but no init/action produces it -> flagged. `active`/`closed` are.
+        let dead = "-- allium: 4\ncomponent D\n  entity O\n  observable state status(O) : { active | closed | archived }\n  init means status(o) = active\n  action close\n    requires status(o) = active\n    ensures status(o) = closed\n  terminal status(o) = closed\nend\n";
+        assert!(any(dead, "enum value `archived` of `status` in `D` is never produced"), "{:?}", msgs(dead));
+        assert!(!any(dead, "value `active`"), "init value not dead: {:?}", msgs(dead));
+        // An enum INPUT (no action writes it) has all values valid — never flagged.
+        let input = "-- allium: 4\ncomponent E\n  entity O\n  observable state mode(O) : { fast | slow }\n  observable state count(O) : Number\n  invariant m means mode(o) = fast implies count(o) >= 0\nend\n";
+        assert!(!any(input, "dead lifecycle state"), "enum input not flagged: {:?}", msgs(input));
     }
 
     #[test]
