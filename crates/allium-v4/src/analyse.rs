@@ -48,38 +48,55 @@ pub fn analyse(source: &str) -> ParseResult {
     analyse_with_imports(source, &crate::arith::Imports::default())
 }
 
-/// Parse a `transitions` block body into `(observable, edges, terminal tags)`. The surface is the v4
-/// arrow-kept / braces-dropped form: the observable name, then `A -> B` edge lines and `terminal <tag>`
-/// lines (a `terminal: a, b` list is also accepted).
-fn parse_transitions_body(body: &str) -> (Option<String>, Vec<(String, String)>, Vec<String>) {
-    let mut obs = None;
-    let mut edges = Vec::new();
-    let mut terminals = Vec::new();
+/// A parsed `transitions` block. An edge is `(source, target, optional guard)`.
+struct TransBlock {
+    obs: Option<String>,
+    initial: Option<String>,
+    edges: Vec<(String, String, Option<String>)>,
+    terminals: Vec<String>,
+}
+
+/// Parse a `transitions` block body. The v4 surface: the observable name, then `initial <state>`,
+/// `A -> B` / `A -> B when <cond>` edge lines, and `terminal <tag>` lines (a `terminal: a, b` list is also
+/// accepted).
+fn parse_transitions_body(body: &str) -> TransBlock {
+    let mut b = TransBlock { obs: None, initial: None, edges: Vec::new(), terminals: Vec::new() };
     for raw in body.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with("--") {
             continue;
         }
-        if let Some((a, b)) = line.split_once("->") {
-            let (a, b) = (a.trim(), b.trim());
-            if !a.is_empty() && !b.is_empty() {
-                edges.push((a.to_string(), b.to_string()));
+        let first = line.split_whitespace().next().unwrap_or("");
+        if first == "initial" {
+            let s = line["initial".len()..].trim();
+            if !s.is_empty() {
+                b.initial = Some(s.split('(').next().unwrap_or(s).trim().to_string());
             }
-        } else if let Some(rest) = line.strip_prefix("terminal") {
-            for t in rest.trim_start_matches(':').split(',') {
+        } else if let Some((src, rest)) = line.split_once("->") {
+            let src = src.trim();
+            // `B` or `B when <cond>`.
+            let (tgt, guard) = match rest.split_once(" when ") {
+                Some((t, g)) => (t.trim(), Some(g.trim().to_string())),
+                None => (rest.trim(), None),
+            };
+            if !src.is_empty() && !tgt.is_empty() {
+                b.edges.push((src.to_string(), tgt.to_string(), guard));
+            }
+        } else if first == "terminal" {
+            for t in line["terminal".len()..].trim_start_matches(':').split(',') {
                 let t = t.trim();
                 if !t.is_empty() {
-                    terminals.push(t.to_string());
+                    b.terminals.push(t.to_string());
                 }
             }
-        } else if obs.is_none() {
+        } else if b.obs.is_none() {
             let name = line.split('(').next().unwrap_or(line).trim();
             if !name.is_empty() {
-                obs = Some(name.to_string());
+                b.obs = Some(name.to_string());
             }
         }
     }
-    (obs, edges, terminals)
+    b
 }
 
 /// Desugar every `transitions <obs> …` block into checkable v4 primitives, in place on the module:
@@ -113,36 +130,75 @@ pub(crate) fn desugar_transitions(module: &mut Module, src: &str) -> String {
             }
             let block = it.span;
             let body = it.body.map(|sp| sp.slice(src).to_string()).unwrap_or_default();
-            let (obs, edges, terminals) = parse_transitions_body(&body);
-            let Some(obs) = obs else {
+            let tb = parse_transitions_body(&body);
+            let Some(obs) = tb.obs else {
                 keep.push(it);
                 continue;
             };
-            for (a, b) in &edges {
+            // `initial <state>` desugars to `init means obs(e) = <state>` — the start is explicit, never
+            // implied, and the start state is no longer flagged unreachable.
+            if let Some(start) = &tb.initial {
+                let mut init = Item::new(ItemKind::Init, block);
+                init.body = Some(push(&mut ext, &format!("{obs}(e) = {start}")));
+                synth.push(init);
+            }
+            // One enum-guarded action per edge; `A -> B when <cond>` adds `<cond>` to the guard.
+            for (a, b, guard) in &tb.edges {
+                let req = match guard {
+                    Some(g) => format!("{obs}(e) = {a} and {g}"),
+                    None => format!("{obs}(e) = {a}"),
+                };
                 let mut act = Item::new(ItemKind::Action, block);
                 act.name = Some(format!("{a}_to_{b}"));
-                act.requires = Some(push(&mut ext, &format!("{obs}(e) = {a}")));
+                act.requires = Some(push(&mut ext, &req));
                 act.ensures = vec![push(&mut ext, &format!("{obs}(e) = {b}"))];
                 synth.push(act);
             }
-            // Legality: forbid every status change that is not a declared edge (a no-change is fine). Stated
-            // as `not (old = A and cur = B)` for each ordered pair of distinct states with no `A -> B` edge —
-            // enum equalities the preservation check understands, no enum-to-old-enum frame term.
+            // Legality: classify each ordered pair of distinct states — an unguarded edge is allowed; an
+            // all-guarded edge is allowed only if a guard held before (`… implies old(guard)`); a non-edge is
+            // forbidden (`not (old = A and cur = B)`). No enum-to-old-enum frame term.
             let states = evals.get(&obs).cloned().unwrap_or_default();
-            let edge_set: HashSet<(String, String)> = edges.iter().cloned().collect();
-            let forbidden: Vec<String> = states
-                .iter()
-                .flat_map(|a| states.iter().map(move |b| (a, b)))
-                .filter(|(a, b)| a != b && !edge_set.contains(&((*a).clone(), (*b).clone())))
-                .map(|(a, b)| format!("not (old({obs}(e)) = {a} and {obs}(e) = {b})"))
-                .collect();
-            if !forbidden.is_empty() {
+            let mut unconditional: HashSet<(String, String)> = HashSet::new();
+            let mut guarded: HashMap<(String, String), Vec<String>> = HashMap::new();
+            for (a, b, g) in &tb.edges {
+                let key = (a.clone(), b.clone());
+                match g {
+                    None => {
+                        unconditional.insert(key.clone());
+                        guarded.remove(&key);
+                    }
+                    Some(g) => {
+                        if !unconditional.contains(&key) {
+                            guarded.entry(key).or_default().push(g.clone());
+                        }
+                    }
+                }
+            }
+            let mut terms: Vec<String> = Vec::new();
+            for a in &states {
+                for b in &states {
+                    if a == b {
+                        continue;
+                    }
+                    let key = (a.clone(), b.clone());
+                    if unconditional.contains(&key) {
+                        continue;
+                    }
+                    if let Some(gs) = guarded.get(&key) {
+                        let ors = gs.iter().map(|g| format!("old({g})")).collect::<Vec<_>>().join(" or ");
+                        terms.push(format!("(old({obs}(e)) = {a} and {obs}(e) = {b}) implies ({ors})"));
+                    } else {
+                        terms.push(format!("not (old({obs}(e)) = {a} and {obs}(e) = {b})"));
+                    }
+                }
+            }
+            if !terms.is_empty() {
                 let mut inv = Item::new(ItemKind::Invariant, block);
                 inv.name = Some(format!("{obs}_transitions_legal"));
-                inv.body = Some(push(&mut ext, &format!("every e :: {}", forbidden.join(" and "))));
+                inv.body = Some(push(&mut ext, &format!("every e :: {}", terms.join(" and "))));
                 synth.push(inv);
             }
-            for t in &terminals {
+            for t in &tb.terminals {
                 let mut inv = Item::new(ItemKind::Invariant, block);
                 inv.name = Some(format!("{obs}_{t}_final"));
                 inv.body = Some(push(&mut ext, &format!("every e :: old({obs}(e)) = {t} implies {obs}(e) = {t}")));
@@ -3085,6 +3141,21 @@ mod tests {
         // A move that is not a declared edge (starting -> dead) breaks the generated legality invariant.
         let illegal = "-- allium: 4\ncomponent Node\n  entity I\n  observable state status(I) : { starting | running | dead }\n  transitions status\n    starting -> running\n    running -> dead\n  action jump\n    requires status(i) = starting\n    ensures status(i) = dead\nend\n";
         assert!(any(illegal, "can break invariant `status_transitions_legal`"), "an illegal transition must break legality: {:?}", msgs(illegal));
+    }
+
+    #[test]
+    fn transitions_initial_and_edge_guards() {
+        let hdr = "-- allium: 4\ncomponent Order\n  entity O\n  observable state status(O) : { created | paid | shipped | delivered }\n  observable state funds_cleared(O) : Boolean\n  transitions status\n    initial created\n    created -> paid\n    paid -> shipped when funds_cleared(e)\n    shipped -> delivered\n    terminal delivered\n";
+        // `initial created` makes the start explicit — it must not read as dead, and init is established.
+        let clean = format!("{hdr}end\n");
+        assert!(!any(&clean, "never produced"), "initial must make the start reachable: {:?}", msgs(&clean));
+        assert!(!any(&clean, "does not establish"), "{:?}", msgs(&clean));
+        assert!(!any(&clean, "can break"), "{:?}", msgs(&clean));
+        // A `when` guard is part of legality: shipping without funds_cleared breaks it; with it is clean.
+        let bad = format!("{hdr}  action rush\n    requires status(o) = paid\n    ensures status(o) = shipped\nend\n");
+        assert!(any(&bad, "can break invariant `status_transitions_legal`"), "guard must be enforced: {:?}", msgs(&bad));
+        let ok = format!("{hdr}  action ship\n    requires status(o) = paid and funds_cleared(o)\n    ensures status(o) = shipped\nend\n");
+        assert!(!any(&ok, "can break"), "a guard-satisfying transition is legal: {:?}", msgs(&ok));
     }
 
     #[test]
