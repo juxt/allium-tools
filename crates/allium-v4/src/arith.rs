@@ -119,6 +119,14 @@ pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                 Some(e) => e,
                 None => continue,
             };
+            // Derived linear bounds from a `min`/`max` equality — checkable even when the equality itself
+            // is nonlinear, so a cap/floor violation is caught.
+            for (i, bound) in minmax_bounds(&inv).into_iter().enumerate() {
+                let (bcons, bn) = ground(&bound, &st);
+                if !bn && !bcons.is_empty() {
+                    invs.push((format!("{name}[bound {}]", i + 1), bound, bcons));
+                }
+            }
             let (cons, notes) = ground(&inv, &st);
             if notes || cons.is_empty() {
                 continue;
@@ -336,6 +344,32 @@ fn has_free_ref(e: &Expr) -> bool {
         Expr::Name(n) => !matches!(n.as_str(), "true" | "false"),
         _ => false,
     }
+}
+
+/// Derived linear bounds from a `X = min(a, b, …)` / `X = max(…)` invariant: `min` gives `X <= each arg`,
+/// `max` gives `X >= each arg`. Sound consequences of the equality, so their preservation catches an
+/// action that pushes `X` past the cap/floor (the disjunctive `X = some arg` part is not derived).
+fn minmax_bounds(inv: &Expr) -> Vec<Expr> {
+    let is_mm = |e: &Expr| -> Option<(String, Vec<Expr>)> {
+        if let Expr::App { head, args } = e {
+            if let Expr::Name(f) = &**head {
+                if (f == "min" || f == "max") && args.len() >= 2 {
+                    return Some((f.clone(), args.clone()));
+                }
+            }
+        }
+        None
+    };
+    let Expr::Binary { op: BinOp::Eq, lhs, rhs } = inv else { return Vec::new() };
+    let (x, f, args) = match (is_mm(lhs), is_mm(rhs)) {
+        (None, Some((f, a))) => ((**lhs).clone(), f, a),
+        (Some((f, a)), None) => ((**rhs).clone(), f, a),
+        _ => return Vec::new(),
+    };
+    let rel = if f == "min" { BinOp::Le } else { BinOp::Ge };
+    args.into_iter()
+        .map(|a| Expr::Binary { op: rel.clone(), lhs: Box::new(x.clone()), rhs: Box::new(a) })
+        .collect()
 }
 
 /// Count `if/then/else` subterms in an expression.
@@ -2034,6 +2068,21 @@ mod tests {
         // A good init (balance = 0) does not.
         let good = bad.replace("balance(a) = 0 - 5", "balance(a) = 0");
         assert!(!any(&run_ap(&good), "does not establish arithmetic"), "{:#?}", run_ap(&good));
+    }
+
+    #[test]
+    fn minmax_bound_preservation() {
+        let run_ap = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::arith_preservation(&m, src).into_iter().map(|d| d.message).collect()
+        };
+        let hdr = "-- allium: 4\ncomponent Pay\n  entity L\n  observable state due(L) : Money\n  observable state balance(L) : Money\n  observable state payment(L) : Money\n  invariant capped means payment(l) = min(due(l), balance(l))\n";
+        // Overpaying past the cap breaks a derived min bound.
+        let over = format!("{hdr}  action overpay\n    ensures payment(l) = due(l) + balance(l)\nend\n");
+        assert!(any(&run_ap(&over), "can break arithmetic invariant `capped[bound"), "{:#?}", run_ap(&over));
+        // With `due <= balance` stated, paying exactly the due respects both bounds.
+        let safe = format!("-- allium: 4\ncomponent Pay\n  entity L\n  observable state due(L) : Money\n  observable state balance(L) : Money\n  observable state payment(L) : Money\n  invariant order means due(l) <= balance(l)\n  invariant capped means payment(l) = min(due(l), balance(l))\n  action pay_due\n    ensures payment(l) = due(l)\nend\n");
+        assert!(!any(&run_ap(&safe), "can break arithmetic invariant `capped"), "{:#?}", run_ap(&safe));
     }
 
     #[test]
