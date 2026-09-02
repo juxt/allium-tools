@@ -960,6 +960,20 @@ pub fn enum_guarded_preservation(module: &Module, src: &str, imports: &Imports) 
 }
 
 /// Collect the `sum` aggregate subterms of an expression.
+/// Does `e` contain an `if … then … else …`? A conditional sum body has a delta that depends on the
+/// condition, which the linear `ground` collapses unsoundly — so the aggregate pass skips such a body.
+fn contains_cond(e: &Expr) -> bool {
+    match e {
+        Expr::Cond { .. } => true,
+        Expr::Binary { lhs, rhs, .. } => contains_cond(lhs) || contains_cond(rhs),
+        Expr::Unary { e, .. } => contains_cond(e),
+        Expr::App { head, args } => contains_cond(head) || args.iter().any(contains_cond),
+        Expr::Field { base, .. } => contains_cond(base),
+        Expr::Sum { body, .. } | Expr::Quant { body, .. } => contains_cond(body),
+        _ => false,
+    }
+}
+
 fn collect_sums(e: &Expr, out: &mut Vec<Expr>) {
     match e {
         Expr::Sum { .. } => out.push(e.clone()),
@@ -1074,6 +1088,9 @@ pub fn aggregate_preservation(module: &Module, src: &str, imports: &Imports) -> 
         }
         let has_action = d.items.iter().any(|it| it.kind == ItemKind::Action && it.ensures.is_some());
         let mut broken_cons: HashSet<String> = HashSet::new();
+        // Invariants an action touched but could not be soundly checked (a conditional summed body). They
+        // must NOT earn a PRESERVED verdict — the one action that could break them went unchecked.
+        let mut skipped_cons: HashSet<String> = HashSet::new();
 
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
             let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
@@ -1141,6 +1158,16 @@ pub fn aggregate_preservation(module: &Module, src: &str, imports: &Imports) -> 
                         if !crate::analyse::mentions_any(&body_m, &modified_num) {
                             continue;
                         }
+                        // A conditional body whose value changes (`if active(a) then bal(a) else 0`) has a
+                        // delta that depends on the condition — `ground` would reduce the `if` unsoundly and
+                        // could certify a false PRESERVED (a debit of an INACTIVE account leaves the sum
+                        // unchanged but moves the total). Until the case-split lands, skip this pair rather
+                        // than trust the collapsed delta. A non-conditional body is unaffected.
+                        if contains_cond(&body_m) {
+                            upd_ok = false;
+                            skipped_cons.insert(c.name.clone());
+                            break;
+                        }
                         any_body_modified = true;
                         let body_m_post = crate::analyse::prime(&body_m, &modified_num, false);
                         delta = Expr::Binary {
@@ -1148,6 +1175,9 @@ pub fn aggregate_preservation(module: &Module, src: &str, imports: &Imports) -> 
                             lhs: Box::new(delta),
                             rhs: Box::new(Expr::Binary { op: BinOp::Sub, lhs: Box::new(body_m_post), rhs: Box::new(body_m) }),
                         };
+                    }
+                    if !upd_ok {
+                        break; // a conditional modified body: skip this invariant for this action
                     }
                     // __S{i}' = __S{i} + delta
                     let s_update = Expr::Binary {
@@ -1204,7 +1234,7 @@ pub fn aggregate_preservation(module: &Module, src: &str, imports: &Imports) -> 
         // A conservation invariant no action breaks is preserved (every action keeps the aggregate balanced).
         if has_action {
             for c in &cons_invs {
-                if !broken_cons.contains(&c.name) {
+                if !broken_cons.contains(&c.name) && !skipped_cons.contains(&c.name) {
                     out.push(Diagnostic::warning(
                         d.span,
                         format!("conservation invariant `{}` in `{}` is PRESERVED: every action keeps the total equal to the sum.", c.name, d.name),
@@ -2254,6 +2284,23 @@ mod tests {
         assert!(any(&agg(&growbad), "`grow` in `Books` can break conservation invariant `balanced`"), "{:#?}", agg(&growbad));
         let growok = format!("{bhdr}  action grow\n    ensures asset(a) = old(asset(a)) + 1 and net = old(net) + 1\nend\n");
         assert!(!any(&agg(&growok), "can break conservation"), "{:#?}", agg(&growok));
+    }
+
+    #[test]
+    fn conditional_summed_body_is_not_falsely_preserved() {
+        let agg = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            aggregate_preservation(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
+        };
+        // `total = sum of ACTIVE balances`. A debit of `total` and `bal(a)` looks balanced only when `a`
+        // is active; debiting an inactive account moves the total but not the sum. The pass must NOT claim
+        // PRESERVED (the conditional delta is beyond the linear collapse) — a silent false certification.
+        let hdr = "-- allium: 4\ncomponent C\n  entity Acct\n  observable state bal(Acct) : Money\n  observable state active(Acct) : Boolean\n  observable state total : Money\n  invariant conserved means total = sum a :: (if active(a) then bal(a) else 0)\n";
+        let debit = format!("{hdr}  action debit\n    ensures bal(a) = old(bal(a)) - 100 and total = old(total) - 100\nend\n");
+        assert!(!any(&agg(&debit), "is PRESERVED"), "conditional summed body must not earn a false PRESERVED: {:#?}", agg(&debit));
+        // A non-conditional break in the same shape is still caught (the total moves, no balance changes).
+        let skim = format!("{hdr}  action skim\n    ensures total = old(total) - 100\nend\n");
+        assert!(any(&agg(&skim), "can break conservation invariant `conserved`"), "non-conditional break still caught: {:#?}", agg(&skim));
     }
 
     #[test]
