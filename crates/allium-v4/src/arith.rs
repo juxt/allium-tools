@@ -40,6 +40,7 @@ pub fn arithmetic(module: &Module, src: &str) -> Vec<Diagnostic> {
                 }
             }
         }
+        let defs = component_defs(d, src);
         // Invariants, with their ground constraint sets.
         let mut grounded: Vec<(String, Vec<Con>)> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
@@ -51,7 +52,7 @@ pub fn arithmetic(module: &Module, src: &str) -> Vec<Diagnostic> {
                 (Some(n), Some(b)) => (n.clone(), b),
                 _ => continue,
             };
-            let (e, _) = parse_predicate(body.slice(src));
+            let e = crate::monitor::inline_defs(&parse_predicate(body.slice(src)).0, &defs);
             // A transition invariant (`watermark >= old(watermark)`) is a two-state property. These
             // single-state probes strip `old`, collapsing it to a tautology and misreporting it as
             // redundant. Skip it here; arith_preservation checks it soundly across each action.
