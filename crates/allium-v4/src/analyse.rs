@@ -723,7 +723,7 @@ fn boolean_fragment_e(e: &Expr, bool_names: &HashSet<String>, obs: &HashSet<Stri
 /// A suggested guard: the weakest precondition, the invariant with each written observable replaced by
 /// the value the action gives it, then simplified. `requires <that>` makes the action preserve the
 /// invariant. Falls back to a generic hint when the effect is not a simple assignment we can invert.
-fn guard_suggestion(inv: &Expr, ensures: &Expr, modified: &HashSet<String>) -> String {
+pub(crate) fn guard_suggestion(inv: &Expr, ensures: &Expr, modified: &HashSet<String>) -> String {
     let mut post: HashMap<String, Expr> = HashMap::new();
     collect_post_values(ensures, modified, &mut post);
     if post.is_empty() {
@@ -2042,7 +2042,7 @@ fn checkable_invariant_e(inv: &Expr, bool_base: &HashSet<String>, obs: &HashSet<
 /// Replace `old(sub)` with `sub` throughout — the reading at the initial state, where there is no prior
 /// step, so `old(X)` is just the current `X` (a stutter). Used to check init-establishment of a
 /// transition invariant without treating `old X` as a free atom.
-fn strip_old(e: &Expr) -> Expr {
+pub(crate) fn strip_old(e: &Expr) -> Expr {
     match e {
         Expr::Unary { op: UnOp::Old, e } => strip_old(e),
         Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(strip_old(e)) },

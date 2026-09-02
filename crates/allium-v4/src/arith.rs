@@ -253,11 +253,16 @@ pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                     }
                 }
                 if let Some(w) = witness {
+                    // Name the weakest guard that would preserve the bound (the invariant with the effect
+                    // substituted in), the elicit value — falls back to a generic hint if it can't be
+                    // derived cleanly. Reuses the boolean pass's tested suggestion machinery.
+                    // A guard is a precondition, so `old(x)` in the effect reads as the pre-state `x`.
+                    let fix = crate::analyse::guard_suggestion(inv, &crate::analyse::strip_old(&ensures), &modified);
                     out.push(Diagnostic::warning(
                         it.span,
                         crate::analyse::pretty(&format!(
-                            "action `{aname}` in `{}` can break arithmetic invariant `{iname}`: from a state satisfying it (e.g. {}), the action reaches a state that violates it. Add a guard.",
-                            d.name, w
+                            "action `{aname}` in `{}` can break arithmetic invariant `{iname}`: from a state satisfying it (e.g. {}), the action reaches a state that violates it.{}",
+                            d.name, w, fix
                         )),
                     ));
                 }
@@ -2146,6 +2151,18 @@ mod tests {
         // A spend guarded by the (inlined) available bound keeps it non-negative.
         let good = "-- allium: 4\ncomponent Credit\n  entity C\n  observable state limit(C) : Money\n  observable state used(C) : Money\n  given available(c) means limit(c) - used(c)\n  invariant solvent means available(c) >= 0\n  action spend\n    requires available(c) >= 1\n    ensures used(c) = old(used(c)) + 1\nend\n";
         assert!(!any(&run_ap(good), "can break arithmetic invariant `solvent`"), "{:#?}", run_ap(good));
+    }
+
+    #[test]
+    fn arith_break_names_the_weakest_guard() {
+        let run_ap = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::arith_preservation(&m, src).into_iter().map(|d| d.message).collect()
+        };
+        // `charge` subtracts an unconstrained input `fee`; the elicit value is naming the guard that
+        // preserves `balance >= 0`, with `old` read as the pre-state (a guard is a precondition).
+        let src = "-- allium: 4\ncomponent C\n  entity X\n  observable state balance(X) : Money\n  observable state fee(X) : Money\n  invariant nonneg means balance(x) >= 0\n  action charge\n    ensures balance(x) = old(balance(x)) - fee(x)\nend\n";
+        assert!(any(&run_ap(src), "requires balance(e) - fee(e) >= 0"), "{:#?}", run_ap(src));
     }
 
     #[test]
