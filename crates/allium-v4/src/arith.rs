@@ -193,7 +193,33 @@ pub fn arith_preservation(module: &Module, src: &str, imports: &Imports) -> Vec<
         // The pre-state assumes the WHOLE linear invariant set (prove the conjunction inductive), so an
         // invariant that is true-but-not-inductive alone is not spuriously flagged when another excludes
         // the bad pre-state. Sound: a reported break means the full set is genuinely not preserved.
-        let all_pre: Vec<Con> = invs.iter().flat_map(|(_, _, c)| c.iter().cloned()).collect();
+        let mut all_pre: Vec<Con> = invs.iter().flat_map(|(_, _, c)| c.iter().cloned()).collect();
+
+        // Relies (Decision 2, 2026-09-02): an invariant may be proved under a cited rely — a condition an
+        // action's preservation is entitled to ASSUME. A linear rely enters the VC as a pre-state
+        // hypothesis. It is ASSUMED (trusted, not checked here — v4 has no compositional rely-guarantee), so
+        // every arithmetic verdict for a component carrying a load-bearing rely is reported conditional on
+        // it: an assumed rely is never silently certified as an unconditional guarantee.
+        let mut assumed_relies: Vec<String> = Vec::new();
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Rely) {
+            let (Some(name), Some(body)) = (it.name.clone(), it.body) else { continue };
+            let Some(reduced) = arith_reduce(&crate::monitor::inline_defs(&parse_predicate(body.slice(src)).0, &defs)) else {
+                continue; // non-linear / two-state step rely — handled elsewhere, not this slice
+            };
+            let (cons, notes) = ground(&reduced, &st);
+            if notes || cons.is_empty() {
+                continue;
+            }
+            all_pre.extend(cons);
+            assumed_relies.push(name);
+        }
+        if !assumed_relies.is_empty() {
+            assumed_relies.sort();
+            out.push(Diagnostic::warning(
+                d.span,
+                format!("arithmetic preservation in `{}` is conditional on assumed rely(s): {} (assumed — trusted, not checked; not an unconditional guarantee).", d.name, assumed_relies.join(", ")),
+            ));
+        }
 
         // Base case: does `init` establish each linear invariant? If the initial arithmetic state can
         // violate `A` (e.g. `init` sets `balance = -5` against `balance >= 0`), the induction has no base.
@@ -2728,6 +2754,24 @@ mod tests {
         // A good init (balance = 0) does not.
         let good = bad.replace("balance(a) = 0 - 5", "balance(a) = 0");
         assert!(!any(&run_ap(&good), "does not establish arithmetic"), "{:#?}", run_ap(&good));
+    }
+
+    #[test]
+    fn rely_is_a_pre_hypothesis_and_reported_conditional() {
+        // Decision 2: a linear rely enters the preservation VC as a pre-state hypothesis, so an invariant
+        // preserved only under it is not false-flagged; the verdict is reported conditional on the assumed
+        // rely, and dropping the rely re-exposes the break.
+        let run_ap = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::arith_preservation(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
+        };
+        let with = "-- allium: 4\ncomponent C\n  entity E\n  observable state x(E) : Number\n  observable state y(E) : Number\n  rely input_nonneg means every e :: y(e) >= 0\n  invariant x_nonneg means every e :: x(e) >= 0\n  action load\n    requires x(e) >= 0\n    ensures x(e) = y(e)\nend\n";
+        let m = run_ap(with);
+        assert!(!any(&m, "can break"), "the rely must be assumed as a pre-hypothesis: {m:#?}");
+        assert!(any(&m, "conditional on assumed rely(s): input_nonneg"), "the assumed rely must be reported: {m:#?}");
+        // Drop the rely -> the break is re-exposed (y unconstrained can be negative).
+        let without = with.lines().filter(|l| !l.contains("rely input_nonneg")).collect::<Vec<_>>().join("\n");
+        assert!(any(&run_ap(&without), "can break arithmetic invariant `x_nonneg`"), "without the rely the break must show: {:#?}", run_ap(&without));
     }
 
     #[test]
