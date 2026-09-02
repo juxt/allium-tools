@@ -718,6 +718,30 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
             continue;
         }
 
+        // Relies (Decision 2): a boolean/enum rely is a pre-state hypothesis in the preservation VC, so an
+        // invariant preserved only under it is not false-flagged. It is ASSUMED (trusted, not checked), so
+        // the verdict is reported conditional on it — never silently certified unconditional. (An arithmetic
+        // rely reduces in the arithmetic tier instead, which notes it there; each rely lands in one tier.)
+        let relies: Vec<(String, Expr)> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Rely)
+            .filter_map(|it| {
+                let sp = it.body?;
+                let inv = parse_predicate(sp.slice(src)).0;
+                checkable_invariant_e(&inv, &bool_base, &all_obs, &enum_names)
+                    .map(|e| (it.name.clone().unwrap_or_else(|| "<rely>".into()), e))
+            })
+            .collect();
+        if !relies.is_empty() {
+            let mut names: Vec<String> = relies.iter().map(|(n, _)| n.clone()).collect();
+            names.sort();
+            out.push(Diagnostic::warning(
+                d.span,
+                format!("preservation in `{}` is conditional on assumed rely(s): {} (assumed — trusted, not checked; not an unconditional guarantee).", d.name, names.join(", ")),
+            ));
+        }
+
         // Base case of induction: does `init` establish each invariant? `init ∧ ¬I` satisfiable means
         // the initial state can already violate I. Only meaningful when init is itself boolean-fragment.
         let init_pred: Option<Expr> = d
@@ -800,6 +824,12 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                 let mut es: Vec<&Expr> = vec![&effect, &violation];
                 for (_, other) in &invariants {
                     es.push(other);
+                }
+                // Relies are assumed to hold in the pre-state — extra hypotheses that exclude pre-states the
+                // environment guarantees against (Decision 2). Sound: adding a trusted assumption can only
+                // remove spurious breaks, and the assumption is surfaced in the conditional note above.
+                for (_, r) in &relies {
+                    es.push(r);
                 }
                 if let Some(g) = &guard {
                     es.push(g);
@@ -2814,6 +2844,18 @@ mod tests {
     }
 
     const HDR: &str = "-- allium: 4\ncomponent R\n  entity T\n  observable state a(T) : bool\n  observable state b(T) : bool\n  observable state c(T) : bool\n";
+
+    #[test]
+    fn boolean_rely_is_a_pre_hypothesis_and_reported_conditional() {
+        // Decision 2, slice 2: a boolean/enum rely enters the boolean preservation VC as a pre-state
+        // hypothesis, so an invariant preserved only under it (here vacuous under `not p`) is not
+        // false-flagged; the verdict is reported conditional; dropping the rely re-exposes the break.
+        let with = "-- allium: 4\ncomponent C\n  entity E\n  observable state p(E) : Boolean\n  observable state q(E) : Boolean\n  rely env_not_p means every e :: not p(e)\n  invariant q_when_p means every e :: p(e) implies q(e)\n  action clear_q\n    ensures not q(e)\nend\n";
+        assert!(!any(with, "can break"), "the rely must be assumed as a pre-hypothesis: {:?}", msgs(with));
+        assert!(any(with, "conditional on assumed rely(s): env_not_p"), "the assumed rely must be reported: {:?}", msgs(with));
+        let without = with.lines().filter(|l| !l.contains("rely env_not_p")).collect::<Vec<_>>().join("\n");
+        assert!(any(&without, "can break invariant `q_when_p`"), "without the rely the break must show: {:?}", msgs(&without));
+    }
 
     #[test]
     fn preservation_flags_missing_guard_and_clears_guarded_action() {
