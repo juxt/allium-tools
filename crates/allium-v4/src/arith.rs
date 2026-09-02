@@ -988,6 +988,7 @@ pub fn aggregate_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         }
         let sname = |i: usize| Expr::Name(format!("__S{i}"));
         let spname = |i: usize| Expr::Name(format!("__S{i}'"));
+        let defs = component_defs(d, src);
 
         // Conservation invariants: `<linear> = <linear over one or more single-var sums>` (e.g.
         // `net = (sum p :: asset(p)) - (sum p :: liab(p))`).
@@ -1002,7 +1003,7 @@ pub fn aggregate_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                 (Some(n), Some(b)) => (n.clone(), b),
                 _ => continue,
             };
-            let raw = parse_predicate(sp.slice(src)).0;
+            let raw = crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs);
             // Reduce a leading single-entity `every`, keeping the equality body.
             let body_qf = match &raw {
                 Expr::Quant { q: Quant::Every, vars, body, .. } if vars.len() == 1 => (**body).clone(),
@@ -1044,10 +1045,10 @@ pub fn aggregate_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
             let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
             let ensures_raw = match it.ensures {
-                Some(sp) => parse_predicate(sp.slice(src)).0,
+                Some(sp) => crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs),
                 None => continue,
             };
-            let guard_raw = it.requires.map(|sp| parse_predicate(sp.slice(src)).0);
+            let guard_raw = it.requires.map(|sp| crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs));
             let mut ev = HashSet::new();
             crate::analyse::collect_entity_vars(&ensures_raw, &mut ev);
             if let Some(g) = &guard_raw {
