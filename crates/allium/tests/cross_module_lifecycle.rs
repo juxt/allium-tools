@@ -1383,3 +1383,31 @@ fn t61_cross_module_given_is_inlined_into_preservation() {
         "the importer analysed alone must not manufacture a verdict it cannot justify.\n{stdout2}"
     );
 }
+
+// --- #61: a component satisfies a contract declared in an imported module ---
+const CONTRACT_61: &str = "-- allium: 4\ncontract Solvent\n  entity Acct\n  observable state net(Acct) : Money\n  guarantee nn means every a :: net(a) >= 0\nend\n";
+const WEAK_61: &str = "-- allium: 4\nuse \"./contract.allium\"\ncomponent Ledger satisfies (s : Solvent)\n  entity Acct\n  observable state net(Acct) : Money\n  invariant weak means every a :: net(a) >= 0 - 3\nend\n";
+const STRONG_61: &str = "-- allium: 4\nuse \"./contract.allium\"\ncomponent Ledger satisfies (s : Solvent)\n  entity Acct\n  observable state net(Acct) : Money\n  invariant strong means every a :: net(a) >= 1\nend\n";
+
+#[test]
+fn t61_cross_module_satisfies_resolves_the_imported_contract() {
+    let dir = TempDir::new("61-satisfies");
+    dir.write("contract.allium", CONTRACT_61);
+    dir.write("weak.allium", WEAK_61);
+    dir.write("strong.allium", STRONG_61);
+
+    // A weaker component (net >= -3) must be REFUSED — the dangerous direction. Before the fix it read
+    // "no such contract is declared" and neither certified nor refused.
+    let (_o1, s1) = run("analyse", &[&dir.file("contract.allium"), &dir.file("weak.allium")]);
+    assert!(
+        s1.contains("does NOT satisfy contract `Solvent`") && !s1.contains("no such contract is declared"),
+        "a weaker cross-module component must be refused, not reported as undeclared.\n{s1}"
+    );
+
+    // A stronger component (net >= 1) entails the promise and satisfies it.
+    let (_o2, s2) = run("analyse", &[&dir.file("contract.allium"), &dir.file("strong.allium")]);
+    assert!(
+        s2.contains("SATISFIES contract `Solvent`"),
+        "a stronger cross-module component must satisfy the imported contract.\n{s2}"
+    );
+}

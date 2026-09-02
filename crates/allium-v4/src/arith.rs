@@ -364,7 +364,14 @@ pub struct Imports {
     /// Imported `given` definitions: name -> (params, pre-parsed body). Bodies are self-contained
     /// expressions (no spans), so they carry across the module boundary without their source.
     pub givens: HashMap<String, (Vec<String>, Expr)>,
+    /// Imported contracts a component may `satisfy`: name -> (promises, boolean names, state/given types).
+    /// Pre-extracted so the refinement pass can resolve a contract declared in another module.
+    pub contracts: HashMap<String, ContractPromises>,
 }
+
+/// A contract's checkable surface: its promises (name, predicate), its boolean-valued names, and the raw
+/// type text of its states/givens. Exactly what the refinement pass reads from a local contract decl.
+pub type ContractPromises = (Vec<(String, Expr)>, std::collections::HashSet<String>, HashMap<String, String>);
 
 /// Every `given` definition in a module, across all its components — used to build the [`Imports`] a
 /// consumer sees when it `use`s this module. Type-annotation givens (no body computation) are excluded.

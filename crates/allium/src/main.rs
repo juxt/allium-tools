@@ -808,6 +808,7 @@ fn resolve_v4_imports(
         if let Ok(rp) = std::fs::canonicalize(dir.join(target)) {
             if let Some(src) = by_path.get(&rp) {
                 imports.givens.extend(allium_v4::arith::extract_givens(src));
+                imports.contracts.extend(allium_v4::analyse::extract_contracts(src));
             }
         }
     }
