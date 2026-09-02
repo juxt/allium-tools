@@ -1427,6 +1427,36 @@ pub fn aggregate_preservation(module: &Module, src: &str, imports: &Imports) -> 
     out
 }
 
+/// Extract `(obs, arg, tag)` from a single-argument enum equality `obs(arg) = tag`.
+fn enum_guard_atom(e: &Expr) -> Option<(String, String, String)> {
+    let Expr::Binary { op: BinOp::Eq, lhs, rhs } = e else { return None };
+    let Expr::Name(tag) = &**rhs else { return None };
+    let Expr::App { head, args } = &**lhs else { return None };
+    let Expr::Name(obs) = head.as_ref() else { return None };
+    if args.len() != 1 {
+        return None;
+    }
+    let Expr::Name(arg) = &args[0] else { return None };
+    Some((obs.clone(), arg.clone(), tag.clone()))
+}
+
+/// Decide whether an enum-guard antecedent `obs(arg) = tag` is DEFINITELY true in the post-state of a
+/// single-subject action (subject renamed to `_e`) — the only case in which a two-entity enum-guarded
+/// arithmetic relation may be soundly asserted broken. It is true post iff the action sets `obs` to `tag`,
+/// or requires `tag` and leaves `obs` unchanged. A guard on the OTHER entity (`_f`), or one the action sets
+/// to a different tag, or a free one, is not decidably true — the caller skips it rather than risk a false
+/// alarm (the LRA cannot force an opaque enum true, so asserting `¬R` there would ignore the guard).
+fn enum_guard_true_post(g: &Expr, ensures: &Expr, guard: &Option<Expr>, st: &HashMap<String, String>) -> bool {
+    let Some((obs, arg, tag)) = enum_guard_atom(g) else { return false };
+    if arg != "_e" {
+        return false; // guard on the non-subject entity: free, cannot assert soundly
+    }
+    match assigned_enum_tag(ensures, &obs, st) {
+        Some(v) => v == tag,
+        None => guard.as_ref().and_then(|g| required_enum_tag(g, &obs, st)).map(|r| r == tag).unwrap_or(false),
+    }
+}
+
 /// 2-entity numeric ordering preservation (#49): `every a, b :: G(a,b) implies R(a,b)`, G and R single
 /// linear comparisons over numeric keys (e.g. `ver(a) > ver(b) implies off(a) >= off(b)`). For each
 /// single-subject action it asks: can the action, acting on entity `e`, break the ordering against some
@@ -1491,8 +1521,11 @@ pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnos
                 let (ante, cons) = split_impl(&qf);
                 if let Some(ante) = ante {
                     // st with the two entity keys stripped to numeric leaves is what is_lin_cmp needs; the
-                    // instances below are what actually get grounded, so a coarse check here is enough.
-                    if is_lin_cmp(&ante, &st) && is_lin_cmp(&cons, &st) {
+                    // instances below are what actually get grounded, so a coarse check here is enough. The
+                    // antecedent may be a linear comparison OR an enum-equality guard (`status(a) = tag`,
+                    // #72): the latter is decided per-action in the VC, not grounded.
+                    let ante_ok = is_lin_cmp(&ante, &st) || (enum_guard_atom(&ante).is_some() && ground(&ante, &st).1);
+                    if ante_ok && is_lin_cmp(&cons, &st) {
                         if let (Some(n),) = (it.name.clone(),) {
                             targets.push(Target { name: n, a: vars[0].clone(), b: vars[1].clone(), qf: qf.clone() });
                         }
@@ -1627,15 +1660,29 @@ pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnos
                 }
 
                 let mut broke = false;
+                let mut engaged = false;
                 for post_src in [&inst_ef, &inst_fe] {
                     let post = crate::analyse::to_post(post_src, &modified, false);
                     let (g_post, r_post) = split_impl(&post);
                     let Some(g_post) = g_post else { continue };
-                    let (gc, gn) = ground(&g_post, &st2);
                     let (rc, rn) = ground(&r_post, &st2);
-                    if gn || rn || rc.len() != 1 {
-                        continue; // post not a clean single-comparison implication
+                    if rn || rc.len() != 1 {
+                        continue; // consequent not a clean single comparison
                     }
+                    let (gc, gn) = ground(&g_post, &st2);
+                    let gc = if gn {
+                        // An enum-guard antecedent adds no LRA constraint: it is decided from the action.
+                        // Only assert `¬R` when the guard is DEFINITELY true post; else the guard could be
+                        // false (invariant vacuous) and a break would be spurious — skip.
+                        if enum_guard_true_post(&g_post, &ensures, &guard, &st) {
+                            Vec::new()
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        gc
+                    };
+                    engaged = true;
                     // ¬post = G_post ∧ ¬R_post; ¬R_post may split (Eq → two).
                     for neg_r in negate_con(&rc[0]) {
                         let mut base = effect_cons.clone();
@@ -1666,7 +1713,9 @@ pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnos
                         break;
                     }
                 }
-                checked.insert(t.name.clone());
+                if engaged {
+                    checked.insert(t.name.clone());
+                }
                 if broke {
                     let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
                     out.push(Diagnostic::warning(
@@ -2737,6 +2786,25 @@ mod tests {
         // An action on an unrelated state cannot disturb the ordering.
         let untouched = format!("-- allium: 4\ncomponent Log\n  entity E\n  observable state ver(E) : Number\n  observable state off(E) : Number\n  observable state wm(E) : Number\n  {ord}  action tick\n    ensures wm(e) = old(wm(e)) + 1\nend\n");
         assert!(!rel(&untouched).iter().any(|m| m.contains("can break")), "{:#?}", rel(&untouched));
+    }
+
+    #[test]
+    fn enum_guarded_relational_preservation() {
+        // #72: a two-entity, enum-guarded, arithmetic bound (the real achronic ShardWatermarkBound shape).
+        // A single-subject action that races a healthy shard's watermark up must BREAK it; the offset
+        // non-negativity hypothesis must clear a reset-to-zero; a corrupting action makes the guard false
+        // post so the bound is vacuous and must NOT be flagged.
+        let rel = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::relational_arith_preservation(&m, src).0.into_iter().map(|d| d.message).collect()
+        };
+        let hdr = "-- allium: 4\ncomponent Core\n  entity Shard\n  entity Part\n  observable state status(Shard) : { healthy | corrupted }\n  observable state wm(Shard) : Number\n  observable state off(Part) : Number\n  invariant offset_nonneg means every p :: off(p) >= 0\n  invariant bound means every s :: every p :: status(s) = healthy implies wm(s) <= off(p)\n";
+        let brk = format!("{hdr}  action race\n    requires status(s) = healthy\n    ensures wm(s) = 1000000\nend\n");
+        assert!(rel(&brk).iter().any(|m| m.contains("can break relational invariant `bound`")), "racing wm while healthy must break: {:#?}", rel(&brk));
+        let safe = format!("{hdr}  action reset\n    requires status(s) = healthy\n    ensures wm(s) = 0\nend\n");
+        assert!(!rel(&safe).iter().any(|m| m.contains("can break")), "offset_nonneg hypothesis must clear a reset to zero: {:#?}", rel(&safe));
+        let vacuous = format!("{hdr}  action corrupt_and_race\n    requires status(s) = healthy\n    ensures status(s) = corrupted and wm(s) = 1000000\nend\n");
+        assert!(!rel(&vacuous).iter().any(|m| m.contains("can break")), "guard false post -> bound vacuous, must not flag: {:#?}", rel(&vacuous));
     }
 
     #[test]
