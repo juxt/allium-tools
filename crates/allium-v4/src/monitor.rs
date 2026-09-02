@@ -468,6 +468,9 @@ struct SPeriod {
 struct SModel {
     periods: Vec<SPeriod>,
     givens: HashMap<String, f64>,
+    /// Non-given, non-comment data lines that carried no `period=<i>` key, so they contributed no period.
+    /// Used to warn when a trace is present but keyed the wrong way (e.g. `entity=` instead of `period=`).
+    unkeyed_rows: usize,
 }
 impl SModel {
     fn n(&self) -> usize {
@@ -478,6 +481,7 @@ impl SModel {
 fn parse_schedule(trace: &str) -> SModel {
     let mut by_idx: std::collections::BTreeMap<usize, SPeriod> = std::collections::BTreeMap::new();
     let mut givens = HashMap::new();
+    let mut unkeyed = 0usize;
     for line in trace.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -499,7 +503,10 @@ fn parse_schedule(trace: &str) -> SModel {
         }
         // A period row: needs `period=<i>`.
         let idx = toks.iter().find_map(|t| t.strip_prefix("period=").and_then(|v| v.parse::<usize>().ok()));
-        let Some(idx) = idx else { continue };
+        let Some(idx) = idx else {
+            unkeyed += 1;
+            continue;
+        };
         let mut p = SPeriod::default();
         for tok in &toks {
             if let Some((k, v)) = tok.split_once('=') {
@@ -517,7 +524,7 @@ fn parse_schedule(trace: &str) -> SModel {
         }
         by_idx.insert(idx, p);
     }
-    SModel { periods: by_idx.into_values().collect(), givens }
+    SModel { periods: by_idx.into_values().collect(), givens, unkeyed_rows: unkeyed }
 }
 
 fn s_idx(a: &Expr, env: &HashMap<String, usize>) -> Option<usize> {
@@ -930,12 +937,23 @@ pub fn monitor_schedule(source: &str, trace: &str, tol: f64) -> String {
             esc(&witness)
         ));
     }
+    // A trace with data rows but no `period=` keys parses to zero periods, so every `sum` collapses to 0
+    // and a conservation invariant false-fires. Warn rather than report that as a violation.
+    let warnings = if m.n() == 0 && m.unkeyed_rows > 0 {
+        format!(
+            "\"no `period=` rows parsed ({} data line(s) ignored); schedule invariants need period-keyed rows\"",
+            m.unkeyed_rows
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{{\"periods\":{},\"monitored\":{},\"tol\":{},\"results\":[{}],\"ok\":{}}}",
+        "{{\"periods\":{},\"monitored\":{},\"tol\":{},\"results\":[{}],\"warnings\":[{}],\"ok\":{}}}",
         m.n(),
         monitored,
         tol,
         results.join(","),
+        warnings,
         all_ok
     )
 }
@@ -978,6 +996,18 @@ mod tests {
         let spec = "-- allium: 4\ncomponent C\n  entity P\n  observable state bal(P) : Money\n  observable state interest(P) : Money\n  invariant x means each p : interest(p) = bal(p)\nend\n";
         assert!(monitor_schedule(spec, "period=0 bal=100.00 interest=100.00\n", 0.01).contains("\"ok\":true"));
         assert!(monitor_schedule(spec, "period=0 bal=100.00 interest=90.00\n", 0.01).contains("\"ok\":false"));
+    }
+
+    #[test]
+    fn schedule_warns_on_zero_period_rows() {
+        // A conservation-style schedule spec fed a trace keyed the wrong way (no `period=`) parses to zero
+        // periods; it must WARN rather than silently report every sum as zero.
+        let spec = "-- allium: 4\ncomponent C\n  entity P\n  given total : Money\n  observable state part(P) : Money\n  invariant conserved means sum p :: part(p) = total\nend\n";
+        let wrong = monitor_schedule(spec, "entity=p1 part=30.00\nentity=p2 part=70.00\ngiven total=100.00\n", 0.01);
+        assert!(wrong.contains("no `period=` rows parsed"), "wrong-keyed trace must warn: {wrong}");
+        // Correctly period-keyed rows produce periods and no warning.
+        let right = monitor_schedule(spec, "period=0 part=30.00\nperiod=1 part=70.00\ngiven total=100.00\n", 0.01);
+        assert!(!right.contains("no `period=` rows parsed") && right.contains("\"periods\":2"), "period-keyed trace must not warn: {right}");
     }
 
     #[test]
