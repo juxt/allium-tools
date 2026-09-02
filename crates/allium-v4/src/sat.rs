@@ -74,7 +74,13 @@ impl<'a> CnfBuilder<'a> {
     }
 
     /// If `e` is an application (or bare name) whose head is a declared enum observable, its name.
+    /// Sees through `old(...)`, so `old(status(e))` is recognised as the enum `status` on the pre-state
+    /// (its equality group gets the same exactly-one axiom, keyed by its own canonical string).
     fn enum_head(&self, e: &Expr) -> Option<String> {
+        let e = match e {
+            Expr::Unary { op: UnOp::Old, e } => &**e,
+            other => other,
+        };
         match e {
             Expr::App { head, .. } => match &**head {
                 Expr::Name(h) if self.enum_vals.contains_key(h) => Some(h.clone()),

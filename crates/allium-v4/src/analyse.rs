@@ -48,11 +48,122 @@ pub fn analyse(source: &str) -> ParseResult {
     analyse_with_imports(source, &crate::arith::Imports::default())
 }
 
+/// Parse a `transitions` block body into `(observable, edges, terminal tags)`. The surface is the v4
+/// arrow-kept / braces-dropped form: the observable name, then `A -> B` edge lines and `terminal <tag>`
+/// lines (a `terminal: a, b` list is also accepted).
+fn parse_transitions_body(body: &str) -> (Option<String>, Vec<(String, String)>, Vec<String>) {
+    let mut obs = None;
+    let mut edges = Vec::new();
+    let mut terminals = Vec::new();
+    for raw in body.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with("--") {
+            continue;
+        }
+        if let Some((a, b)) = line.split_once("->") {
+            let (a, b) = (a.trim(), b.trim());
+            if !a.is_empty() && !b.is_empty() {
+                edges.push((a.to_string(), b.to_string()));
+            }
+        } else if let Some(rest) = line.strip_prefix("terminal") {
+            for t in rest.trim_start_matches(':').split(',') {
+                let t = t.trim();
+                if !t.is_empty() {
+                    terminals.push(t.to_string());
+                }
+            }
+        } else if obs.is_none() {
+            let name = line.split('(').next().unwrap_or(line).trim();
+            if !name.is_empty() {
+                obs = Some(name.to_string());
+            }
+        }
+    }
+    (obs, edges, terminals)
+}
+
+/// Desugar every `transitions <obs> …` block into checkable v4 primitives, in place on the module:
+///   - one enum-guarded action per edge `A -> B` (`requires obs(e)=A ensures obs(e)=B`);
+///   - a legality two-state invariant — any change to `obs` is one of the declared edges (else unchanged);
+///   - a finality invariant per `terminal T` (`old(obs(e))=T implies obs(e)=T`).
+/// Synthesised item bodies are appended to a returned extended source (appending never moves the original
+/// offsets, so existing spans stay valid); each synth item's diagnostic span is the `transitions` block, so
+/// a break points at what the author wrote, not at generated text.
+pub(crate) fn desugar_transitions(module: &mut Module, src: &str) -> String {
+    use crate::ast::{Item, ItemKind};
+    let mut ext = String::from(src);
+    let mut push = |ext: &mut String, text: &str| -> crate::span::Span {
+        ext.push('\n');
+        let start = ext.len();
+        ext.push_str(text);
+        crate::span::Span::new(start, ext.len())
+    };
+    for d in module.decls.iter_mut() {
+        if !d.items.iter().any(|it| it.kind == ItemKind::Transitions) {
+            continue;
+        }
+        // The enum value set per observable, to enumerate the transitions the block forbids.
+        let evals = enum_values_of(d, src, false);
+        let mut keep: Vec<Item> = Vec::new();
+        let mut synth: Vec<Item> = Vec::new();
+        for it in std::mem::take(&mut d.items) {
+            if it.kind != ItemKind::Transitions {
+                keep.push(it);
+                continue;
+            }
+            let block = it.span;
+            let body = it.body.map(|sp| sp.slice(src).to_string()).unwrap_or_default();
+            let (obs, edges, terminals) = parse_transitions_body(&body);
+            let Some(obs) = obs else {
+                keep.push(it);
+                continue;
+            };
+            for (a, b) in &edges {
+                let mut act = Item::new(ItemKind::Action, block);
+                act.name = Some(format!("{a}_to_{b}"));
+                act.requires = Some(push(&mut ext, &format!("{obs}(e) = {a}")));
+                act.ensures = vec![push(&mut ext, &format!("{obs}(e) = {b}"))];
+                synth.push(act);
+            }
+            // Legality: forbid every status change that is not a declared edge (a no-change is fine). Stated
+            // as `not (old = A and cur = B)` for each ordered pair of distinct states with no `A -> B` edge —
+            // enum equalities the preservation check understands, no enum-to-old-enum frame term.
+            let states = evals.get(&obs).cloned().unwrap_or_default();
+            let edge_set: HashSet<(String, String)> = edges.iter().cloned().collect();
+            let forbidden: Vec<String> = states
+                .iter()
+                .flat_map(|a| states.iter().map(move |b| (a, b)))
+                .filter(|(a, b)| a != b && !edge_set.contains(&((*a).clone(), (*b).clone())))
+                .map(|(a, b)| format!("not (old({obs}(e)) = {a} and {obs}(e) = {b})"))
+                .collect();
+            if !forbidden.is_empty() {
+                let mut inv = Item::new(ItemKind::Invariant, block);
+                inv.name = Some(format!("{obs}_transitions_legal"));
+                inv.body = Some(push(&mut ext, &format!("every e :: {}", forbidden.join(" and "))));
+                synth.push(inv);
+            }
+            for t in &terminals {
+                let mut inv = Item::new(ItemKind::Invariant, block);
+                inv.name = Some(format!("{obs}_{t}_final"));
+                inv.body = Some(push(&mut ext, &format!("every e :: old({obs}(e)) = {t} implies {obs}(e) = {t}")));
+                synth.push(inv);
+            }
+        }
+        keep.extend(synth);
+        d.items = keep;
+    }
+    ext
+}
+
 /// As [`analyse`], but with definitions resolved from other modules via `use` (given bodies today).
 /// The CLI resolves the import graph and passes them; single-file callers use [`analyse`].
 pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> ParseResult {
     let mut r = crate::check::check(source);
     desugar_where(&mut r.module);
+    // Expand `transitions` blocks into edge-actions + legality + finality invariants; the passes then run
+    // over the extended source (original + appended synth bodies). Original spans are unchanged.
+    let ext = desugar_transitions(&mut r.module, source);
+    let source: &str = &ext;
     r.diagnostics.append(&mut coverage(&r.module, source));
     r.diagnostics.append(&mut consistency(&r.module, source));
     r.diagnostics.append(&mut feasibility(&r.module, source));
@@ -68,7 +179,6 @@ pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> Pa
     r.diagnostics.append(&mut rel_arith);
     r.diagnostics.append(&mut bmc(&r.module, source));
     r.diagnostics.append(&mut bmc_enum(&r.module, source));
-    r.diagnostics.append(&mut transitions_notice(&r.module, source));
     r.diagnostics.append(&mut reserved_tag_check(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source, imports));
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
@@ -694,10 +804,17 @@ fn boolean_project(e: &Expr, bool_names: &HashSet<String>, obs: &HashSet<String>
 /// True if `e` is `enum_obs(args) = value` (or `<>`) — an equality between a declared enum observable and
 /// a bare value name, which is a decidable proposition (the SAT engine adds the exactly-one-value axiom).
 fn is_enum_eq(e: &Expr, enum_names: &HashSet<String>) -> bool {
-    let head = |x: &Expr| match x {
-        Expr::App { head, .. } => matches!(&**head, Expr::Name(h) if enum_names.contains(h)),
-        Expr::Name(n) => enum_names.contains(n),
-        _ => false,
+    let head = |x: &Expr| {
+        // See through `old(...)`: `old(status(e)) = closed` is an enum equality on the pre-state.
+        let x = match x {
+            Expr::Unary { op: UnOp::Old, e } => &**e,
+            other => other,
+        };
+        match x {
+            Expr::App { head, .. } => matches!(&**head, Expr::Name(h) if enum_names.contains(h)),
+            Expr::Name(n) => enum_names.contains(n),
+            _ => false,
+        }
     };
     matches!(e, Expr::Binary { op: BinOp::Eq | BinOp::Ne, lhs, rhs }
         if head(lhs) && matches!(&**rhs, Expr::Name(_)))
@@ -1741,22 +1858,6 @@ pub fn reserved_tag_check(module: &Module, src: &str) -> Vec<Diagnostic> {
                     ));
                 }
             }
-        }
-    }
-    out
-}
-
-/// Warn that a `transitions` block is parsed but not yet expanded to guarded actions, so the lifecycle it
-/// declares is not checked. Prevents the silent-no-op trap: the block used to shred into bogus items with
-/// no diagnostic. Until the sugar lands, the user should write an `action` per edge.
-pub fn transitions_notice(module: &Module, _src: &str) -> Vec<Diagnostic> {
-    let mut out = Vec::new();
-    for d in &module.decls {
-        for it in d.items.iter().filter(|it| it.kind == ItemKind::Transitions) {
-            out.push(Diagnostic::warning(
-                it.span,
-                format!("`transitions` block in `{}` is parsed but not yet modelled: its edges are not checked. Express each edge as an `action` (guard = source state, ensures = target state) and mark the end state `terminal` for it to be verified.", d.name),
-            ));
         }
     }
     out
@@ -2975,12 +3076,15 @@ mod tests {
     }
 
     #[test]
-    fn transitions_block_warns_and_does_not_shred() {
-        // The block is captured whole and warned about, and the invariant AFTER it still parses (proof
-        // that capture stops at the next real item, not mid-block on its inner `terminal:`).
+    fn transitions_block_is_desugared_and_checked() {
+        // The block desugars to edge-actions + a legality invariant + finality; it is no longer warned as
+        // unmodelled, and the invariant AFTER it still parses (capture stopped at the next real item).
         let src = "-- allium: 4\ncomponent Node\n  entity I\n  observable state status(I) : { starting | running | dead }\n  init means status(i) = starting\n  transitions status(i)\n    starting -> running\n    running -> dead\n    terminal: dead\n  invariant sane means status(i) = dead implies status(i) <> starting\nend\n";
-        assert!(any(src, "`transitions` block in `Node` is parsed but not yet modelled"), "{:?}", msgs(src));
-        assert!(any(src, "invariant `sane` in `Node` is INDUCTIVE"), "the invariant after the block must still be analysed: {:?}", msgs(src));
+        assert!(!any(src, "not yet modelled"), "the block must now be modelled: {:?}", msgs(src));
+        assert!(any(src, "invariant `sane`"), "the invariant after the block must still be analysed: {:?}", msgs(src));
+        // A move that is not a declared edge (starting -> dead) breaks the generated legality invariant.
+        let illegal = "-- allium: 4\ncomponent Node\n  entity I\n  observable state status(I) : { starting | running | dead }\n  transitions status\n    starting -> running\n    running -> dead\n  action jump\n    requires status(i) = starting\n    ensures status(i) = dead\nend\n";
+        assert!(any(illegal, "can break invariant `status_transitions_legal`"), "an illegal transition must break legality: {:?}", msgs(illegal));
     }
 
     #[test]
