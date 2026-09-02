@@ -174,7 +174,10 @@ pub(crate) fn desugar_transitions(module: &mut Module, src: &str) -> String {
                     }
                 }
             }
-            let mut terms: Vec<String> = Vec::new();
+            // Forbidden non-edges go into ONE pure-enum legality invariant. Each guarded edge becomes its
+            // OWN invariant (`(old=A and cur=B) implies old(guard)`), so an arithmetic guard cannot drop the
+            // enum legality with it, and a boolean guard is checked on its own.
+            let mut forbidden: Vec<String> = Vec::new();
             for a in &states {
                 for b in &states {
                     if a == b {
@@ -186,16 +189,20 @@ pub(crate) fn desugar_transitions(module: &mut Module, src: &str) -> String {
                     }
                     if let Some(gs) = guarded.get(&key) {
                         let ors = gs.iter().map(|g| format!("old({g})")).collect::<Vec<_>>().join(" or ");
-                        terms.push(format!("(old({obs}(e)) = {a} and {obs}(e) = {b}) implies ({ors})"));
+                        let mut inv = Item::new(ItemKind::Invariant, block);
+                        inv.name = Some(format!("{obs}_{a}_{b}_legal"));
+                        inv.body =
+                            Some(push(&mut ext, &format!("every e :: (old({obs}(e)) = {a} and {obs}(e) = {b}) implies ({ors})")));
+                        synth.push(inv);
                     } else {
-                        terms.push(format!("not (old({obs}(e)) = {a} and {obs}(e) = {b})"));
+                        forbidden.push(format!("not (old({obs}(e)) = {a} and {obs}(e) = {b})"));
                     }
                 }
             }
-            if !terms.is_empty() {
+            if !forbidden.is_empty() {
                 let mut inv = Item::new(ItemKind::Invariant, block);
                 inv.name = Some(format!("{obs}_transitions_legal"));
-                inv.body = Some(push(&mut ext, &format!("every e :: {}", terms.join(" and "))));
+                inv.body = Some(push(&mut ext, &format!("every e :: {}", forbidden.join(" and "))));
                 synth.push(inv);
             }
             for t in &tb.terminals {
@@ -240,6 +247,7 @@ pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> Pa
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
     r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source, imports));
     r.diagnostics.append(&mut crate::arith::enum_guarded_preservation(&r.module, source, imports));
+    r.diagnostics.append(&mut crate::arith::transition_arith_legality(&r.module, source, imports));
     r.diagnostics.append(&mut crate::arith::aggregate_preservation(&r.module, source, imports));
     r.diagnostics.append(&mut variant_access(&r.module, source));
     r.diagnostics.append(&mut stuck_states(&r.module, source));
@@ -3152,10 +3160,27 @@ mod tests {
         assert!(!any(&clean, "does not establish"), "{:?}", msgs(&clean));
         assert!(!any(&clean, "can break"), "{:?}", msgs(&clean));
         // A `when` guard is part of legality: shipping without funds_cleared breaks it; with it is clean.
+        // Each guarded edge is now its OWN legality invariant, so shipping without the guard breaks the
+        // precise `status_paid_shipped_legal` (not the combined enum legality).
         let bad = format!("{hdr}  action rush\n    requires status(o) = paid\n    ensures status(o) = shipped\nend\n");
-        assert!(any(&bad, "can break invariant `status_transitions_legal`"), "guard must be enforced: {:?}", msgs(&bad));
+        assert!(any(&bad, "can break invariant `status_paid_shipped_legal`"), "guard must be enforced: {:?}", msgs(&bad));
         let ok = format!("{hdr}  action ship\n    requires status(o) = paid and funds_cleared(o)\n    ensures status(o) = shipped\nend\n");
         assert!(!any(&ok, "can break"), "a guard-satisfying transition is legal: {:?}", msgs(&ok));
+    }
+
+    #[test]
+    fn transitions_arithmetic_edge_guard_is_enforced() {
+        // An arithmetic edge guard `closing -> closed when balance <= 0` must be enforced in legality: an
+        // action closing without the bound breaks it, one that requires the bound does not, and an enum
+        // non-edge is still caught (the arith guard no longer drops the whole legality).
+        let hdr = "-- allium: 4\ncomponent Loan\n  entity L\n  observable state phase(L) : { open | closing | closed }\n  observable state balance(L) : Money\n  transitions phase\n    initial open\n    open -> closing\n    closing -> closed when balance(e) <= 0\n";
+        let bad = format!("{hdr}  action force_close\n    requires phase(l) = closing\n    ensures phase(l) = closed\nend\n");
+        assert!(any(&bad, "can break invariant `phase_closing_closed_legal`"), "arith guard must be enforced: {:?}", msgs(&bad));
+        let ok = format!("{hdr}  action force_close\n    requires phase(l) = closing and balance(l) <= 0\n    ensures phase(l) = closed\nend\n");
+        assert!(!any(&ok, "can break"), "a bound-satisfying close is legal: {:?}", msgs(&ok));
+        // The enum non-edge open -> closed is still caught even though an arith-guarded edge exists.
+        let skip = format!("{hdr}  action skip\n    requires phase(l) = open\n    ensures phase(l) = closed\nend\n");
+        assert!(any(&skip, "can break invariant `phase_transitions_legal`"), "enum legality must survive alongside an arith guard: {:?}", msgs(&skip));
     }
 
     #[test]
