@@ -197,6 +197,35 @@ impl<'a> CnfBuilder<'a> {
                 self.enum_groups.entry(canon(lhs)).or_insert(((**lhs).clone(), vals));
                 self.atom(canon(e))
             }
+            // `x in { a, b, c }` — membership in a finite enum set. Encode as `x = a or x = b or x = c`;
+            // each equality flows through the arm above, registering the exactly-one axiom for `x`.
+            Expr::Binary { op: BinOp::In, lhs, rhs } if matches!(&**rhs, Expr::SetLit(_)) => {
+                let s = match &**rhs {
+                    Expr::SetLit(s) => s.clone(),
+                    _ => unreachable!(),
+                };
+                // The set literal text may retain its enclosing braces; strip them and any per-element
+                // whitespace/braces so an element is the bare tag (`admin`, not `admin }`).
+                let elems: Vec<String> = s
+                    .split(|c| c == ',' || c == '|')
+                    .map(|t| t.trim().trim_matches(|c| c == '{' || c == '}').trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                if elems.is_empty() {
+                    return -self.true_literal(); // empty set: membership is false
+                }
+                let eq = |el: &str| Expr::Binary {
+                    op: BinOp::Eq,
+                    lhs: lhs.clone(),
+                    rhs: Box::new(Expr::Name(el.to_string())),
+                };
+                let disj = elems[1..].iter().fold(eq(&elems[0]), |acc, el| Expr::Binary {
+                    op: BinOp::Or,
+                    lhs: Box::new(acc),
+                    rhs: Box::new(eq(el)),
+                });
+                self.encode(&disj)
+            }
             atom => self.atom(canon(atom)),
         }
     }

@@ -689,10 +689,24 @@ fn is_enum_eq(e: &Expr, enum_names: &HashSet<String>) -> bool {
         if head(lhs) && matches!(&**rhs, Expr::Name(_)))
 }
 
+/// `enum_obs(e) in { a, b, c }` — membership in a finite set of enum tags. The SAT encoder expands it to
+/// `= a or = b or = c`, each of which registers the exactly-one axiom, so it is a decidable atom.
+fn is_enum_membership(e: &Expr, enum_names: &HashSet<String>) -> bool {
+    let Expr::Binary { op: BinOp::In, lhs, rhs } = e else { return false };
+    if !matches!(&**rhs, Expr::SetLit(_)) {
+        return false;
+    }
+    match &**lhs {
+        Expr::App { head, .. } => matches!(&**head, Expr::Name(h) if enum_names.contains(h)),
+        Expr::Name(n) => enum_names.contains(n),
+        _ => false,
+    }
+}
+
 /// As [`boolean_fragment`], additionally admitting enum-observable equalities `status(e) = paid` as
 /// decidable atoms (the SAT engine constrains an enum observable to exactly one value).
 fn boolean_fragment_e(e: &Expr, bool_names: &HashSet<String>, obs: &HashSet<String>, enum_names: &HashSet<String>) -> bool {
-    if is_enum_eq(e, enum_names) {
+    if is_enum_eq(e, enum_names) || is_enum_membership(e, enum_names) {
         return true;
     }
     match e {
@@ -2611,6 +2625,21 @@ mod tests {
         // Adding the guard `requires authed(t)` makes it safe: no preservation finding.
         let good = "-- allium: 4\ncomponent Pay\n  entity Txn\n  observable state authed(Txn) : bool\n  observable state captured(Txn) : bool\n  action capture\n    requires authed(t)\n    ensures captured(t)\n  invariant no_cap_without_auth means captured(t) implies authed(t)\nend\n";
         assert!(!any(good, "can break"), "{:?}", msgs(good));
+    }
+
+    #[test]
+    fn enum_membership_guard_is_expanded_and_checked() {
+        // `role in {user,admin} implies active` is a guarded safety invariant. It must be preservation-
+        // checked (not silently skipped), and the set literal must expand to real enum tags — a stray
+        // brace element (`admin }`) would float free of the exactly-one axiom and false-alarm the guard-off
+        // case.
+        let hdr = "-- allium: 4\ncomponent C\n  entity X\n  observable state role(X) : { guest | user | admin }\n  observable state active(X) : Boolean\n  init means role(x) = guest and active(x) = false\n  invariant privileged means role(x) in { user, admin } implies active(x)\n";
+        // promote into the set without activating breaks it.
+        let bad = format!("{hdr}  action promote\n    ensures role(x) = admin\nend\n");
+        assert!(any(&bad, "can break invariant `privileged`"), "in-guard break must be caught: {:?}", msgs(&bad));
+        // demote out of the set turns the guard off — no false break.
+        let good = format!("{hdr}  action demote\n    ensures role(x) = guest\nend\n");
+        assert!(!any(&good, "can break"), "guard-off must not false-alarm: {:?}", msgs(&good));
     }
 
     #[test]
