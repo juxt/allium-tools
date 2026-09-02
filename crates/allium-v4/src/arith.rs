@@ -44,6 +44,7 @@ pub fn arithmetic(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnost
         // Invariants, with their ground constraint sets.
         let mut grounded: Vec<(String, Vec<Con>)> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
+        let mut rate_obs: HashSet<String> = HashSet::new();
         for it in &d.items {
             if it.kind != ItemKind::Invariant {
                 continue;
@@ -53,6 +54,7 @@ pub fn arithmetic(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnost
                 _ => continue,
             };
             let e = crate::monitor::inline_defs(&parse_predicate(body.slice(src)).0, &defs);
+            rate_typed_products(&e, &st, &mut rate_obs);
             // A transition invariant (`watermark >= old(watermark)`) is a two-state property. These
             // single-state probes strip `old`, collapsing it to a tautology and misreporting it as
             // redundant. Skip it here; arith_preservation checks it soundly across each action.
@@ -82,9 +84,57 @@ pub fn arithmetic(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnost
                 d.span,
                 format!("arithmetic tier in `{}`: {} term(s) not linearisable and NOT CHECKED (nonlinear): {}. The satisfiability verdict is PARTIAL — these constraints are outside the decidable fragment.", d.name, uniq.len(), uniq.join("; ")),
             ));
+            // Elicit: a Rate-typed per-period observable multiplied by a state is the usual reason a schedule
+            // is only PARTIAL. If the rate is fixed, pinning it to a constant makes the relation checkable.
+            let mut rates: Vec<String> = rate_obs.into_iter().collect();
+            rates.sort();
+            for obs in rates {
+                out.push(Diagnostic::warning(
+                    d.span,
+                    format!("suggestion: `{obs}` is a per-period rate multiplied by a state, so its product is nonlinear and left unchecked. If the rate is fixed across periods, declare it as a constant (`given {obs} means <value>`) — the product then becomes linear and the relation is fully checkable at that rate."),
+                ));
+            }
         }
     }
     out
+}
+
+/// Elicit helper: collect the `Rate`-typed observables that appear as a factor in a product `rate * state`
+/// (nonlinear, hence unchecked). A literal coefficient is fine (linear); a per-period rate is the flag.
+fn rate_typed_products(e: &Expr, st: &HashMap<String, String>, out: &mut HashSet<String>) {
+    if let Expr::Binary { op: BinOp::Mul, lhs, rhs } = e {
+        for (factor, other) in [(lhs.as_ref(), rhs.as_ref()), (rhs.as_ref(), lhs.as_ref())] {
+            if let Expr::App { head, .. } = factor {
+                if let Expr::Name(obs) = head.as_ref() {
+                    let rate = st.get(obs).map(|t| t == "Rate").unwrap_or(false);
+                    if rate && !matches!(other, Expr::Int(_) | Expr::Dec(_, _)) {
+                        out.insert(obs.clone());
+                    }
+                }
+            }
+        }
+    }
+    match e {
+        Expr::Binary { lhs, rhs, .. } => {
+            rate_typed_products(lhs, st, out);
+            rate_typed_products(rhs, st, out);
+        }
+        Expr::Unary { e, .. } => rate_typed_products(e, st, out),
+        Expr::Cond { cond, then_, els } => {
+            rate_typed_products(cond, st, out);
+            rate_typed_products(then_, st, out);
+            rate_typed_products(els, st, out);
+        }
+        Expr::App { head, args } => {
+            rate_typed_products(head, st, out);
+            for a in args {
+                rate_typed_products(a, st, out);
+            }
+        }
+        Expr::Field { base, .. } => rate_typed_products(base, st, out),
+        Expr::Quant { body, .. } | Expr::Sum { body, .. } => rate_typed_products(body, st, out),
+        _ => {}
+    }
 }
 
 /// Arithmetic invariant preservation via the LRA tier. For each action and each LINEAR invariant, build
@@ -2841,6 +2891,20 @@ mod tests {
         let src = "-- allium: 4\ncomponent NL\n  entity P\n  observable state a(P) : Int\n  observable state b(P) : Int\n  observable state c(P) : Int\n  invariant prod means every p :: a(p) = b(p) * c(p)\n  invariant lin means every p :: a(p) <= 10\n  invariant lin2 means every p :: a(p) >= 0\nend\n";
         let m = run(src);
         assert!(any(&m, "PARTIAL"), "{m:#?}");
+    }
+
+    #[test]
+    fn rate_product_elicits_pin_the_rate_suggestion() {
+        // A `Rate`-typed per-period observable times a state is the usual reason a schedule is only PARTIAL.
+        // The elicit surface must name the rate and suggest pinning it — but only when it is a free rate,
+        // never when it is already a concrete constant.
+        let free = "-- allium: 4\ncomponent Loan\n  entity P\n  observable state rate(P) : Rate\n  observable state bal(P) : Money\n  observable state interest(P) : Money\n  invariant io means every p :: interest(p) = rate(p) * bal(p)\n  invariant nn means every p :: interest(p) >= 0\nend\n";
+        let m = run(free);
+        assert!(any(&m, "suggestion:") && any(&m, "`rate`") && any(&m, "given rate means"), "must suggest pinning the rate: {m:#?}");
+        // A concrete rate is already linear — no suggestion, no PARTIAL.
+        let concrete = "-- allium: 4\ncomponent Loan\n  entity P\n  given rate means 0.05\n  observable state bal(P) : Money\n  observable state interest(P) : Money\n  invariant io means every p :: interest(p) = rate * bal(p)\n  invariant nn means every p :: interest(p) >= 0\nend\n";
+        let m2 = run(concrete);
+        assert!(!any(&m2, "suggestion:"), "a concrete rate needs no suggestion: {m2:#?}");
     }
 
     #[test]
