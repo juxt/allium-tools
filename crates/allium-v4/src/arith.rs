@@ -959,6 +959,187 @@ pub fn enum_guarded_preservation(module: &Module, src: &str, imports: &Imports) 
     out
 }
 
+/// Extract `(obs, tag, is_old)` from an enum-equality atom `obs(e) = tag` or `old(obs(e)) = tag`.
+fn enum_eq_parts(e: &Expr) -> Option<(String, String, bool)> {
+    let Expr::Binary { op: BinOp::Eq, lhs, rhs } = e else { return None };
+    let Expr::Name(tag) = &**rhs else { return None };
+    let (inner, is_old) = match &**lhs {
+        Expr::Unary { op: UnOp::Old, e } => (e.as_ref(), true),
+        other => (other, false),
+    };
+    Some((app_head(inner)?.to_string(), tag.clone(), is_old))
+}
+
+/// Match a desugared arithmetic-guarded-edge legality body `(old(obs(e)) = A and obs(e) = B) implies
+/// old(<cmp>)` and return `(obs, A, B, cmp)`. The `old`-wrapped enum equality is the source state; the bare
+/// one is the target; the consequent is the edge guard as it held before the step.
+fn arith_guarded_edge(qf: &Expr) -> Option<(String, String, String, Expr)> {
+    let Expr::Binary { op: BinOp::Implies, lhs, rhs } = qf else { return None };
+    let Expr::Binary { op: BinOp::And, lhs: a1, rhs: a2 } = &**lhs else { return None };
+    let p1 = enum_eq_parts(a1)?;
+    let p2 = enum_eq_parts(a2)?;
+    if p1.0 != p2.0 {
+        return None;
+    }
+    let (obs, a, b) = match (p1.2, p2.2) {
+        (true, false) => (p1.0, p1.1, p2.1),
+        (false, true) => (p2.0, p2.1, p1.1),
+        _ => return None, // both old or both bare -> not the edge shape
+    };
+    let Expr::Unary { op: UnOp::Old, e: cmp } = &**rhs else { return None };
+    Some((obs, a, b, (**cmp).clone()))
+}
+
+/// Enforce arithmetic edge guards in transition legality (task #68). An arith-guarded edge `A -> B when
+/// <cmp>` desugars to the legality invariant `(old(obs)=A and obs=B) implies old(<cmp>)`, which the boolean
+/// preservation fragment drops (an arithmetic consequent under `old`). For each such invariant and each
+/// action that drives `obs` from A to B, run the pre-state LRA VC `guard_arith ∧ unconditional-bounds ∧
+/// ¬cmp`: if satisfiable, the action performs the guarded transition without the guard holding beforehand
+/// and so breaks legality. SOUND: an unmodellable guard/consequent, or an action that cannot fire from A,
+/// abandons the pair rather than risk a false alarm.
+pub fn transition_arith_legality(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let mut st: HashMap<String, String> = HashMap::new();
+        for it in &d.items {
+            if matches!(it.kind, ItemKind::State | ItemKind::Given) {
+                if let (Some(n), Some(b)) = (&it.name, it.body) {
+                    st.insert(n.clone(), b.slice(src).trim().to_string());
+                }
+            }
+        }
+        for (f, t) in crate::analyse::variant_field_types(d, src) {
+            st.entry(f).or_insert(t);
+        }
+        let defs = component_defs(d, src, imports);
+
+        // Collect the arith-guarded-edge legality invariants, each renamed to the canonical entity so its
+        // bound aligns with the actions', with its consequent grounded (a non-arithmetic consequent — a
+        // boolean guard — grounds to nothing and is left to the boolean pass).
+        struct Edge {
+            name: String,
+            obs: String,
+            a: String,
+            b: String,
+            cmp: Expr,
+            cons: Vec<Con>,
+            span: crate::span::Span,
+        }
+        let mut edges: Vec<Edge> = Vec::new();
+        // The unconditional linear invariants hold in the pre-state — pre-hypotheses that keep a bound the
+        // spec's own standing invariants guarantee from being falsely reported.
+        let mut uncond_pre: Vec<Con> = Vec::new();
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
+            let (name, body) = match (&it.name, it.body) {
+                (Some(n), Some(b)) => (n.clone(), b),
+                _ => continue,
+            };
+            let parsed = crate::monitor::inline_defs(&parse_predicate(body.slice(src)).0, &defs);
+            // Strip a single universal so an edge-legality body (`every e :: … implies …`) matches;
+            // standing bounds are handled by `arith_reduce`, which accepts explicit or implicit quant-ation.
+            let qf_for_edge = match &parsed {
+                Expr::Quant { q: Quant::Every, body, .. } => (**body).clone(),
+                other => other.clone(),
+            };
+            if let Some((obs, a, b, cmp)) = arith_guarded_edge(&qf_for_edge) {
+                let mut ev = HashSet::new();
+                crate::analyse::collect_entity_vars(&cmp, &mut ev);
+                let cmp = crate::analyse::rename_entity(&cmp, &ev);
+                let (cons, notes) = ground(&cmp, &st);
+                if notes || cons.is_empty() {
+                    continue; // boolean or unmodellable guard -> not this pass's job
+                }
+                edges.push(Edge { name, obs, a, b, cmp, cons, span: it.span });
+            } else if let Some(reduced) = arith_reduce(&parsed) {
+                let (c, n) = ground(&reduced, &st); // arith_reduce already renames to the canonical entity
+                if !n {
+                    uncond_pre.extend(c);
+                }
+            }
+        }
+        if edges.is_empty() {
+            continue;
+        }
+
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
+            let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
+            let ensures_raw = match it.ensures_expr(src) {
+                Some(e) => crate::monitor::inline_defs(&e, &defs),
+                None => continue,
+            };
+            let guard_raw =
+                it.requires.map(|sp| crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs));
+            let mut ev = HashSet::new();
+            crate::analyse::collect_entity_vars(&ensures_raw, &mut ev);
+            if let Some(g) = &guard_raw {
+                crate::analyse::collect_entity_vars(g, &mut ev);
+            }
+            if ev.len() > 1 {
+                continue; // multi-entity action -> outside this pass
+            }
+            let ensures = crate::analyse::rename_entity(&ensures_raw, &ev);
+            let guard = guard_raw.map(|g| crate::analyse::rename_entity(&g, &ev));
+
+            // The arithmetic part of the guard (its enum conjuncts are handled by the case analysis below).
+            let guard_arith = match &guard {
+                Some(g) => {
+                    let (c, n) = ground(&strip_enum_conjuncts(g, &st), &st);
+                    if n {
+                        continue; // unmodellable guard -> cannot reason, skip the action
+                    }
+                    c
+                }
+                None => Vec::new(),
+            };
+
+            for e in &edges {
+                // The action must drive obs A -> B: it must set obs to B, and be able to fire from A (a
+                // `requires` that pins obs to some other tag rules the transition out).
+                if assigned_enum_tag(&ensures, &e.obs, &st).as_deref() != Some(e.b.as_str()) {
+                    continue;
+                }
+                if let Some(g) = &guard {
+                    if let Some(req) = required_enum_tag(g, &e.obs, &st) {
+                        if req != e.a {
+                            continue;
+                        }
+                    }
+                }
+                // VC: can the guarded transition happen with the edge guard FALSE beforehand? Query
+                // `guard_arith ∧ unconditional-bounds ∧ ¬cmp` (all pre-state); SAT ⇒ legality breaks.
+                let mut witness = false;
+                'search: for c in &e.cons {
+                    for neg in negate_con(c) {
+                        let mut q: Vec<Con> =
+                            guard_arith.iter().chain(uncond_pre.iter()).cloned().collect();
+                        q.push(neg);
+                        if matches!(solve(&q), Outcome::Sat(_)) {
+                            witness = true;
+                            break 'search;
+                        }
+                    }
+                }
+                if witness {
+                    out.push(Diagnostic::warning(
+                        e.span,
+                        crate::analyse::pretty(&format!(
+                            "action `{aname}` in `{}` can break invariant `{}`: it drives {} from {} to {} without the edge guard `{}` holding beforehand. Require `{}` on the action.",
+                            d.name,
+                            e.name,
+                            e.obs,
+                            e.a,
+                            e.b,
+                            crate::analyse::canon(&e.cmp),
+                            crate::analyse::canon(&e.cmp),
+                        )),
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Collect the `sum` aggregate subterms of an expression.
 /// Does `e` contain an `if … then … else …`? A conditional sum body has a delta that depends on the
 /// condition, which the linear `ground` collapses unsoundly — so the aggregate pass skips such a body.
