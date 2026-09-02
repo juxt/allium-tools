@@ -28,7 +28,7 @@ use crate::lra::{solve, unsat_core, Con, Lin, Outcome, Rat, Rel};
 const N: usize = 3;
 
 /// Entry point: arithmetic feasibility + entailment over each component.
-pub fn arithmetic(module: &Module, src: &str) -> Vec<Diagnostic> {
+pub fn arithmetic(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for d in &module.decls {
         // State/given return types (raw text), to classify numeric vs rate vs bool.
@@ -40,7 +40,7 @@ pub fn arithmetic(module: &Module, src: &str) -> Vec<Diagnostic> {
                 }
             }
         }
-        let defs = component_defs(d, src);
+        let defs = component_defs(d, src, imports);
         // Invariants, with their ground constraint sets.
         let mut grounded: Vec<(String, Vec<Con>)> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
@@ -94,7 +94,7 @@ pub fn arithmetic(module: &Module, src: &str) -> Vec<Diagnostic> {
 /// violating the invariant — a value-safety bug the boolean check cannot see (e.g. `withdraw` breaking
 /// `balance >= 0`). SOUND: the whole invariant, guard and effect must lower to linear constraints with no
 /// skipped (nonlinear) term; any skip abandons the pair rather than risk a false alarm.
-pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
+pub fn arith_preservation(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for d in &module.decls {
         let mut st: HashMap<String, String> = HashMap::new();
@@ -109,7 +109,7 @@ pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
             d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
         // Computed `given` definitions, inlined into invariants/effects so a derived value like
         // `available = limit - used` ties the invariant to the states an action actually changes.
-        let defs = component_defs(d, src);
+        let defs = component_defs(d, src, imports);
 
         // Linear invariants, reduced to their entity-normalised quantifier-free body, with their
         // constraint sets. Skip any with a nonlinear/unhandled term (a note) — unsound to reason about.
@@ -357,19 +357,47 @@ fn has_free_ref(e: &Expr) -> bool {
 
 /// The component's computed `given` definitions (`given available means limit - used`), name -> (params,
 /// body), for inlining derived values into invariants/effects before arithmetic checking.
-fn component_defs(d: &crate::ast::Decl, src: &str) -> HashMap<String, (Vec<String>, Expr)> {
-    d.items
-        .iter()
-        .filter(|it| it.kind == ItemKind::Given && it.body.is_some())
-        .filter_map(|it| {
-            let name = it.name.clone()?;
-            let body = parse_predicate(it.body?.slice(src)).0;
-            if it.params.is_empty() && !crate::monitor::is_computation(&body) {
-                return None; // a type annotation, not a definition
-            }
-            Some((name, (it.params.clone(), body)))
-        })
-        .collect()
+/// Definitions brought into scope from other modules via `use`. Threaded from the CLI, which resolves the
+/// import graph the single-module `analyse` cannot see. Empty by default (single-file analysis is unchanged).
+#[derive(Default, Clone)]
+pub struct Imports {
+    /// Imported `given` definitions: name -> (params, pre-parsed body). Bodies are self-contained
+    /// expressions (no spans), so they carry across the module boundary without their source.
+    pub givens: HashMap<String, (Vec<String>, Expr)>,
+    /// Imported contracts a component may `satisfy`: name -> (promises, boolean names, state/given types).
+    /// Pre-extracted so the refinement pass can resolve a contract declared in another module.
+    pub contracts: HashMap<String, ContractPromises>,
+}
+
+/// A contract's checkable surface: its promises (name, predicate), its boolean-valued names, and the raw
+/// type text of its states/givens. Exactly what the refinement pass reads from a local contract decl.
+pub type ContractPromises = (Vec<(String, Expr)>, std::collections::HashSet<String>, HashMap<String, String>);
+
+/// Every `given` definition in a module, across all its components — used to build the [`Imports`] a
+/// consumer sees when it `use`s this module. Type-annotation givens (no body computation) are excluded.
+pub fn extract_givens(source: &str) -> HashMap<String, (Vec<String>, Expr)> {
+    let module = crate::parse(source).module;
+    let empty = Imports::default();
+    let mut out = HashMap::new();
+    for d in &module.decls {
+        out.extend(component_defs(d, source, &empty));
+    }
+    out
+}
+
+fn component_defs(d: &crate::ast::Decl, src: &str, imports: &Imports) -> HashMap<String, (Vec<String>, Expr)> {
+    // Imported givens are the base; a local `given` of the same name shadows the import.
+    let mut defs = imports.givens.clone();
+    for it in d.items.iter().filter(|it| it.kind == ItemKind::Given && it.body.is_some()) {
+        let Some(name) = it.name.clone() else { continue };
+        let Some(sp) = it.body else { continue };
+        let body = parse_predicate(sp.slice(src)).0;
+        if it.params.is_empty() && !crate::monitor::is_computation(&body) {
+            continue; // a type annotation, not a definition
+        }
+        defs.insert(name, (it.params.clone(), body));
+    }
+    defs
 }
 
 /// Derived linear bounds from a `X = min/max/abs(…)` invariant: `min` gives `X <= each arg`, `max` gives
@@ -564,7 +592,7 @@ fn strip_enum_conjuncts(e: &Expr, st: &HashMap<String, String>) -> Expr {
 /// `A(pre)? ∧ unconditional-invariants ∧ arith-guard ∧ effect ∧ ¬A(post)`. SOUND: any unmodellable term
 /// (nonlinear effect/guard, conditional enum set) abandons the pair rather than risk a false alarm; the
 /// enum requirement is honoured so an action that cannot fire under `tag` is not spuriously flagged.
-pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
+pub fn enum_guarded_preservation(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for d in &module.decls {
         let mut st: HashMap<String, String> = HashMap::new();
@@ -584,7 +612,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
         let mut state_names: HashSet<String> =
             d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
         state_names.extend(payload.into_keys());
-        let defs = component_defs(d, src);
+        let defs = component_defs(d, src, imports);
 
         // Enum-guarded linear invariants, and the unconditional linear invariants (pre-hypotheses that
         // rule out impossible pre-states, so a break is only reported from a genuinely reachable one).
@@ -972,7 +1000,7 @@ fn replace_sums(e: &Expr, repls: &[Expr]) -> Expr {
 /// `S' = S + delta`, so a debit that shrinks a balance without adjusting `total` (a broken conservation)
 /// is caught. Single-entity actions only (a 2-entity transfer, whose deltas cancel, is out of this slice
 /// and skipped, not false-alarmed). SOUND: any nonlinear term or non-`linear = single-sum` shape is skipped.
-pub fn aggregate_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
+pub fn aggregate_preservation(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for d in &module.decls {
         let mut st: HashMap<String, String> = HashMap::new();
@@ -993,7 +1021,7 @@ pub fn aggregate_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         }
         let sname = |i: usize| Expr::Name(format!("__S{i}"));
         let spname = |i: usize| Expr::Name(format!("__S{i}'"));
-        let defs = component_defs(d, src);
+        let defs = component_defs(d, src, imports);
 
         // Conservation invariants: `<linear> = <linear over one or more single-var sums>` (e.g.
         // `net = (sum p :: asset(p)) - (sum p :: liab(p))`).
@@ -1953,7 +1981,7 @@ mod tests {
 
     fn run(src: &str) -> Vec<String> {
         let m = parse(src).module;
-        arithmetic(&m, src).into_iter().map(|d| d.message).collect()
+        arithmetic(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
     }
     fn any(msgs: &[String], needle: &str) -> bool {
         msgs.iter().any(|m| m.contains(needle))
@@ -2010,7 +2038,7 @@ mod tests {
     fn enum_guarded_preservation_catches_and_spares_correctly() {
         let egp = |src: &str| -> Vec<String> {
             let m = parse(src).module;
-            enum_guarded_preservation(&m, src).into_iter().map(|d| d.message).collect()
+            enum_guarded_preservation(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
         };
         let hdr = "-- allium: 4\ncomponent E\n  entity O\n  observable state outcome(O) : { success | failure }\n  observable state count(O) : Number\n  invariant ok means outcome(o) = success implies count(o) >= 0\n";
         // Breaks: sets count negative while success holds after.
@@ -2129,7 +2157,7 @@ mod tests {
     fn init_establishment_of_unconditional_arithmetic_invariant() {
         let run_ap = |src: &str| -> Vec<String> {
             let m = parse(src).module;
-            super::arith_preservation(&m, src).into_iter().map(|d| d.message).collect()
+            super::arith_preservation(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
         };
         // init sets balance = -5, contradicting the invariant balance >= 0.
         let bad = "-- allium: 4\ncomponent B\n  entity A\n  observable state balance(A) : Money\n  observable state floor(A) : Money\n  init means balance(a) = 0 - 5 and floor(a) = 0\n  invariant nonneg means balance(a) >= floor(a)\n  action dep\n    ensures balance(a) = balance(a) + 1\nend\n";
@@ -2143,7 +2171,7 @@ mod tests {
     fn computed_given_is_inlined_in_preservation() {
         let run_ap = |src: &str| -> Vec<String> {
             let m = parse(src).module;
-            super::arith_preservation(&m, src).into_iter().map(|d| d.message).collect()
+            super::arith_preservation(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
         };
         // `available = limit - used`; an unguarded spend can drive it negative -> break `solvent`.
         let bad = "-- allium: 4\ncomponent Credit\n  entity C\n  observable state limit(C) : Money\n  observable state used(C) : Money\n  given available(c) means limit(c) - used(c)\n  invariant solvent means available(c) >= 0\n  action spend\n    ensures used(c) = old(used(c)) + 1000000\nend\n";
@@ -2157,7 +2185,7 @@ mod tests {
     fn arith_break_names_the_weakest_guard() {
         let run_ap = |src: &str| -> Vec<String> {
             let m = parse(src).module;
-            super::arith_preservation(&m, src).into_iter().map(|d| d.message).collect()
+            super::arith_preservation(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
         };
         // `charge` subtracts an unconstrained input `fee`; the elicit value is naming the guard that
         // preserves `balance >= 0`, with `old` read as the pre-state (a guard is a precondition).
@@ -2169,7 +2197,7 @@ mod tests {
     fn minmax_bound_preservation() {
         let run_ap = |src: &str| -> Vec<String> {
             let m = parse(src).module;
-            super::arith_preservation(&m, src).into_iter().map(|d| d.message).collect()
+            super::arith_preservation(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
         };
         let hdr = "-- allium: 4\ncomponent Pay\n  entity L\n  observable state due(L) : Money\n  observable state balance(L) : Money\n  observable state payment(L) : Money\n  invariant capped means payment(l) = min(due(l), balance(l))\n";
         // Overpaying past the cap breaks a derived min bound.
@@ -2187,7 +2215,7 @@ mod tests {
     fn conditional_arithmetic_invariant() {
         let egp = |src: &str| -> Vec<String> {
             let m = parse(src).module;
-            enum_guarded_preservation(&m, src).into_iter().map(|d| d.message).collect()
+            enum_guarded_preservation(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
         };
         // `payment = if late then base + 5 else base` expands to two guarded bounds; a charge that ignores
         // the late fee breaks fee_rule[then], the correct one does not.
@@ -2202,7 +2230,7 @@ mod tests {
     fn aggregate_conservation_preservation() {
         let agg = |src: &str| -> Vec<String> {
             let m = parse(src).module;
-            aggregate_preservation(&m, src).into_iter().map(|d| d.message).collect()
+            aggregate_preservation(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
         };
         let hdr = "-- allium: 4\ncomponent Bank\n  entity Acct\n  observable state balance(Acct) : Money\n  observable state total : Money\n  invariant conserved means total = sum p :: balance(p)\n";
         // A debit that shrinks a balance without adjusting total breaks conservation.

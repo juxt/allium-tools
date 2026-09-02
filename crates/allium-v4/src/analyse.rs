@@ -45,6 +45,12 @@ fn desugar_where(module: &mut Module) {
 }
 
 pub fn analyse(source: &str) -> ParseResult {
+    analyse_with_imports(source, &crate::arith::Imports::default())
+}
+
+/// As [`analyse`], but with definitions resolved from other modules via `use` (given bodies today).
+/// The CLI resolves the import graph and passes them; single-file callers use [`analyse`].
+pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> ParseResult {
     let mut r = crate::check::check(source);
     desugar_where(&mut r.module);
     r.diagnostics.append(&mut coverage(&r.module, source));
@@ -56,16 +62,16 @@ pub fn analyse(source: &str) -> ParseResult {
     r.diagnostics.append(&mut bmc_enum(&r.module, source));
     r.diagnostics.append(&mut transitions_notice(&r.module, source));
     r.diagnostics.append(&mut reserved_tag_check(&r.module, source));
-    r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source));
+    r.diagnostics.append(&mut crate::arith::arithmetic(&r.module, source, imports));
     r.diagnostics.append(&mut crate::arith::reachability(&r.module, source));
-    r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source));
-    r.diagnostics.append(&mut crate::arith::enum_guarded_preservation(&r.module, source));
-    r.diagnostics.append(&mut crate::arith::aggregate_preservation(&r.module, source));
+    r.diagnostics.append(&mut crate::arith::arith_preservation(&r.module, source, imports));
+    r.diagnostics.append(&mut crate::arith::enum_guarded_preservation(&r.module, source, imports));
+    r.diagnostics.append(&mut crate::arith::aggregate_preservation(&r.module, source, imports));
     r.diagnostics.append(&mut variant_access(&r.module, source));
     r.diagnostics.append(&mut stuck_states(&r.module, source));
     r.diagnostics.append(&mut dead_states(&r.module, source));
     r.diagnostics.append(&mut tier_report(&r.module, source));
-    r.diagnostics.append(&mut refinement(&r.module, source));
+    r.diagnostics.append(&mut refinement(&r.module, source, imports));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
     // "jointly satisfiable" while the (stronger) arithmetic tier reports it CONTRADICTORY or
     // VACUOUSLY. That dual message is misleading and the elicit gate reads it. The arithmetic
@@ -885,23 +891,43 @@ fn as_literals(e: &Expr, state: &HashSet<String>, out: &mut Vec<(Expr, bool)>) -
 /// detail. Boolean fragment (single entity); other promises are reported as not-statically-checked.
 /// NOTE (for the human): the *semantics* of `satisfies` — entailment here vs behavioural simulation — is a
 /// design decision; this ships the entailment reading with a proposal note (ladders/REFINEMENT-NOTE.md).
-pub fn refinement(module: &Module, src: &str) -> Vec<Diagnostic> {
+/// A contract decl's checkable surface: promises, boolean names, and state/given type text. Shared by the
+/// refinement pass (for local contracts) and `extract_contracts` (for imported ones).
+pub(crate) fn contract_promises_of(c: &crate::ast::Decl, src: &str) -> crate::arith::ContractPromises {
+    let ps = c
+        .items
+        .iter()
+        .filter(|it| matches!(it.kind, ItemKind::Invariant | ItemKind::Axiom | ItemKind::Guarantee))
+        .filter_map(|it| Some((it.name.clone().unwrap_or_else(|| "<anon>".into()), parse_predicate(it.body?.slice(src)).0)))
+        .collect();
+    let c_st: HashMap<String, String> = c
+        .items
+        .iter()
+        .filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given))
+        .filter_map(|it| Some((it.name.clone()?, it.body?.slice(src).trim().to_string())))
+        .collect();
+    (ps, bool_names_of(c, src), c_st)
+}
+
+/// Every contract in a module, pre-extracted for consumers that `use` it (see [`crate::arith::Imports`]).
+pub fn extract_contracts(source: &str) -> HashMap<String, crate::arith::ContractPromises> {
+    let module = crate::parse(source).module;
+    module
+        .decls
+        .iter()
+        .filter(|d| d.kind == crate::ast::DeclKind::Contract)
+        .map(|c| (c.name.clone(), contract_promises_of(c, source)))
+        .collect()
+}
+
+pub fn refinement(module: &Module, src: &str, imports: &crate::arith::Imports) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    let promises_of = |name: &str| -> Option<(Vec<(String, Expr)>, HashSet<String>, HashMap<String, String>)> {
-        let c = module.decls.iter().find(|d| d.name == name)?;
-        let ps = c
-            .items
-            .iter()
-            .filter(|it| matches!(it.kind, ItemKind::Invariant | ItemKind::Axiom | ItemKind::Guarantee))
-            .filter_map(|it| Some((it.name.clone().unwrap_or_else(|| "<anon>".into()), parse_predicate(it.body?.slice(src)).0)))
-            .collect();
-        let c_st: HashMap<String, String> = c
-            .items
-            .iter()
-            .filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given))
-            .filter_map(|it| Some((it.name.clone()?, it.body?.slice(src).trim().to_string())))
-            .collect();
-        Some((ps, bool_names_of(c, src), c_st))
+    let promises_of = |name: &str| -> Option<crate::arith::ContractPromises> {
+        // Local contract first; fall back to one resolved from an imported module.
+        if let Some(c) = module.decls.iter().find(|d| d.name == name) {
+            return Some(contract_promises_of(c, src));
+        }
+        imports.contracts.get(name).cloned()
     };
     for d in &module.decls {
         if d.satisfies.is_empty() {

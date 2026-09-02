@@ -17,7 +17,7 @@ pub mod sat;
 pub mod span;
 pub mod types;
 
-pub use analyse::{analyse, route_json};
+pub use analyse::{analyse, analyse_with_imports, route_json};
 pub use ast::Module;
 pub use monitor::{monitor, monitor_schedule};
 pub use check::check;
