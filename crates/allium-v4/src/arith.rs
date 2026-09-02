@@ -106,6 +106,9 @@ pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         }
         let state_names: HashSet<String> =
             d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
+        // Computed `given` definitions, inlined into invariants/effects so a derived value like
+        // `available = limit - used` ties the invariant to the states an action actually changes.
+        let defs = component_defs(d, src);
 
         // Linear invariants, reduced to their entity-normalised quantifier-free body, with their
         // constraint sets. Skip any with a nonlinear/unhandled term (a note) — unsound to reason about.
@@ -115,7 +118,7 @@ pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                 (Some(n), Some(b)) => (n.clone(), b),
                 _ => continue,
             };
-            let inv = match arith_reduce(&parse_predicate(body.slice(src)).0) {
+            let inv = match arith_reduce(&crate::monitor::inline_defs(&parse_predicate(body.slice(src)).0, &defs)) {
                 Some(e) => e,
                 None => continue,
             };
@@ -179,10 +182,10 @@ pub fn arith_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
             let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
             let ensures_raw = match it.ensures {
-                Some(sp) => parse_predicate(sp.slice(src)).0,
+                Some(sp) => crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs),
                 None => continue,
             };
-            let guard_raw = it.requires.map(|sp| parse_predicate(sp.slice(src)).0);
+            let guard_raw = it.requires.map(|sp| crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs));
             // One entity only (an action over two distinct entities cannot collapse soundly).
             let mut ev = HashSet::new();
             crate::analyse::collect_entity_vars(&ensures_raw, &mut ev);
@@ -344,6 +347,23 @@ fn has_free_ref(e: &Expr) -> bool {
         Expr::Name(n) => !matches!(n.as_str(), "true" | "false"),
         _ => false,
     }
+}
+
+/// The component's computed `given` definitions (`given available means limit - used`), name -> (params,
+/// body), for inlining derived values into invariants/effects before arithmetic checking.
+fn component_defs(d: &crate::ast::Decl, src: &str) -> HashMap<String, (Vec<String>, Expr)> {
+    d.items
+        .iter()
+        .filter(|it| it.kind == ItemKind::Given && it.body.is_some())
+        .filter_map(|it| {
+            let name = it.name.clone()?;
+            let body = parse_predicate(it.body?.slice(src)).0;
+            if it.params.is_empty() && !crate::monitor::is_computation(&body) {
+                return None; // a type annotation, not a definition
+            }
+            Some((name, (it.params.clone(), body)))
+        })
+        .collect()
 }
 
 /// Derived linear bounds from a `X = min/max/abs(…)` invariant: `min` gives `X <= each arg`, `max` gives
@@ -2109,6 +2129,20 @@ mod tests {
         // A good init (balance = 0) does not.
         let good = bad.replace("balance(a) = 0 - 5", "balance(a) = 0");
         assert!(!any(&run_ap(&good), "does not establish arithmetic"), "{:#?}", run_ap(&good));
+    }
+
+    #[test]
+    fn computed_given_is_inlined_in_preservation() {
+        let run_ap = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::arith_preservation(&m, src).into_iter().map(|d| d.message).collect()
+        };
+        // `available = limit - used`; an unguarded spend can drive it negative -> break `solvent`.
+        let bad = "-- allium: 4\ncomponent Credit\n  entity C\n  observable state limit(C) : Money\n  observable state used(C) : Money\n  given available(c) means limit(c) - used(c)\n  invariant solvent means available(c) >= 0\n  action spend\n    ensures used(c) = old(used(c)) + 1000000\nend\n";
+        assert!(any(&run_ap(bad), "`spend` in `Credit` can break arithmetic invariant `solvent`"), "{:#?}", run_ap(bad));
+        // A spend guarded by the (inlined) available bound keeps it non-negative.
+        let good = "-- allium: 4\ncomponent Credit\n  entity C\n  observable state limit(C) : Money\n  observable state used(C) : Money\n  given available(c) means limit(c) - used(c)\n  invariant solvent means available(c) >= 0\n  action spend\n    requires available(c) >= 1\n    ensures used(c) = old(used(c)) + 1\nend\n";
+        assert!(!any(&run_ap(good), "can break arithmetic invariant `solvent`"), "{:#?}", run_ap(good));
     }
 
     #[test]
