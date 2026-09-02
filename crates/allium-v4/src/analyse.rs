@@ -2614,6 +2614,15 @@ mod tests {
     }
 
     #[test]
+    fn boolean_literal_true_is_a_constant_not_a_free_atom() {
+        // `ensures logged(x) = true` must set logged true. Previously `true` was encoded as a free
+        // SAT atom, so the solver could pick `true = false` and manufacture a spurious break of a
+        // guarded invariant. The action records the fault, so it PRESERVES `fail => logged`.
+        let src = "-- allium: 4\ncomponent C\n  entity X\n  observable state outcome(X) : { pass | fail }\n  observable state logged(X) : Boolean\n  invariant note means outcome(x) = fail implies logged(x)\n  action record\n    requires outcome(x) = fail\n    ensures logged(x) = true\nend\n";
+        assert!(!any(src, "can break"), "`= true` must not manufacture a break: {:?}", msgs(src));
+    }
+
+    #[test]
     fn second_ensures_clause_is_rejected_not_dropped() {
         // Two separate `ensures` lines used to keep only the first and silently drop the rest,
         // quietly changing the verdict. The parser must now reject the second with a pointed message.

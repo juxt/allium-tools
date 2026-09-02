@@ -51,11 +51,26 @@ struct CnfBuilder<'a> {
     enum_vals: &'a HashMap<String, Vec<String>>,
     /// Enum-equality groups that appeared (canon(lhs) -> (lhs expr, value set)), for the exactly-one axiom.
     enum_groups: HashMap<String, (Expr, Vec<String>)>,
+    /// A variable pinned true by a unit clause, so the boolean literals `true`/`false` encode as the
+    /// constants ⊤/⊥ rather than fresh free atoms (else `logged = true` would let the solver pick
+    /// `true = false` and manufacture a spurious model).
+    true_var: Option<i32>,
 }
 
 impl<'a> CnfBuilder<'a> {
     fn new(bool_names: &'a HashSet<String>, enum_vals: &'a HashMap<String, Vec<String>>) -> Self {
-        CnfBuilder { clauses: Vec::new(), atom_index: HashMap::new(), nvars: 0, overflow: false, bool_names, enum_vals, enum_groups: HashMap::new() }
+        CnfBuilder { clauses: Vec::new(), atom_index: HashMap::new(), nvars: 0, overflow: false, bool_names, enum_vals, enum_groups: HashMap::new(), true_var: None }
+    }
+
+    /// A literal that is always true (pinned by a unit clause, created once). `false` is its negation.
+    fn true_literal(&mut self) -> i32 {
+        if let Some(v) = self.true_var {
+            return v;
+        }
+        let v = self.fresh();
+        self.clauses.push(vec![v]);
+        self.true_var = Some(v);
+        v
     }
 
     /// If `e` is an application (or bare name) whose head is a declared enum observable, its name.
@@ -114,6 +129,9 @@ impl<'a> CnfBuilder<'a> {
     /// Tseitin: return a literal equivalent to `e`, adding its defining clauses.
     fn encode(&mut self, e: &Expr) -> i32 {
         match e {
+            // The boolean literals encode as the constants ⊤/⊥, not fresh atoms.
+            Expr::Name(s) if s == "true" => self.true_literal(),
+            Expr::Name(s) if s == "false" => -self.true_literal(),
             Expr::Unary { op: UnOp::Not, e } => -self.encode(e),
             Expr::Binary { op: BinOp::And, lhs, rhs } => {
                 let a = self.encode(lhs);
