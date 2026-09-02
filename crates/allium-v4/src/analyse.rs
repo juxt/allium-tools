@@ -205,8 +205,8 @@ pub fn stuck_states(module: &Module, src: &str) -> Vec<Diagnostic> {
             .iter()
             .filter(|it| it.kind == ItemKind::Action)
             .map(|it| {
-                if let Some(sp) = it.ensures {
-                    reachable.extend(discriminant_facts(&normalize(&parse_predicate(sp.slice(src)).0)));
+                if let Some(e) = it.ensures_expr(src) {
+                    reachable.extend(discriminant_facts(&normalize(&e)));
                 }
                 it.requires.map(|sp| normalize(&parse_predicate(sp.slice(src)).0))
             })
@@ -286,7 +286,7 @@ pub fn dead_states(module: &Module, src: &str) -> Vec<Diagnostic> {
         for it in &d.items {
             let spans = match it.kind {
                 ItemKind::Init => it.body.into_iter().collect::<Vec<_>>(),
-                ItemKind::Action => it.ensures.into_iter().collect(),
+                ItemKind::Action => it.ensures.clone(),
                 _ => Vec::new(),
             };
             for sp in spans {
@@ -331,7 +331,7 @@ pub fn variant_access(module: &Module, src: &str) -> Vec<Diagnostic> {
             let (established0, bodies): (HashSet<String>, Vec<crate::span::Span>) = match it.kind {
                 ItemKind::Action => {
                     let est = it.requires.map(|sp| discriminant_facts(&parse_predicate(sp.slice(src)).0)).unwrap_or_default();
-                    (est, it.ensures.into_iter().collect())
+                    (est, it.ensures.clone())
                 }
                 _ => (HashSet::new(), it.body.into_iter().collect()),
             };
@@ -590,8 +590,8 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
 
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
             let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
-            let ensures_raw = match it.ensures {
-                Some(sp) => parse_predicate(sp.slice(src)).0,
+            let ensures_raw = match it.ensures_expr(src) {
+                Some(e) => e,
                 None => continue,
             };
             let guard_raw = it.requires.map(|sp| parse_predicate(sp.slice(src)).0);
@@ -1346,8 +1346,8 @@ pub fn relational_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         }
 
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
-            let ens_raw = match it.ensures {
-                Some(sp) => parse_predicate(sp.slice(src)).0,
+            let ens_raw = match it.ensures_expr(src) {
+                Some(e) => e,
                 None => continue,
             };
             let grd_raw = it.requires.map(|sp| parse_predicate(sp.slice(src)).0);
@@ -1477,8 +1477,8 @@ pub fn bmc(module: &Module, src: &str) -> Vec<Diagnostic> {
         let mut acts: Vec<Act> = Vec::new();
         let mut literal_ok = true;
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
-            let ens = match it.ensures {
-                Some(sp) => normalize(&parse_predicate(sp.slice(src)).0),
+            let ens = match it.ensures_expr(src) {
+                Some(e) => normalize(&e),
                 None => continue,
             };
             let mut writes = Vec::new();
@@ -1857,8 +1857,8 @@ pub fn bmc_enum(module: &Module, src: &str) -> Vec<Diagnostic> {
         let mut acts: Vec<Act> = Vec::new();
         let mut ok = true;
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
-            let ens = match it.ensures {
-                Some(sp) => normalize(&parse_predicate(sp.slice(src)).0),
+            let ens = match it.ensures_expr(src) {
+                Some(e) => normalize(&e),
                 None => continue,
             };
             let mut eff = Vec::new();
@@ -2541,8 +2541,8 @@ pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
                     // Writes at least one enum state — even if it also updates arithmetic state (`settle`
                     // sets `phase = settled and paid = amount`). A lifecycle transition need not be a pure
                     // enum assignment.
-                    let writes_enum = it.ensures.is_some_and(|sp| {
-                        let ens = normalize(&parse_predicate(sp.slice(src)).0);
+                    let writes_enum = it.ensures_expr(src).is_some_and(|e| {
+                        let ens = normalize(&e);
                         let mut w = HashSet::new();
                         let enum_states: HashSet<String> = evals.keys().cloned().collect();
                         collect_writes(&ens, false, &enum_states, &mut w);
@@ -2686,15 +2686,15 @@ mod tests {
     }
 
     #[test]
-    fn second_ensures_clause_is_rejected_not_dropped() {
-        // Two separate `ensures` lines used to keep only the first and silently drop the rest,
-        // quietly changing the verdict. The parser must now reject the second with a pointed message.
-        let bad = "-- allium: 4\ncomponent Book\n  entity Acct\n  observable state bal(Acct) : Money\n  observable state total : Money\n  invariant conserved means total = sum a :: bal(a)\n  action transfer\n    ensures bal(a) = old(bal(a)) - 100\n    ensures bal(b) = old(bal(b)) + 100\nend\n";
-        assert!(any(bad, "takes a single `ensures` clause"), "{:?}", msgs(bad));
-        // The `and`-joined form is accepted and the balanced transfer verifies as preserved.
-        let good = "-- allium: 4\ncomponent Book\n  entity Acct\n  observable state bal(Acct) : Money\n  observable state total : Money\n  invariant conserved means total = sum a :: bal(a)\n  action transfer\n    ensures bal(a) = old(bal(a)) - 100 and bal(b) = old(bal(b)) + 100 and total = old(total)\nend\n";
-        assert!(!any(good, "takes a single `ensures` clause"), "{:?}", msgs(good));
-        assert!(!any(good, "can break"), "balanced transfer should preserve conservation: {:?}", msgs(good));
+    fn multiple_ensures_clauses_read_as_their_conjunction() {
+        // Separate `ensures` lines are the conjunction of their clauses. A balanced transfer written as
+        // three lines must verify PRESERVED — the same as the `and`-joined form — with no parse error.
+        let multi = "-- allium: 4\ncomponent Book\n  entity Acct\n  observable state bal(Acct) : Money\n  observable state total : Money\n  invariant conserved means total = sum a :: bal(a)\n  action transfer\n    ensures bal(a) = old(bal(a)) - 100\n    ensures bal(b) = old(bal(b)) + 100\n    ensures total = old(total)\nend\n";
+        assert!(!any(multi, "takes a single `ensures` clause"), "multi-ensures must be accepted: {:?}", msgs(multi));
+        assert!(any(multi, "is PRESERVED"), "balanced multi-line transfer must be PRESERVED: {:?}", msgs(multi));
+        // Every clause participates: a break in the SECOND clause is caught (would be missed if dropped).
+        let broken = "-- allium: 4\ncomponent C\n  entity X\n  observable state a(X) : Money\n  observable state b(X) : Money\n  invariant nn means b(x) >= 0\n  action act\n    ensures a(x) = old(a(x)) + 1\n    ensures b(x) = old(b(x)) - 1000000\nend\n";
+        assert!(any(broken, "can break arithmetic invariant `nn`"), "the second clause must be checked: {:?}", msgs(broken));
     }
 
     #[test]

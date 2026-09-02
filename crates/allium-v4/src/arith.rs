@@ -182,8 +182,8 @@ pub fn arith_preservation(module: &Module, src: &str, imports: &Imports) -> Vec<
 
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
             let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
-            let ensures_raw = match it.ensures {
-                Some(sp) => crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs),
+            let ensures_raw = match it.ensures_expr(src) {
+                Some(e) => crate::monitor::inline_defs(&e, &defs),
                 None => continue,
             };
             let guard_raw = it.requires.map(|sp| crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs));
@@ -740,8 +740,8 @@ pub fn enum_guarded_preservation(module: &Module, src: &str, imports: &Imports) 
         let mut broken: HashSet<String> = HashSet::new();
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
             let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
-            let ensures_raw = match it.ensures {
-                Some(sp) => crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs),
+            let ensures_raw = match it.ensures_expr(src) {
+                Some(e) => crate::monitor::inline_defs(&e, &defs),
                 None => continue,
             };
             let guard_raw = it.requires.map(|sp| crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs));
@@ -1086,7 +1086,7 @@ pub fn aggregate_preservation(module: &Module, src: &str, imports: &Imports) -> 
         if cons_invs.is_empty() {
             continue;
         }
-        let has_action = d.items.iter().any(|it| it.kind == ItemKind::Action && it.ensures.is_some());
+        let has_action = d.items.iter().any(|it| it.kind == ItemKind::Action && !it.ensures.is_empty());
         let mut broken_cons: HashSet<String> = HashSet::new();
         // Invariants an action touched but could not be soundly checked (a conditional summed body). They
         // must NOT earn a PRESERVED verdict — the one action that could break them went unchecked.
@@ -1094,8 +1094,8 @@ pub fn aggregate_preservation(module: &Module, src: &str, imports: &Imports) -> 
 
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
             let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
-            let ensures_raw = match it.ensures {
-                Some(sp) => crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs),
+            let ensures_raw = match it.ensures_expr(src) {
+                Some(e) => crate::monitor::inline_defs(&e, &defs),
                 None => continue,
             };
             let guard_raw = it.requires.map(|sp| crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs));
@@ -1333,8 +1333,7 @@ pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnos
         }
 
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
-            let Some(sp) = it.ensures else { continue };
-            let ens_raw = parse_predicate(sp.slice(src)).0;
+            let Some(ens_raw) = it.ensures_expr(src) else { continue };
             let grd_raw = it.requires.map(|s| parse_predicate(s.slice(src)).0);
             let mut ev = HashSet::new();
             crate::analyse::collect_entity_vars(&ens_raw, &mut ev);
