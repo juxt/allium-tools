@@ -1503,6 +1503,18 @@ pub fn aggregate_preservation(module: &Module, src: &str, imports: &Imports) -> 
     out
 }
 
+/// Flatten a conjunction `A and B and C` into its conjuncts; a non-conjunction is a single-element list.
+fn conjuncts(e: &Expr) -> Vec<&Expr> {
+    match e {
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            let mut v = conjuncts(lhs);
+            v.extend(conjuncts(rhs));
+            v
+        }
+        _ => vec![e],
+    }
+}
+
 /// Extract `(obs, arg, tag)` from a single-argument enum equality `obs(arg) = tag`.
 fn enum_guard_atom(e: &Expr) -> Option<(String, String, String)> {
     let Expr::Binary { op: BinOp::Eq, lhs, rhs } = e else { return None };
@@ -1596,13 +1608,12 @@ pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnos
             if vars.len() == 2 {
                 let (ante, cons) = split_impl(&qf);
                 if let Some(ante) = ante {
-                    // st with the two entity keys stripped to numeric leaves is what is_lin_cmp needs; the
-                    // instances below are what actually get grounded, so a coarse check here is enough. The
-                    // antecedent may be a linear comparison OR an enum-equality guard (`status(a) = tag`,
-                    // #72): the latter is decided per-action in the VC, not grounded. A CONJUNCTIVE antecedent
-                    // is NOT admitted here: the hypothesis-negation (`branch_cons`) cannot soundly split a
-                    // multi-constraint antecedent's ¬(A∧B), so a break can be missed — see task #77.
-                    let ante_ok = is_lin_cmp(&ante, &st) || (enum_guard_atom(&ante).is_some() && ground(&ante, &st).1);
+                    // The antecedent may be a single linear comparison, an enum-equality guard (#72), OR a
+                    // CONJUNCTION of those (achronic `ekey(a)=ekey(b) and version(a)>version(b)`, #77). The VC
+                    // grounds the whole antecedent and `branch_alts` disjunctively splits its negation, so a
+                    // conjunctive guard is now soundly checkable.
+                    let single_ok = |e: &Expr| is_lin_cmp(e, &st) || (enum_guard_atom(e).is_some() && ground(e, &st).1);
+                    let ante_ok = conjuncts(&ante).iter().all(|c| single_ok(c));
                     if ante_ok && is_lin_cmp(&cons, &st) {
                         if let (Some(n),) = (it.name.clone(),) {
                             targets.push(Target { name: n, a: vars[0].clone(), b: vars[1].clone(), qf: qf.clone() });
@@ -1699,12 +1710,15 @@ pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnos
                 }
 
                 // Ground one implication hypothesis under an assumed truth of its antecedent, returning the
-                // constraints to add (None => this branch is unusable, skip it).
-                let branch_cons = |ante: &Option<Expr>, cons: &Expr, ante_true: bool| -> Option<Vec<Con>> {
+                // ALTERNATIVE constraint sets to add (the branch is a disjunction; an empty outer vec means
+                // this branch is unusable, skip the combo). A single alternative is the common case; a
+                // multi-constraint antecedent being FALSE is `¬(c1 ∧ … ∧ ck) = ¬c1 ∨ … ∨ ¬ck`, one
+                // alternative per negated conjunct (#77), so a conjunctive-guard invariant is now checkable.
+                let branch_alts = |ante: &Option<Expr>, cons: &Expr, ante_true: bool| -> Vec<Vec<Con>> {
                     match ante {
                         None => {
                             let (c, note) = ground(cons, &st2);
-                            if note { None } else { Some(c) }
+                            if note { vec![] } else { vec![c] }
                         }
                         Some(a) => {
                             let (ca, na) = ground(a, &st2);
@@ -1712,20 +1726,21 @@ pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnos
                                 let (cc, nc) = ground(cons, &st2);
                                 // Consequent must model; antecedent may be opaque (boolean) — then just
                                 // assert the consequent (sound: if the guard holds, the bound holds).
-                                if nc { return None; }
-                                let mut v = cc;
-                                if !na { v.extend(ca); }
-                                Some(v)
-                            } else {
-                                // ¬antecedent. A numeric comparison negates cleanly; an opaque antecedent
-                                // being false asserts nothing.
-                                if na {
-                                    Some(Vec::new())
-                                } else if ca.len() == 1 {
-                                    Some(negate_con(&ca[0]))
-                                } else {
-                                    None // multi-constraint antecedent: negation is disjunctive, skip
+                                if nc {
+                                    return vec![];
                                 }
+                                let mut v = cc;
+                                if !na {
+                                    v.extend(ca);
+                                }
+                                vec![v]
+                            } else if na {
+                                // Opaque antecedent being false asserts nothing — one empty alternative.
+                                vec![vec![]]
+                            } else {
+                                // ¬(c1 ∧ … ∧ ck): one alternative per negated conjunct (each may itself
+                                // split when it is an equality).
+                                ca.iter().flat_map(|c| negate_con(c).into_iter().map(|neg| vec![neg])).collect()
                             }
                         }
                     }
@@ -1739,6 +1754,7 @@ pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnos
 
                 let mut broke = false;
                 let mut engaged = false;
+                let mut incomplete = false;
                 for post_src in [&inst_ef, &inst_fe] {
                     let post = crate::analyse::to_post(post_src, &modified, false);
                     let (g_post, r_post) = split_impl(&post);
@@ -1770,17 +1786,37 @@ pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnos
                         // Enumerate antecedent truths of the implication hypotheses.
                         let n = hyps.len();
                         'combos: for mask in 0..(1u32 << n) {
-                            let mut cons = base.clone();
+                            // Per-hypothesis alternative constraint sets for this true/false assignment.
+                            let mut per_hyp: Vec<Vec<Vec<Con>>> = Vec::with_capacity(n);
                             for (i, (ante, conseq)) in hyps.iter().enumerate() {
                                 let ante_true = (mask >> i) & 1 == 1;
-                                match branch_cons(ante, conseq, ante_true) {
-                                    Some(c) => cons.extend(c),
-                                    None => continue 'combos, // this hypothesis can't be split; skip combo
+                                let alts = branch_alts(ante, conseq, ante_true);
+                                if alts.is_empty() {
+                                    continue 'combos; // this hypothesis can't be split; skip combo
                                 }
+                                per_hyp.push(alts);
                             }
-                            if let Outcome::Sat(_) = solve(&cons) {
-                                broke = true;
-                                break;
+                            // Try the cross-product of alternatives (a disjunctive ¬antecedent contributes
+                            // more than one). Bound it: a product too large to enumerate leaves the target
+                            // INCOMPLETE (not certified checked) rather than risk reading a missed break as
+                            // preservation.
+                            let total: usize = per_hyp.iter().map(|a| a.len()).product();
+                            if total > 4096 {
+                                incomplete = true;
+                                continue 'combos;
+                            }
+                            for combo_idx in 0..total {
+                                let mut cons = base.clone();
+                                let mut rem = combo_idx;
+                                for alts in &per_hyp {
+                                    let pick = rem % alts.len();
+                                    rem /= alts.len();
+                                    cons.extend(alts[pick].iter().cloned());
+                                }
+                                if let Outcome::Sat(_) = solve(&cons) {
+                                    broke = true;
+                                    break 'combos;
+                                }
                             }
                         }
                         if broke {
@@ -1791,7 +1827,9 @@ pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnos
                         break;
                     }
                 }
-                if engaged {
+                // Certify checked only when the VC engaged AND enumeration was complete — an incomplete
+                // (bounded-out) case must stay honestly unchecked, never read as preservation.
+                if engaged && !incomplete {
                     checked.insert(t.name.clone());
                 }
                 if broke {
@@ -2901,6 +2939,24 @@ mod tests {
         assert!(!rel(&safe).iter().any(|m| m.contains("can break")), "offset_nonneg hypothesis must clear a reset to zero: {:#?}", rel(&safe));
         let vacuous = format!("{hdr}  action corrupt_and_race\n    requires status(s) = healthy\n    ensures status(s) = corrupted and wm(s) = 1000000\nend\n");
         assert!(!rel(&vacuous).iter().any(|m| m.contains("can break")), "guard false post -> bound vacuous, must not flag: {:#?}", rel(&vacuous));
+    }
+
+    #[test]
+    fn conjunctive_antecedent_relational_preservation() {
+        // #77: a relational invariant with a CONJUNCTIVE antecedent (achronic versions-ordered shape). The
+        // VC now grounds the whole antecedent and disjunctively splits its negation, so an action that
+        // inverts the ordering BREAKS it, and a hypothesis pinning the guard's second conjunct clears it.
+        let rel = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::relational_arith_preservation(&m, src).0.into_iter().map(|d| d.message).collect()
+        };
+        let hdr = "-- allium: 4\ncomponent L\n  entity E\n  observable state ekey(E) : Number\n  observable state version(E) : Number\n  observable state off(E) : Number\n  invariant vo means every a :: every b :: ekey(a) = ekey(b) and version(a) > version(b) implies off(a) >= off(b)\n";
+        let brk = format!("{hdr}  action lower_off\n    ensures off(e) = 0\nend\n");
+        assert!(rel(&brk).iter().any(|m| m.contains("can break relational invariant `vo`")), "inverting the ordering must break the conjunctive-guard invariant: {:#?}", rel(&brk));
+        // Pinning versions equal (frozen) makes `version(a) > version(b)` unsatisfiable — the guard never
+        // fires, so the invariant is vacuously preserved and must NOT be flagged.
+        let safe = format!("{hdr}  invariant vfrozen means version(e) = 0\n  action lower_off\n    ensures off(e) = 0\nend\n");
+        assert!(!rel(&safe).iter().any(|m| m.contains("can break")), "a version-frozen hypothesis must clear the break: {:#?}", rel(&safe));
     }
 
     #[test]
