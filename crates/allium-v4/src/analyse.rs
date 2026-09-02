@@ -1198,10 +1198,15 @@ pub fn relational_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
                 continue; // single-entity handled elsewhere; 3+ out of scope
             }
             if !boolean_fragment_rel(&qf, &bool_base, &all_obs) {
-                // A two-entity invariant over a numeric key (uniqueness/ordering) is beyond the boolean
-                // relational fragment, and nothing else checks it (arith preservation is single-entity).
-                // Record it so its preservation is reported as unchecked rather than silently assumed.
-                unchecked.push(name);
+                // A two-entity ORDERING invariant (`… implies <a single comparison>`) is now checked for
+                // overwrite actions by relational_arith_preservation, so do not report it unchecked. A
+                // UNIQUENESS invariant (disequality consequent) is still unchecked — flag that.
+                let ordering = matches!(&qf,
+                    Expr::Binary { op: BinOp::Implies, rhs, .. }
+                    if matches!(rhs.as_ref(), Expr::Binary { op: BinOp::Eq | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, .. }));
+                if !ordering {
+                    unchecked.push(name);
+                }
                 continue;
             }
             let map_ef: HashMap<String, String> = [(vars[0].clone(), ENT.into()), (vars[1].clone(), ENT2.into())].into();
