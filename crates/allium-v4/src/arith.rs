@@ -338,6 +338,70 @@ fn has_free_ref(e: &Expr) -> bool {
     }
 }
 
+/// Count `if/then/else` subterms in an expression.
+fn count_conds(e: &Expr) -> usize {
+    match e {
+        Expr::Cond { cond, then_, els } => 1 + count_conds(cond) + count_conds(then_) + count_conds(els),
+        Expr::Binary { lhs, rhs, .. } => count_conds(lhs) + count_conds(rhs),
+        Expr::Unary { e, .. } => count_conds(e),
+        Expr::App { head, args } => count_conds(head) + args.iter().map(count_conds).sum::<usize>(),
+        _ => 0,
+    }
+}
+
+/// Find the condition of the first `if/then/else` subterm.
+fn first_cond(e: &Expr) -> Option<Expr> {
+    match e {
+        Expr::Cond { cond, .. } => Some((**cond).clone()),
+        Expr::Binary { lhs, rhs, .. } => first_cond(lhs).or_else(|| first_cond(rhs)),
+        Expr::Unary { e, .. } => first_cond(e),
+        Expr::App { head, args } => first_cond(head).or_else(|| args.iter().find_map(first_cond)),
+        _ => None,
+    }
+}
+
+/// Replace every `if/then/else` with its then- or else-branch.
+fn take_branch(e: &Expr, use_then: bool) -> Expr {
+    match e {
+        Expr::Cond { then_, els, .. } => take_branch(if use_then { then_ } else { els }, use_then),
+        Expr::Binary { op, lhs, rhs } => Expr::Binary {
+            op: op.clone(),
+            lhs: Box::new(take_branch(lhs, use_then)),
+            rhs: Box::new(take_branch(rhs, use_then)),
+        },
+        Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(take_branch(e, use_then)) },
+        Expr::App { head, args } => Expr::App {
+            head: Box::new(take_branch(head, use_then)),
+            args: args.iter().map(|a| take_branch(a, use_then)).collect(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Expand an invariant with a single `if <finite-cond> then A else B` into two polarity-guarded bounds:
+/// `cond implies inv[A]` and `not cond implies inv[B]`. `if/then/else` over a boolean/enum condition is
+/// mixed reasoning: the SMT rung handles it by case-split. None if the shape is not a single finite `if`.
+fn expand_conditional(
+    name: &str,
+    qf: &Expr,
+    st: &HashMap<String, String>,
+) -> Option<Vec<(String, Vec<(String, String, bool)>, Vec<Expr>, Expr)>> {
+    if count_conds(qf) != 1 {
+        return None;
+    }
+    let (obs, tag, pos) = guard_atom(&first_cond(qf)?, st)?;
+    let mut out = Vec::new();
+    for (suffix, use_then, polarity) in [("then", true, pos), ("else", false, !pos)] {
+        let bound = take_branch(qf, use_then);
+        let (bcons, bn) = ground(&bound, st);
+        if bn || bcons.is_empty() {
+            return None;
+        }
+        out.push((format!("{name}[{suffix}]"), vec![(obs.clone(), tag.clone(), polarity)], Vec::new(), bound));
+    }
+    Some(out)
+}
+
 /// Read a finite GUARD atom as `(obs, tag, positive)`: `obs = tag` and a bare flag are positive
 /// (`obs == tag`); `obs <> tag` and `not flag` are negated (`obs != tag`). Unlike [`finite_atom`], which
 /// reads a concrete assignment, a guard may be a not-equal condition (a disjunction over the other tags).
@@ -464,7 +528,10 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                 Some(e) => e,
                 None => continue,
             };
-            if let Some((conds, arith_guard, a)) = finite_guarded_inv(&qf, &st) {
+            // A conditional invariant `X = if late then base + 5 else base` expands to two guarded bounds.
+            if let Some(expanded) = expand_conditional(&name, &qf, &st) {
+                guarded.extend(expanded);
+            } else if let Some((conds, arith_guard, a)) = finite_guarded_inv(&qf, &st) {
                 let (acons, anotes) = ground(&a, &st);
                 if anotes || acons.is_empty() {
                     continue; // consequent not purely linear
@@ -1963,6 +2030,21 @@ mod tests {
         // A good init (balance = 0) does not.
         let good = bad.replace("balance(a) = 0 - 5", "balance(a) = 0");
         assert!(!any(&run_ap(&good), "does not establish arithmetic"), "{:#?}", run_ap(&good));
+    }
+
+    #[test]
+    fn conditional_arithmetic_invariant() {
+        let egp = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            enum_guarded_preservation(&m, src).into_iter().map(|d| d.message).collect()
+        };
+        // `payment = if late then base + 5 else base` expands to two guarded bounds; a charge that ignores
+        // the late fee breaks fee_rule[then], the correct one does not.
+        let hdr = "-- allium: 4\ncomponent Fee\n  entity L\n  observable state late(L) : bool\n  observable state base(L) : Money\n  observable state payment(L) : Money\n  invariant fee_rule means payment(l) = if late(l) then base(l) + 5 else base(l)\n";
+        let wrong = format!("{hdr}  action mischarge\n    requires late(l)\n    ensures payment(l) = base(l)\nend\n");
+        assert!(any(&egp(&wrong), "`mischarge` in `Fee` can break state-guarded invariant `fee_rule[then]`"), "{:#?}", egp(&wrong));
+        let right = format!("{hdr}  action charge\n    requires late(l)\n    ensures payment(l) = base(l) + 5\nend\n");
+        assert!(!any(&egp(&right), "can break state-guarded"), "{:#?}", egp(&right));
     }
 
     #[test]
