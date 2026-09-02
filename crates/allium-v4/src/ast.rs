@@ -86,8 +86,9 @@ pub struct Item {
     pub body: Option<Span>,
     /// Raw `requires` span (actions).
     pub requires: Option<Span>,
-    /// Raw `ensures` span (actions).
-    pub ensures: Option<Span>,
+    /// Raw `ensures` spans (actions). Multiple `ensures` clauses read as their conjunction; see
+    /// [`Item::ensures_expr`]. Empty for a non-action or an action with no postcondition.
+    pub ensures: Vec<Span>,
     /// `establish … by a, b` witnesses.
     pub witnesses: Vec<String>,
     /// A `where <pred>` refinement clause on a typed declaration (`state balance : Money where balance >= 0`):
@@ -105,9 +106,21 @@ impl Item {
             modifiers: Vec::new(),
             body: None,
             requires: None,
-            ensures: None,
+            ensures: Vec::new(),
             witnesses: Vec::new(),
             where_pred: None,
         }
+    }
+
+    /// The action's postcondition as one predicate: the conjunction of its `ensures` clauses, or `None`
+    /// if it has none. Multiple clauses `ensures a` / `ensures b` read as `a and b`.
+    pub fn ensures_expr(&self, src: &str) -> Option<crate::expr::Expr> {
+        let mut it = self.ensures.iter().map(|sp| crate::expr::parse_predicate(sp.slice(src)).0);
+        let first = it.next()?;
+        Some(it.fold(first, |acc, e| crate::expr::Expr::Binary {
+            op: crate::expr::BinOp::And,
+            lhs: Box::new(acc),
+            rhs: Box::new(e),
+        }))
     }
 }

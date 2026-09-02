@@ -428,20 +428,12 @@ impl<'s> Parser<'s> {
             it.requires = self.read_raw(ITEM_STARTERS_PLUS_ENSURES, true);
         }
         self.eat(Tok::Semi);
-        if self.eat_ident("ensures") {
-            it.ensures = self.read_raw(ITEM_STARTERS_PLUS_CLAUSES, false);
-            // A second `ensures`/`requires` clause would be silently dropped (only the first
-            // survives), quietly changing the verdict. Reject it with a pointed message rather
-            // than mis-parse. Postconditions combine with `and`.
-            while self.cur_ident().map_or(false, |k| k == "ensures" || k == "requires") {
-                self.error(
-                    self.span(),
-                    "an action takes a single `ensures` clause; combine multiple postconditions \
-                     with `and` (e.g. `ensures a and b`). A separate clause here would be dropped.",
-                );
-                self.advance();
-                let _ = self.read_raw(ITEM_STARTERS_PLUS_CLAUSES, false);
+        // One or more `ensures` clauses; multiple clauses read as their conjunction (Item::ensures_expr).
+        while self.eat_ident("ensures") {
+            if let Some(sp) = self.read_raw(ITEM_STARTERS_PLUS_CLAUSES, false) {
+                it.ensures.push(sp);
             }
+            self.eat(Tok::Semi);
         }
         it
     }
