@@ -921,18 +921,22 @@ fn collect_sums(e: &Expr, out: &mut Vec<Expr>) {
     }
 }
 
-/// Replace the (single) `sum` subterm of `e` with `repl`.
-fn replace_sum(e: &Expr, repl: &Expr) -> Expr {
-    match e {
-        Expr::Sum { .. } => repl.clone(),
-        Expr::Binary { op, lhs, rhs } => Expr::Binary {
-            op: op.clone(),
-            lhs: Box::new(replace_sum(lhs, repl)),
-            rhs: Box::new(replace_sum(rhs, repl)),
-        },
-        Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(replace_sum(e, repl)) },
-        other => other.clone(),
+/// Replace the `sum` subterms of `e` (left-to-right, matching [`collect_sums`] order) with `repls`.
+fn replace_sums(e: &Expr, repls: &[Expr]) -> Expr {
+    fn go(e: &Expr, repls: &[Expr], i: &mut usize) -> Expr {
+        match e {
+            Expr::Sum { .. } => {
+                let r = repls.get(*i).cloned().unwrap_or_else(|| e.clone());
+                *i += 1;
+                r
+            }
+            Expr::Binary { op, lhs, rhs } => Expr::Binary { op: op.clone(), lhs: Box::new(go(lhs, repls, i)), rhs: Box::new(go(rhs, repls, i)) },
+            Expr::Unary { op, e } => Expr::Unary { op: op.clone(), e: Box::new(go(e, repls, i)) },
+            other => other.clone(),
+        }
     }
+    let mut i = 0;
+    go(e, repls, &mut i)
 }
 
 /// Aggregate/conservation invariant preservation. An invariant `total = sum p :: body(p)` is preserved by
@@ -954,17 +958,21 @@ pub fn aggregate_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         }
         let state_names: HashSet<String> =
             d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
-        // The opaque sum variables are numeric.
+        // The opaque sum variables are numeric — one pair `__S{i}` / `__S{i}'` per sum.
         let mut st_s = st.clone();
-        st_s.insert("__S".into(), "Number".into());
-        st_s.insert("__S'".into(), "Number".into());
+        for i in 0..8 {
+            st_s.insert(format!("__S{i}"), "Number".into());
+            st_s.insert(format!("__S{i}'"), "Number".into());
+        }
+        let sname = |i: usize| Expr::Name(format!("__S{i}"));
+        let spname = |i: usize| Expr::Name(format!("__S{i}'"));
 
-        // Conservation invariants: `<linear> = <linear with exactly one single-var sum>`.
+        // Conservation invariants: `<linear> = <linear over one or more single-var sums>` (e.g.
+        // `net = (sum p :: asset(p)) - (sum p :: liab(p))`).
         struct Cons {
             name: String,
-            body_qf: Expr, // the equality with the sum in place
-            sum_body: Expr, // the summed body (over its var)
-            sum_var: String,
+            body_qf: Expr,            // the equality with each sum in place
+            sums: Vec<(Expr, String)>, // per sum: (body, var)
         }
         let mut cons_invs: Vec<Cons> = Vec::new();
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
@@ -980,19 +988,30 @@ pub fn aggregate_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
             };
             let mut sums = Vec::new();
             collect_sums(&body_qf, &mut sums);
-            if sums.len() != 1 {
+            if sums.is_empty() || sums.len() > 8 {
                 continue;
             }
-            let Expr::Sum { vars, body, .. } = &sums[0] else { continue };
-            if vars.len() != 1 {
+            // Each sum must be single-variable.
+            let mut sum_bodies = Vec::new();
+            let mut ok = true;
+            for s in &sums {
+                let Expr::Sum { vars, body, .. } = s else { ok = false; break };
+                if vars.len() != 1 {
+                    ok = false;
+                    break;
+                }
+                sum_bodies.push(((**body).clone(), vars[0].clone()));
+            }
+            if !ok {
                 continue;
             }
-            // Must be a linear equality once the sum is a variable.
-            let inv_s = replace_sum(&body_qf, &Expr::Name("__S".into()));
+            // Must be a linear equality once each sum is a variable.
+            let repls: Vec<Expr> = (0..sums.len()).map(sname).collect();
+            let inv_s = replace_sums(&body_qf, &repls);
             if !matches!(inv_s, Expr::Binary { op: BinOp::Eq, .. }) || ground(&inv_s, &st_s).1 {
                 continue;
             }
-            cons_invs.push(Cons { name, body_qf, sum_body: (**body).clone(), sum_var: vars[0].clone() });
+            cons_invs.push(Cons { name, body_qf, sums: sum_bodies });
         }
         if cons_invs.is_empty() {
             continue;
@@ -1054,41 +1073,53 @@ pub fn aggregate_preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
             };
 
             for c in &cons_invs {
-                // The change to the sum = the sum over the action's entities of that entity's body delta.
-                let mut delta = Expr::Int(0);
-                let mut body_modified = false;
-                for m in &markers {
-                    let map: HashMap<String, String> = [(c.sum_var.clone(), m.to_string())].into();
-                    let body_m = crate::analyse::rename_vars(&c.sum_body, &map);
-                    if !crate::analyse::mentions_any(&body_m, &modified_num) {
-                        continue; // this entity's contribution is unchanged
+                // Each sum's change = the sum over the action's entities of that entity's body delta.
+                let mut upd_cons: Vec<Con> = Vec::new();
+                let mut any_body_modified = false;
+                let mut upd_ok = true;
+                for (i, (body, var)) in c.sums.iter().enumerate() {
+                    let mut delta = Expr::Int(0);
+                    for m in &markers {
+                        let map: HashMap<String, String> = [(var.clone(), m.to_string())].into();
+                        let body_m = crate::analyse::rename_vars(body, &map);
+                        if !crate::analyse::mentions_any(&body_m, &modified_num) {
+                            continue;
+                        }
+                        any_body_modified = true;
+                        let body_m_post = crate::analyse::prime(&body_m, &modified_num, false);
+                        delta = Expr::Binary {
+                            op: BinOp::Add,
+                            lhs: Box::new(delta),
+                            rhs: Box::new(Expr::Binary { op: BinOp::Sub, lhs: Box::new(body_m_post), rhs: Box::new(body_m) }),
+                        };
                     }
-                    body_modified = true;
-                    let body_m_post = crate::analyse::prime(&body_m, &modified_num, false);
-                    delta = Expr::Binary {
-                        op: BinOp::Add,
-                        lhs: Box::new(delta),
-                        rhs: Box::new(Expr::Binary { op: BinOp::Sub, lhs: Box::new(body_m_post), rhs: Box::new(body_m) }),
+                    // __S{i}' = __S{i} + delta
+                    let s_update = Expr::Binary {
+                        op: BinOp::Eq,
+                        lhs: Box::new(spname(i)),
+                        rhs: Box::new(Expr::Binary { op: BinOp::Add, lhs: Box::new(sname(i)), rhs: Box::new(delta) }),
                     };
+                    let (uc, un) = ground(&s_update, &st2);
+                    if un {
+                        upd_ok = false;
+                        break;
+                    }
+                    upd_cons.extend(uc);
                 }
-                let inv_pre_check = replace_sum(&c.body_qf, &Expr::Name("__S".into()));
-                // Relevant if the action changes the summed quantity OR the total side; else conservation
-                // is untouched.
-                if !body_modified && !crate::analyse::mentions_any(&inv_pre_check, &modified_num) {
+                if !upd_ok {
                     continue;
                 }
-                // S' = S + delta
-                let s_update = Expr::Binary {
-                    op: BinOp::Eq,
-                    lhs: Box::new(Expr::Name("__S'".into())),
-                    rhs: Box::new(Expr::Binary { op: BinOp::Add, lhs: Box::new(Expr::Name("__S".into())), rhs: Box::new(delta) }),
-                };
-                let inv_pre = replace_sum(&c.body_qf, &Expr::Name("__S".into()));
-                let inv_post = crate::analyse::prime(&replace_sum(&c.body_qf, &Expr::Name("__S'".into())), &modified_num, false);
+                let repls: Vec<Expr> = (0..c.sums.len()).map(sname).collect();
+                let repls_post: Vec<Expr> = (0..c.sums.len()).map(spname).collect();
+                let inv_pre = replace_sums(&c.body_qf, &repls);
+                // Relevant if the action changes a summed quantity OR the total side; else untouched.
+                if !any_body_modified && !crate::analyse::mentions_any(&inv_pre, &modified_num) {
+                    continue;
+                }
+                let inv_post = crate::analyse::prime(&replace_sums(&c.body_qf, &repls_post), &modified_num, false);
                 let (pre_cons, pn) = ground(&inv_pre, &st2);
-                let (upd_cons, un) = ground(&s_update, &st2);
                 let (post_cons, on) = ground(&inv_post, &st2);
-                if pn || un || on || post_cons.is_empty() {
+                if pn || on || post_cons.is_empty() {
                     continue;
                 }
                 let mut broke = false;
@@ -2134,6 +2165,13 @@ mod tests {
         assert!(!any(&agg(&transfer), "can break conservation"), "balanced transfer: {:#?}", agg(&transfer));
         let skew = format!("{hdr}  action transfer\n    ensures balance(a) = old(balance(a)) - 1 and balance(b) = old(balance(b)) + 2\nend\n");
         assert!(any(&agg(&skew), "`transfer` in `Bank` can break conservation invariant `conserved`"), "unbalanced: {:#?}", agg(&skew));
+
+        // A TWO-SUM accounting invariant `net = sum(asset) - sum(liab)`.
+        let bhdr = "-- allium: 4\ncomponent Books\n  entity Acct\n  observable state asset(Acct) : Money\n  observable state liab(Acct) : Money\n  observable state net : Money\n  invariant balanced means net = (sum p :: asset(p)) - (sum p :: liab(p))\n";
+        let growbad = format!("{bhdr}  action grow\n    ensures asset(a) = old(asset(a)) + 1\nend\n");
+        assert!(any(&agg(&growbad), "`grow` in `Books` can break conservation invariant `balanced`"), "{:#?}", agg(&growbad));
+        let growok = format!("{bhdr}  action grow\n    ensures asset(a) = old(asset(a)) + 1 and net = old(net) + 1\nend\n");
+        assert!(!any(&agg(&growok), "can break conservation"), "{:#?}", agg(&growok));
     }
 
     #[test]
