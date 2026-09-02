@@ -1538,20 +1538,34 @@ fn enum_guard_atom(e: &Expr) -> Option<(String, String, String)> {
     Some((obs.clone(), arg.clone(), tag.clone()))
 }
 
-/// Decide whether an enum-guard antecedent `obs(arg) = tag` is DEFINITELY true in the post-state of a
-/// single-subject action (subject renamed to `_e`) — the only case in which a two-entity enum-guarded
-/// arithmetic relation may be soundly asserted broken. It is true post iff the action sets `obs` to `tag`,
-/// or requires `tag` and leaves `obs` unchanged. A guard on the OTHER entity (`_f`), or one the action sets
-/// to a different tag, or a free one, is not decidably true — the caller skips it rather than risk a false
-/// alarm (the LRA cannot force an opaque enum true, so asserting `¬R` there would ignore the guard).
-fn enum_guard_true_post(g: &Expr, ensures: &Expr, guard: &Option<Expr>, st: &HashMap<String, String>) -> bool {
-    let Some((obs, arg, tag)) = enum_guard_atom(g) else { return false };
+/// The post-state truth of an enum-guard antecedent `obs(arg) = tag` under a single-subject action.
+enum GuardPost {
+    /// Definitely true post — the action sets `obs` to `tag`, or requires `tag` and leaves it unchanged.
+    /// The bound may be soundly asserted broken (the LRA need not force the guard; it holds).
+    True,
+    /// Definitely false post — the action sets `obs` to another tag, or requires another tag. The invariant
+    /// is vacuous for this action, so it genuinely cannot break it; safe to leave the target certifiable.
+    False,
+    /// Undecidable — the action does not determine the guard (it neither sets nor requires `obs`, or the
+    /// guard is on the OTHER entity). The guard COULD be true, so a break is possible but the LRA cannot
+    /// force the opaque enum; the caller must not assert it (false-alarm risk) AND must not certify the
+    /// target preserved (a real break could be missed).
+    Unknown,
+}
+
+/// Classify the post-state truth of an enum-guard antecedent under a single-subject action (subject `_e`).
+fn classify_guard_post(g: &Expr, ensures: &Expr, guard: &Option<Expr>, st: &HashMap<String, String>) -> GuardPost {
+    let Some((obs, arg, tag)) = enum_guard_atom(g) else { return GuardPost::Unknown };
     if arg != "_e" {
-        return false; // guard on the non-subject entity: free, cannot assert soundly
+        return GuardPost::Unknown; // guard on the non-subject entity: free, cannot decide
     }
+    let decide = |v: &str| if v == tag { GuardPost::True } else { GuardPost::False };
     match assigned_enum_tag(ensures, &obs, st) {
-        Some(v) => v == tag,
-        None => guard.as_ref().and_then(|g| required_enum_tag(g, &obs, st)).map(|r| r == tag).unwrap_or(false),
+        Some(v) => decide(&v),
+        None => match guard.as_ref().and_then(|g| required_enum_tag(g, &obs, st)) {
+            Some(r) => decide(&r),
+            None => GuardPost::Unknown,
+        },
     }
 }
 
@@ -1567,6 +1581,10 @@ fn enum_guard_true_post(g: &Expr, ensures: &Expr, guard: &Option<Expr>, st: &Has
 pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnostic>, HashSet<String>) {
     let mut out = Vec::new();
     let mut checked: HashSet<String> = HashSet::new();
+    // Targets any action left incompletely checked (an undecidable enum guard, or a bounded-out enumeration).
+    // Certification is withheld for these even if another action engaged them — else a missed break from the
+    // incomplete action would be silently certified preserved.
+    let mut incomplete_targets: HashSet<String> = HashSet::new();
     for d in &module.decls {
         let mut st: HashMap<String, String> = HashMap::new();
         for it in &d.items {
@@ -1776,12 +1794,19 @@ pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnos
                     let (gc, gn) = ground(&g_post, &st2);
                     let gc = if gn {
                         // An enum-guard antecedent adds no LRA constraint: it is decided from the action.
-                        // Only assert `¬R` when the guard is DEFINITELY true post; else the guard could be
-                        // false (invariant vacuous) and a break would be spurious — skip.
-                        if enum_guard_true_post(&g_post, &ensures, &guard, &st) {
-                            Vec::new()
-                        } else {
-                            continue;
+                        match classify_guard_post(&g_post, &ensures, &guard, &st) {
+                            // Guard true post: assert `¬R` (the LRA need not force the guard, it holds).
+                            GuardPost::True => Vec::new(),
+                            // Guard false post: the invariant is vacuous for this action — genuinely no break,
+                            // and the target stays certifiable.
+                            GuardPost::False => continue,
+                            // Guard undecidable: a break is possible but cannot be asserted (false-alarm risk)
+                            // AND the target must not be certified preserved — a real break could be missed
+                            // (e.g. an action that raises the bound without constraining the guard).
+                            GuardPost::Unknown => {
+                                incomplete_targets.insert(t.name.clone());
+                                continue;
+                            }
                         }
                     } else {
                         gc
@@ -1838,7 +1863,11 @@ pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnos
                     }
                 }
                 // Certify checked only when the VC engaged AND enumeration was complete — an incomplete
-                // (bounded-out) case must stay honestly unchecked, never read as preservation.
+                // (bounded-out) case must stay honestly unchecked, never read as preservation. A bounded-out
+                // enumeration for THIS action also withholds certification across all actions.
+                if incomplete {
+                    incomplete_targets.insert(t.name.clone());
+                }
                 if engaged && !incomplete {
                     checked.insert(t.name.clone());
                 }
@@ -1852,6 +1881,8 @@ pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnos
             }
         }
     }
+    // Withhold certification from any target an action left incompletely checked (cross-action safety).
+    checked.retain(|n| !incomplete_targets.contains(n));
     (out, checked)
 }
 
@@ -2954,6 +2985,13 @@ mod tests {
         assert!(!rel(&safe).iter().any(|m| m.contains("can break")), "offset_nonneg hypothesis must clear a reset to zero: {:#?}", rel(&safe));
         let vacuous = format!("{hdr}  action corrupt_and_race\n    requires status(s) = healthy\n    ensures status(s) = corrupted and wm(s) = 1000000\nend\n");
         assert!(!rel(&vacuous).iter().any(|m| m.contains("can break")), "guard false post -> bound vacuous, must not flag: {:#?}", rel(&vacuous));
+        // FALSE-CERTIFICATION guard: `reset` engages+preserves `bound`, but `raise` raises wm without
+        // constraining the status guard (undecidable post), so a real break from a healthy shard could be
+        // missed — the target must NOT be certified checked even though `reset` engaged it.
+        let mixed = format!("{hdr}  action reset\n    requires status(s) = healthy\n    ensures wm(s) = 0\n  action raise\n    ensures wm(s) = 1000000\nend\n");
+        let m = parse(&mixed).module;
+        let (_d, checked) = super::relational_arith_preservation(&m, &mixed);
+        assert!(!checked.contains("bound"), "an undecidable-guard action must withhold certification of `bound`: {checked:?}");
     }
 
     #[test]
