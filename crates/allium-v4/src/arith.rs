@@ -210,6 +210,16 @@ pub fn arith_preservation(module: &Module, src: &str, imports: &Imports) -> Vec<
             if notes || cons.is_empty() {
                 continue;
             }
+            // An UNSATISFIABLE rely (contradictory in isolation) would make every VC vacuously UNSAT and
+            // silently mask real breaks. Diagnose it (vacuity discipline) and do NOT add it as a hypothesis,
+            // so genuine breaks still surface rather than hiding behind a broken assumption.
+            if matches!(solve(&cons), Outcome::Unsat) {
+                out.push(Diagnostic::warning(
+                    d.span,
+                    format!("rely `{name}` in `{}` is unsatisfiable (contradictory) — it can never hold, so every guarantee proved under it would be vacuous. Fix or remove it.", d.name),
+                ));
+                continue;
+            }
             all_pre.extend(cons);
             assumed_relies.push(name);
         }
@@ -2812,6 +2822,11 @@ mod tests {
         // Drop the rely -> the break is re-exposed (y unconstrained can be negative).
         let without = with.lines().filter(|l| !l.contains("rely input_nonneg")).collect::<Vec<_>>().join("\n");
         assert!(any(&run_ap(&without), "can break arithmetic invariant `x_nonneg`"), "without the rely the break must show: {:#?}", run_ap(&without));
+        // An UNSATISFIABLE rely must be diagnosed and must NOT mask a real break (vacuity discipline).
+        let contra = "-- allium: 4\ncomponent C\n  entity E\n  observable state x(E) : Number\n  rely bad means every e :: x(e) >= 0 and x(e) <= 0 - 1\n  invariant inv means every e :: x(e) >= 5\n  action drop\n    ensures x(e) = 0\nend\n";
+        let cm = run_ap(contra);
+        assert!(any(&cm, "rely `bad` in `C` is unsatisfiable"), "a contradictory rely must be diagnosed: {cm:#?}");
+        assert!(any(&cm, "can break arithmetic invariant `inv`"), "a contradictory rely must not mask the real break: {cm:#?}");
     }
 
     #[test]
