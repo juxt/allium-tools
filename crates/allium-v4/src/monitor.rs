@@ -207,10 +207,12 @@ fn eval_rel(e: &Expr, env: &Env, pop: &Pop) -> RVal {
                 None => RVal::B(false),
             }
         }
-        // A bare name is an entity variable reference (for `a = b` identity).
+        // A bound name is an entity variable (`a = b` identity); an unbound name is a literal — an enum
+        // tag (`outcome(x) = fail`) or similar. As a string value it compares by name, and `truthy()` is
+        // false for it just as for `B(false)`, so boolean/logical contexts are unaffected.
         Expr::Name(v) => match env.get(v) {
             Some(ent) => RVal::E(ent.clone()),
-            None => RVal::B(false),
+            None => RVal::S(v.clone()),
         },
         _ => RVal::B(false),
     }
@@ -953,6 +955,20 @@ mod tests {
         let r = monitor(SPEC, "t=1 entity=R1 collateralised=T has_code=F accepted=F rejected=F\n");
         assert!(count(&r, "collat_needs_code") == 1, "{r}");
         assert!(r.contains("\"ok\":false"));
+    }
+
+    #[test]
+    fn quantified_enum_equality_is_monitored() {
+        // A lifecycle safety invariant guarded by an enum tag. Before the fix the tag `fail` evaluated to a
+        // falsy non-string, so the antecedent was always false and the invariant never fired (a silent
+        // false negative). Now `outcome = fail` compares as a string value.
+        let spec = "-- allium: 4\ncomponent C\n  entity X\n  observable state outcome(X) : { pass | fail }\n  observable state logged(X) : bool\n  invariant note means every x :: outcome(x) = fail implies logged(x)\nend\n";
+        // fail + not logged: the invariant is violated and must fire.
+        assert!(monitor(spec, "entity=x outcome=fail logged=F\n").contains("\"ok\":false"), "fail without logged must fire");
+        // fail + logged: satisfied.
+        assert!(monitor(spec, "entity=x outcome=fail logged=T\n").contains("\"ok\":true"), "fail with logged holds");
+        // pass: the guard is off, so it holds regardless of logged.
+        assert!(monitor(spec, "entity=x outcome=pass logged=F\n").contains("\"ok\":true"), "pass leaves the guard off");
     }
 
     #[test]
