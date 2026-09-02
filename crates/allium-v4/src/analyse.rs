@@ -58,6 +58,14 @@ pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> Pa
     r.diagnostics.append(&mut feasibility(&r.module, source));
     r.diagnostics.append(&mut preservation(&r.module, source));
     r.diagnostics.append(&mut relational_preservation(&r.module, source));
+    // 2-entity numeric ordering preservation (#49). Where it actually checks an invariant, drop the weaker
+    // "NOT preservation-checked" note that relational_preservation emitted for it.
+    let (mut rel_arith, rel_checked) = crate::arith::relational_arith_preservation(&r.module, source);
+    r.diagnostics.retain(|d| {
+        !(d.message.contains("is NOT preservation-checked")
+            && rel_checked.iter().any(|n| d.message.contains(&format!("relational invariant `{n}`"))))
+    });
+    r.diagnostics.append(&mut rel_arith);
     r.diagnostics.append(&mut bmc(&r.module, source));
     r.diagnostics.append(&mut bmc_enum(&r.module, source));
     r.diagnostics.append(&mut transitions_notice(&r.module, source));
@@ -1206,7 +1214,7 @@ const ENT2: &str = "_f";
 /// Leading universally-quantified variables of `inv` and the quantifier-free body beneath them, or `None`
 /// if `inv` is not a run of `every`s over a QF body. Handles both `every a, b :: …` and nested `every a ::
 /// every b :: …`.
-fn universal_body(inv: &Expr) -> Option<(Vec<String>, Expr)> {
+pub(crate) fn universal_body(inv: &Expr) -> Option<(Vec<String>, Expr)> {
     match inv {
         Expr::Quant { q: Quant::Every, vars, body, .. } => {
             let mut vs = vars.clone();
@@ -1238,7 +1246,7 @@ pub(crate) fn rename_vars(e: &Expr, map: &HashMap<String, String>) -> Expr {
 
 /// Resolve entity equality between the two symbolic entities: `_e = _f` (distinct) becomes `false`,
 /// `_e = _e` becomes `true`; likewise `<>`. Leaves boolean-state equalities untouched.
-fn resolve_entity_eq(e: &Expr) -> Expr {
+pub(crate) fn resolve_entity_eq(e: &Expr) -> Expr {
     let is_ent = |x: &Expr| matches!(x, Expr::Name(n) if n == ENT || n == ENT2);
     match e {
         Expr::Binary { op: op @ (BinOp::Eq | BinOp::Ne), lhs, rhs } if is_ent(lhs) && is_ent(rhs) => {
@@ -1256,7 +1264,7 @@ fn resolve_entity_eq(e: &Expr) -> Expr {
 /// Post-state rewrite for a two-entity check: a modified state observable applied to the MODIFIED entity
 /// `_e` (outside `old`) is primed; the same observable applied to the framed other entity `_f`, and every
 /// unmodified observable, is left at its pre value. `old(X)` reads pre.
-fn to_post(e: &Expr, modified: &HashSet<String>, in_old: bool) -> Expr {
+pub(crate) fn to_post(e: &Expr, modified: &HashSet<String>, in_old: bool) -> Expr {
     let is_e = |args: &[Expr]| args.len() == 1 && matches!(&args[0], Expr::Name(n) if n == ENT);
     match e {
         Expr::Unary { op: UnOp::Old, e } => to_post(e, modified, true),

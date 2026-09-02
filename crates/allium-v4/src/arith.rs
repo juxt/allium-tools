@@ -1246,6 +1246,260 @@ pub fn aggregate_preservation(module: &Module, src: &str, imports: &Imports) -> 
     out
 }
 
+/// 2-entity numeric ordering preservation (#49): `every a, b :: G(a,b) implies R(a,b)`, G and R single
+/// linear comparisons over numeric keys (e.g. `ver(a) > ver(b) implies off(a) >= off(b)`). For each
+/// single-subject action it asks: can the action, acting on entity `e`, break the ordering against some
+/// other entity `f`? The VC assumes the FULL inductive hypothesis — the invariant for both orderings of the
+/// pair AND every other invariant at `e` and `f` — then applies the effect and guard and negates the post.
+/// A SAT witness is a real reachable break. `emit` drops numeric-antecedent implications, so each
+/// implication is case-split manually; an antecedent the LRA cannot model is treated opaquely (either its
+/// consequent holds, or it is simply dropped) — both branches sound. Returns the diagnostics and the names
+/// it actually checked, so the caller drops the weaker "NOT preservation-checked" note for them.
+pub fn relational_arith_preservation(module: &Module, src: &str) -> (Vec<Diagnostic>, HashSet<String>) {
+    let mut out = Vec::new();
+    let mut checked: HashSet<String> = HashSet::new();
+    for d in &module.decls {
+        let mut st: HashMap<String, String> = HashMap::new();
+        for it in &d.items {
+            if matches!(it.kind, ItemKind::State | ItemKind::Given) {
+                if let (Some(n), Some(b)) = (&it.name, it.body) {
+                    st.insert(n.clone(), b.slice(src).trim().to_string());
+                }
+            }
+        }
+        let state_names: HashSet<String> =
+            d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
+
+        // A single linear comparison that grounds cleanly under `st` (numeric).
+        let is_lin_cmp = |e: &Expr, st: &HashMap<String, String>| -> bool {
+            matches!(e, Expr::Binary { op: BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq, .. })
+                && !ground(e, st).1
+        };
+        let split_impl = |e: &Expr| -> (Option<Expr>, Expr) {
+            if let Expr::Binary { op: BinOp::Implies, lhs, rhs } = e {
+                (Some((**lhs).clone()), (**rhs).clone())
+            } else {
+                (None, e.clone())
+            }
+        };
+
+        // Targets: 2-entity ordering invariants we can check. Hypotheses: every invariant, kept as its
+        // quantifier-free body plus its entity variables, to instantiate at the pair.
+        struct Target {
+            name: String,
+            a: String,
+            b: String,
+            qf: Expr, // G implies R, with vars a,b
+        }
+        let mut targets: Vec<Target> = Vec::new();
+        let mut hyp_invs: Vec<(Vec<String>, Expr)> = Vec::new(); // (entity vars, quantifier-free body)
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
+            let Some(b) = it.body else { continue };
+            let body = parse_predicate(b.slice(src)).0;
+            let (vars, qf) = match crate::analyse::universal_body(&body) {
+                Some(x) => x,
+                None if !crate::analyse::has_quant(&body) => {
+                    let mut ev = HashSet::new();
+                    crate::analyse::collect_entity_vars(&body, &mut ev);
+                    (ev.into_iter().collect(), body.clone())
+                }
+                None => continue,
+            };
+            hyp_invs.push((vars.clone(), qf.clone()));
+            if vars.len() == 2 {
+                let (ante, cons) = split_impl(&qf);
+                if let Some(ante) = ante {
+                    // st with the two entity keys stripped to numeric leaves is what is_lin_cmp needs; the
+                    // instances below are what actually get grounded, so a coarse check here is enough.
+                    if is_lin_cmp(&ante, &st) && is_lin_cmp(&cons, &st) {
+                        if let (Some(n),) = (it.name.clone(),) {
+                            targets.push(Target { name: n, a: vars[0].clone(), b: vars[1].clone(), qf: qf.clone() });
+                        }
+                    }
+                }
+            }
+        }
+        if targets.is_empty() {
+            continue;
+        }
+
+        let mut st2 = st.clone();
+        for n in &state_names {
+            if let Some(t) = st.get(n) {
+                if numeric(t) {
+                    st2.insert(format!("{n}'"), t.clone());
+                }
+            }
+        }
+
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
+            let Some(sp) = it.ensures else { continue };
+            let ens_raw = parse_predicate(sp.slice(src)).0;
+            let grd_raw = it.requires.map(|s| parse_predicate(s.slice(src)).0);
+            let mut ev = HashSet::new();
+            crate::analyse::collect_entity_vars(&ens_raw, &mut ev);
+            if let Some(g) = &grd_raw {
+                crate::analyse::collect_entity_vars(g, &mut ev);
+            }
+            if ev.len() > 1 {
+                continue; // single-subject actions only
+            }
+            let subj: HashMap<String, String> = ev.iter().map(|v| (v.clone(), "_e".to_string())).collect();
+            let ensures = crate::analyse::rename_vars(&ens_raw, &subj);
+            let guard = grd_raw.map(|g| crate::analyse::rename_vars(&g, &subj));
+            let mut modified = HashSet::new();
+            crate::analyse::collect_writes(&ensures, false, &state_names, &mut modified);
+            let modified: HashSet<String> = modified.into_iter().filter(|m| st.get(m).map(|t| numeric(t)).unwrap_or(false)).collect();
+            if modified.is_empty() {
+                continue;
+            }
+            let effect = crate::analyse::to_post(&ensures, &modified, false);
+            let (effect_cons, en) = ground(&effect, &st2);
+            if en {
+                continue;
+            }
+            let guard_cons = match &guard {
+                Some(g) => {
+                    let (c, n) = ground(g, &st2);
+                    if n {
+                        Vec::new() // an unmodellable guard asserts nothing (sound: keeps more pre-states)
+                    } else {
+                        c
+                    }
+                }
+                None => Vec::new(),
+            };
+
+            for t in &targets {
+                // Instantiate the target at (e,f) and (f,e); the pair is only disturbed if the action's
+                // writes touch it.
+                let map_ef: HashMap<String, String> = [(t.a.clone(), "_e".into()), (t.b.clone(), "_f".into())].into();
+                let map_fe: HashMap<String, String> = [(t.a.clone(), "_f".into()), (t.b.clone(), "_e".into())].into();
+                let inst_ef = crate::analyse::resolve_entity_eq(&crate::analyse::rename_vars(&t.qf, &map_ef));
+                let inst_fe = crate::analyse::resolve_entity_eq(&crate::analyse::rename_vars(&t.qf, &map_fe));
+                if !crate::analyse::mentions_any(&inst_ef, &modified) && !crate::analyse::mentions_any(&inst_fe, &modified) {
+                    continue;
+                }
+
+                // Build the implication hypotheses — the FULL inductive hypothesis so a SAT witness is a
+                // genuinely reachable pre-state: every invariant instantiated at the pair. Single-entity
+                // invariants at _e and at _f; every two-entity invariant (the target included) at both
+                // orderings of the pair; a constant invariant as itself. Omitting any true invariant would
+                // only ever add false positives, so include them all.
+                let mut hyps: Vec<(Option<Expr>, Expr)> = Vec::new();
+                for (vars, qf) in &hyp_invs {
+                    let insts: Vec<HashMap<String, String>> = match vars.len() {
+                        0 => vec![HashMap::new()],
+                        1 => ["_e", "_f"]
+                            .iter()
+                            .map(|who| [(vars[0].clone(), who.to_string())].into())
+                            .collect(),
+                        2 => vec![
+                            [(vars[0].clone(), "_e".into()), (vars[1].clone(), "_f".into())].into(),
+                            [(vars[0].clone(), "_f".into()), (vars[1].clone(), "_e".into())].into(),
+                        ],
+                        _ => continue,
+                    };
+                    for m in insts {
+                        let inst = crate::analyse::resolve_entity_eq(&crate::analyse::rename_vars(qf, &m));
+                        let (a, c) = split_impl(&inst);
+                        hyps.push((a, c));
+                    }
+                }
+
+                // Ground one implication hypothesis under an assumed truth of its antecedent, returning the
+                // constraints to add (None => this branch is unusable, skip it).
+                let branch_cons = |ante: &Option<Expr>, cons: &Expr, ante_true: bool| -> Option<Vec<Con>> {
+                    match ante {
+                        None => {
+                            let (c, note) = ground(cons, &st2);
+                            if note { None } else { Some(c) }
+                        }
+                        Some(a) => {
+                            let (ca, na) = ground(a, &st2);
+                            if ante_true {
+                                let (cc, nc) = ground(cons, &st2);
+                                // Consequent must model; antecedent may be opaque (boolean) — then just
+                                // assert the consequent (sound: if the guard holds, the bound holds).
+                                if nc { return None; }
+                                let mut v = cc;
+                                if !na { v.extend(ca); }
+                                Some(v)
+                            } else {
+                                // ¬antecedent. A numeric comparison negates cleanly; an opaque antecedent
+                                // being false asserts nothing.
+                                if na {
+                                    Some(Vec::new())
+                                } else if ca.len() == 1 {
+                                    Some(negate_con(&ca[0]))
+                                } else {
+                                    None // multi-constraint antecedent: negation is disjunctive, skip
+                                }
+                            }
+                        }
+                    }
+                };
+
+                // Keep the case-split bounded; a very large hypothesis set stays unchecked (the #50 note
+                // remains) rather than being marked checked without a verdict.
+                if hyps.len() > 16 {
+                    continue;
+                }
+
+                let mut broke = false;
+                for post_src in [&inst_ef, &inst_fe] {
+                    let post = crate::analyse::to_post(post_src, &modified, false);
+                    let (g_post, r_post) = split_impl(&post);
+                    let Some(g_post) = g_post else { continue };
+                    let (gc, gn) = ground(&g_post, &st2);
+                    let (rc, rn) = ground(&r_post, &st2);
+                    if gn || rn || rc.len() != 1 {
+                        continue; // post not a clean single-comparison implication
+                    }
+                    // ¬post = G_post ∧ ¬R_post; ¬R_post may split (Eq → two).
+                    for neg_r in negate_con(&rc[0]) {
+                        let mut base = effect_cons.clone();
+                        base.extend(guard_cons.clone());
+                        base.extend(gc.clone());
+                        base.push(neg_r);
+                        // Enumerate antecedent truths of the implication hypotheses.
+                        let n = hyps.len();
+                        'combos: for mask in 0..(1u32 << n) {
+                            let mut cons = base.clone();
+                            for (i, (ante, conseq)) in hyps.iter().enumerate() {
+                                let ante_true = (mask >> i) & 1 == 1;
+                                match branch_cons(ante, conseq, ante_true) {
+                                    Some(c) => cons.extend(c),
+                                    None => continue 'combos, // this hypothesis can't be split; skip combo
+                                }
+                            }
+                            if let Outcome::Sat(_) = solve(&cons) {
+                                broke = true;
+                                break;
+                            }
+                        }
+                        if broke {
+                            break;
+                        }
+                    }
+                    if broke {
+                        break;
+                    }
+                }
+                checked.insert(t.name.clone());
+                if broke {
+                    let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
+                    out.push(Diagnostic::warning(
+                        it.span,
+                        format!("action `{aname}` in `{}` can break relational invariant `{}`: acting on one entity can drive its key past another's without preserving the ordering. Guard the action so the relation is maintained.", d.name, t.name),
+                    ));
+                }
+            }
+        }
+    }
+    (out, checked)
+}
+
 /// Linear-arithmetic entailment for refinement: do the component's invariants `x_invs` entail `promise`?
 /// Returns `Some(true)` if every way the promise could fail is inconsistent with the invariants,
 /// `Some(false)` with the first counterexample shape it finds, or `None` if the promise is not linearisable
@@ -2284,6 +2538,25 @@ mod tests {
         assert!(any(&agg(&growbad), "`grow` in `Books` can break conservation invariant `balanced`"), "{:#?}", agg(&growbad));
         let growok = format!("{bhdr}  action grow\n    ensures asset(a) = old(asset(a)) + 1 and net = old(net) + 1\nend\n");
         assert!(!any(&agg(&growok), "can break conservation"), "{:#?}", agg(&growok));
+    }
+
+    #[test]
+    fn relational_ordering_preservation() {
+        let rel = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::relational_arith_preservation(&m, src).0.into_iter().map(|d| d.message).collect()
+        };
+        let ord = "invariant ordered means every a :: every b :: ver(a) > ver(b) implies off(a) >= off(b)\n";
+        // Bumping one entity's version above another's without lifting its offset breaks the ordering.
+        let brk = format!("-- allium: 4\ncomponent Log\n  entity E\n  observable state ver(E) : Number\n  observable state off(E) : Number\n  {ord}  action bump\n    ensures ver(e) = old(ver(e)) + 10\nend\n");
+        assert!(rel(&brk).iter().any(|m| m.contains("can break relational invariant `ordered`")), "{:#?}", rel(&brk));
+        // With `off = ver` as an invariant, a joint +1 bump keeps the ordering — the pass must USE that
+        // hypothesis and stay clean (the soundness case the earlier reverted pass failed).
+        let clean = format!("-- allium: 4\ncomponent Log\n  entity E\n  observable state ver(E) : Number\n  observable state off(E) : Number\n  invariant synced means every x :: off(x) = ver(x)\n  {ord}  action bump\n    ensures ver(e) = old(ver(e)) + 1 and off(e) = old(off(e)) + 1\nend\n");
+        assert!(!rel(&clean).iter().any(|m| m.contains("can break")), "hypothesis must be used: {:#?}", rel(&clean));
+        // An action on an unrelated state cannot disturb the ordering.
+        let untouched = format!("-- allium: 4\ncomponent Log\n  entity E\n  observable state ver(E) : Number\n  observable state off(E) : Number\n  observable state wm(E) : Number\n  {ord}  action tick\n    ensures wm(e) = old(wm(e)) + 1\nend\n");
+        assert!(!rel(&untouched).iter().any(|m| m.contains("can break")), "{:#?}", rel(&untouched));
     }
 
     #[test]
