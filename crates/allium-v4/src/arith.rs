@@ -2957,6 +2957,9 @@ mod tests {
         // fires, so the invariant is vacuously preserved and must NOT be flagged.
         let safe = format!("{hdr}  invariant vfrozen means version(e) = 0\n  action lower_off\n    ensures off(e) = 0\nend\n");
         assert!(!rel(&safe).iter().any(|m| m.contains("can break")), "a version-frozen hypothesis must clear the break: {:#?}", rel(&safe));
+        // Adversarial: an action on an UNRELATED state must not false-positive against the conjunctive guard.
+        let unrelated = format!("{hdr}  observable state other(E) : Number\n  action tick\n    ensures other(e) = old(other(e)) + 1\nend\n");
+        assert!(!rel(&unrelated).iter().any(|m| m.contains("can break")), "an unrelated action must not break the conjunctive-guard invariant: {:#?}", rel(&unrelated));
     }
 
     #[test]
