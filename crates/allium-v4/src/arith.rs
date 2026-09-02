@@ -578,6 +578,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
         let mut state_names: HashSet<String> =
             d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
         state_names.extend(payload.into_keys());
+        let defs = component_defs(d, src);
 
         // Enum-guarded linear invariants, and the unconditional linear invariants (pre-hypotheses that
         // rule out impossible pre-states, so a break is only reported from a genuinely reachable one).
@@ -588,7 +589,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
                 (Some(n), Some(b)) => (n.clone(), b),
                 _ => continue,
             };
-            let qf = match arith_reduce(&parse_predicate(body.slice(src)).0) {
+            let qf = match arith_reduce(&crate::monitor::inline_defs(&parse_predicate(body.slice(src)).0, &defs)) {
                 Some(e) => e,
                 None => continue,
             };
@@ -626,7 +627,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
         // bound both established and preserved earns the stronger INDUCTIVE verdict below.
         let mut established: HashSet<String> = HashSet::new();
         if let Some(init_it) = d.items.iter().find(|it| it.kind == ItemKind::Init).and_then(|it| it.body) {
-            let init_raw = parse_predicate(init_it.slice(src).trim().strip_prefix("means").unwrap_or(init_it.slice(src))).0;
+            let init_raw = crate::monitor::inline_defs(&parse_predicate(init_it.slice(src).trim().strip_prefix("means").unwrap_or(init_it.slice(src))).0, &defs);
             let mut iev = HashSet::new();
             crate::analyse::collect_entity_vars(&init_raw, &mut iev);
             let init = crate::analyse::rename_entity(&init_raw, &iev);
@@ -706,10 +707,10 @@ pub fn enum_guarded_preservation(module: &Module, src: &str) -> Vec<Diagnostic> 
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
             let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
             let ensures_raw = match it.ensures {
-                Some(sp) => parse_predicate(sp.slice(src)).0,
+                Some(sp) => crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs),
                 None => continue,
             };
-            let guard_raw = it.requires.map(|sp| parse_predicate(sp.slice(src)).0);
+            let guard_raw = it.requires.map(|sp| crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs));
             let mut ev = HashSet::new();
             crate::analyse::collect_entity_vars(&ensures_raw, &mut ev);
             if let Some(g) = &guard_raw {
