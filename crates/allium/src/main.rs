@@ -1,4 +1,5 @@
 mod domain_model;
+mod libfetch;
 mod test_plan;
 
 use allium_parser::diagnostic::Severity;
@@ -805,6 +806,22 @@ fn resolve_v4_imports(
             continue;
         }
         let target = d.name.trim().trim_matches('"');
+        // A git coordinate is fetched once into `.allium/cache` in the working directory and read
+        // from there; a plain target resolves against the files passed on the command line.
+        if let Some(coord) = libfetch::parse_git_coord(target) {
+            let cache_root = std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".allium")
+                .join("cache");
+            match libfetch::resolve(&coord, &cache_root) {
+                Ok(src) => {
+                    imports.givens.extend(allium_v4::arith::extract_givens(&src));
+                    imports.contracts.extend(allium_v4::analyse::extract_contracts(&src));
+                }
+                Err(e) => eprintln!("allium: could not resolve `{target}`: {e}"),
+            }
+            continue;
+        }
         if let Ok(rp) = std::fs::canonicalize(dir.join(target)) {
             if let Some(src) = by_path.get(&rp) {
                 imports.givens.extend(allium_v4::arith::extract_givens(src));
