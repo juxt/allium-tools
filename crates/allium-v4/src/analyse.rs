@@ -254,6 +254,7 @@ pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> Pa
     r.diagnostics.append(&mut dead_states(&r.module, source));
     r.diagnostics.append(&mut tier_report(&r.module, source));
     r.diagnostics.append(&mut refinement(&r.module, source, imports));
+    r.diagnostics.append(&mut rely_discharge(&r.module, source, imports));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
     // "jointly satisfiable" while the (stronger) arithmetic tier reports it CONTRADICTORY or
     // VACUOUSLY. That dual message is misleading and the elicit gate reads it. The arithmetic
@@ -1267,6 +1268,78 @@ pub fn refinement(module: &Module, src: &str, imports: &crate::arith::Imports) -
                 for s in &skipped {
                     out.push(Diagnostic::warning(d.span, format!("{kw} `{}` vs contract `{}`: promise `{}` not statically checked (outside the boolean fragment).", d.name, cname, s)));
                 }
+            }
+        }
+    }
+    out
+}
+
+/// Compositional rely-guarantee across a dependency edge (Decision 2's deferred discharge, the DUAL of
+/// `satisfies`). Where `satisfies` proves a consumer meets a library's obligation, this proves a consumer's
+/// `rely` is BACKED by an imported library's `guarantee`: if the union of imported guarantees entails a
+/// rely, that rely is DISCHARGED by the dependency rather than merely assumed of the environment. A rely a
+/// consumer depends on but no imported library provides stays assumed — the honest gap (an assumption about
+/// a dependency the dependency does not make). Boolean fragment; arithmetic relies stay assumed for now.
+pub fn rely_discharge(module: &Module, src: &str, imports: &crate::arith::Imports) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    // Guarantees available from every library contract in scope — imported (the package dependency) or
+    // local — with their boolean vocabulary.
+    let mut lib_guars: Vec<Expr> = Vec::new();
+    let mut lib_bool: HashSet<String> = HashSet::new();
+    let mut add = |promises: &Vec<(String, Expr)>, c_bool: &HashSet<String>| {
+        for (_pn, p) in promises {
+            let body = universal_body(p).map(|(_, b)| b).unwrap_or_else(|| p.clone());
+            lib_guars.push(normalize(&body));
+        }
+        lib_bool.extend(c_bool.iter().cloned());
+    };
+    for c in module.decls.iter().filter(|d| d.kind == crate::ast::DeclKind::Contract) {
+        let (promises, c_bool, _c_st) = contract_promises_of(c, src);
+        add(&promises, &c_bool);
+    }
+    for (promises, c_bool, _c_st) in imports.contracts.values() {
+        add(promises, c_bool);
+    }
+    if lib_guars.is_empty() {
+        return out;
+    }
+    let guar_refs: Vec<&Expr> = lib_guars.iter().collect();
+    for d in &module.decls {
+        let relies: Vec<(String, Expr)> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Rely)
+            .filter_map(|it| Some((it.name.clone()?, normalize(&parse_predicate(it.body?.slice(src)).0))))
+            .collect();
+        if relies.is_empty() {
+            continue;
+        }
+        let d_bool = bool_names_of(d, src);
+        let all_obs: HashSet<String> = d_bool.union(&lib_bool).cloned().collect();
+        let mut bnames = all_obs.clone();
+        bnames.extend(all_obs.iter().map(|n| format!("{n}'")));
+        for (rname, r) in &relies {
+            let body = universal_body(r).map(|(_, b)| b).unwrap_or_else(|| r.clone());
+            if has_quant(&body) || !boolean_fragment_rel(&body, &d_bool, &all_obs) {
+                continue; // boolean fragment only for now
+            }
+            let neg = Expr::Unary { op: UnOp::Not, e: Box::new(body.clone()) };
+            let mut es = guar_refs.clone();
+            es.push(&neg);
+            if crate::sat::satisfiable(&es, &bnames).is_none() {
+                out.push(Diagnostic::warning(
+                    d.span,
+                    format!("rely `{rname}` in `{}` is DISCHARGED by a library guarantee in scope — the dependency provides it, so it is backed, not merely assumed of the environment.", d.name),
+                ));
+            } else if boolean_fragment_rel(&body, &lib_bool, &lib_bool) {
+                // Only flag an UNDISCHARGED rely when it is expressed entirely in a library's vocabulary —
+                // then it is a claim ABOUT a dependency, and its non-discharge is a real gap (the consumer
+                // assumes a property the library never promises). A rely over the component's own terms is a
+                // genuine environmental assumption, left to the rely role's "assumed" report, not flagged.
+                out.push(Diagnostic::warning(
+                    d.span,
+                    format!("rely `{rname}` in `{}` is NOT discharged by any library guarantee in scope — the component depends on a property no library it uses provides. Verify the assumption or depend on a library that guarantees it.", d.name),
+                ));
             }
         }
     }
@@ -2998,6 +3071,17 @@ mod tests {
         assert!(any(ok, "Assuming its rely-conditions (env_up)"), "verdict must state the assumption: {:?}", msgs(ok));
         let bad = "-- allium: 4\ncontract Avail\n  entity R\n  observable state ok(R) : bool\n  guarantee dok means ok(r)\nend\ncomponent Svc satisfies (a : Avail)\n  entity R\n  observable state up(R) : bool\n  observable state ok(R) : bool\n  invariant okwhenup means up(r) implies ok(r)\nend\n";
         assert!(any(bad, "does NOT satisfy contract `Avail`"), "without the rely, ok is not entailed: {:?}", msgs(bad));
+    }
+
+    #[test]
+    fn rely_discharged_by_library_guarantee() {
+        // Decision 2's deferred compositional discharge (the dual of `satisfies`): a consumer's `rely` is
+        // BACKED when a library guarantee entails it, and flagged when no guarantee provides it.
+        let backed = "-- allium: 4\ncontract KafkaGuarantees\n  entity M\n  observable state consumed(M) : bool\n  observable state in_order(M) : bool\n  guarantee ordered means consumed(m) implies in_order(m)\nend\ncomponent C\n  entity M\n  observable state consumed(M) : bool\n  observable state in_order(M) : bool\n  rely needs_order means consumed(m) implies in_order(m)\nend\n";
+        assert!(any(backed, "rely `needs_order` in `C` is DISCHARGED by a library guarantee in scope"), "a rely a library guarantees must be discharged: {:?}", msgs(backed));
+        // A rely on a property no guarantee provides (exactly-once vs Kafka's at-least-once) is flagged.
+        let unbacked = "-- allium: 4\ncontract KafkaGuarantees\n  entity M\n  observable state consumed(M) : bool\n  observable state in_order(M) : bool\n  observable state unique(M) : bool\n  guarantee ordered means consumed(m) implies in_order(m)\nend\ncomponent C\n  entity M\n  observable state consumed(M) : bool\n  observable state unique(M) : bool\n  rely needs_exactly_once means consumed(m) implies unique(m)\nend\n";
+        assert!(any(unbacked, "rely `needs_exactly_once` in `C` is NOT discharged by any library guarantee in scope"), "a rely no guarantee provides must be flagged: {:?}", msgs(unbacked));
     }
 
     #[test]
