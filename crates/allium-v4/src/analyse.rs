@@ -1286,19 +1286,25 @@ pub fn rely_discharge(module: &Module, src: &str, imports: &crate::arith::Import
     // local — with their boolean vocabulary.
     let mut lib_guars: Vec<Expr> = Vec::new();
     let mut lib_bool: HashSet<String> = HashSet::new();
-    let mut add = |promises: &Vec<(String, Expr)>, c_bool: &HashSet<String>| {
-        for (_pn, p) in promises {
-            let body = universal_body(p).map(|(_, b)| b).unwrap_or_else(|| p.clone());
-            lib_guars.push(normalize(&body));
+    let mut lib_st: HashMap<String, String> = HashMap::new();
+    {
+        let mut add = |promises: &Vec<(String, Expr)>, c_bool: &HashSet<String>, c_st: &HashMap<String, String>| {
+            for (_pn, p) in promises {
+                let body = universal_body(p).map(|(_, b)| b).unwrap_or_else(|| p.clone());
+                lib_guars.push(normalize(&body));
+            }
+            lib_bool.extend(c_bool.iter().cloned());
+            for (k, v) in c_st {
+                lib_st.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        };
+        for c in module.decls.iter().filter(|d| d.kind == crate::ast::DeclKind::Contract) {
+            let (promises, c_bool, c_st) = contract_promises_of(c, src);
+            add(&promises, &c_bool, &c_st);
         }
-        lib_bool.extend(c_bool.iter().cloned());
-    };
-    for c in module.decls.iter().filter(|d| d.kind == crate::ast::DeclKind::Contract) {
-        let (promises, c_bool, _c_st) = contract_promises_of(c, src);
-        add(&promises, &c_bool);
-    }
-    for (promises, c_bool, _c_st) in imports.contracts.values() {
-        add(promises, c_bool);
+        for (promises, c_bool, c_st) in imports.contracts.values() {
+            add(promises, c_bool, c_st);
+        }
     }
     if lib_guars.is_empty() {
         return out;
@@ -1318,10 +1324,26 @@ pub fn rely_discharge(module: &Module, src: &str, imports: &crate::arith::Import
         let all_obs: HashSet<String> = d_bool.union(&lib_bool).cloned().collect();
         let mut bnames = all_obs.clone();
         bnames.extend(all_obs.iter().map(|n| format!("{n}'")));
+        // Numeric type map spanning the component and the libraries, for arithmetic relies.
+        let mut st: HashMap<String, String> = lib_st.clone();
+        for it in d.items.iter().filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given)) {
+            if let (Some(n), Some(b)) = (&it.name, it.body) {
+                st.entry(n.clone()).or_insert_with(|| b.slice(src).trim().to_string());
+            }
+        }
         for (rname, r) in &relies {
             let body = universal_body(r).map(|(_, b)| b).unwrap_or_else(|| r.clone());
             if has_quant(&body) || !boolean_fragment_rel(&body, &d_bool, &all_obs) {
-                continue; // boolean fragment only for now
+                // Arithmetic rely: discharged if the library guarantees entail it (LRA, reusing `satisfies`).
+                if let Some(true) = crate::arith::entails_guarded_linear(&lib_guars, r, &st)
+                    .or_else(|| crate::arith::entails_linear(&lib_guars, r, &st))
+                {
+                    out.push(Diagnostic::warning(
+                        d.span,
+                        format!("rely `{rname}` in `{}` is DISCHARGED by a library guarantee in scope — the dependency provides it, so it is backed, not merely assumed of the environment.", d.name),
+                    ));
+                }
+                continue;
             }
             let neg = Expr::Unary { op: UnOp::Not, e: Box::new(body.clone()) };
             let mut es = guar_refs.clone();
@@ -3082,6 +3104,9 @@ mod tests {
         // A rely on a property no guarantee provides (exactly-once vs Kafka's at-least-once) is flagged.
         let unbacked = "-- allium: 4\ncontract KafkaGuarantees\n  entity M\n  observable state consumed(M) : bool\n  observable state in_order(M) : bool\n  observable state unique(M) : bool\n  guarantee ordered means consumed(m) implies in_order(m)\nend\ncomponent C\n  entity M\n  observable state consumed(M) : bool\n  observable state unique(M) : bool\n  rely needs_exactly_once means consumed(m) implies unique(m)\nend\n";
         assert!(any(unbacked, "rely `needs_exactly_once` in `C` is NOT discharged by any library guarantee in scope"), "a rely no guarantee provides must be flagged: {:?}", msgs(unbacked));
+        // An ARITHMETIC rely is discharged by a numeric library guarantee (via the LRA entailment).
+        let arith = "-- allium: 4\ncontract Store\n  entity U\n  observable state committed(U) : bool\n  observable state bal(U) : Money\n  guarantee nn means committed(u) implies bal(u) >= 0\nend\ncomponent R\n  entity U\n  observable state committed(U) : bool\n  observable state bal(U) : Money\n  rely relies_nn means committed(u) implies bal(u) >= 0\nend\n";
+        assert!(any(arith, "rely `relies_nn` in `R` is DISCHARGED by a library guarantee in scope"), "an arithmetic rely a numeric guarantee entails must be discharged: {:?}", msgs(arith));
     }
 
     #[test]
