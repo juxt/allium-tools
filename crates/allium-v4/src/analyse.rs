@@ -218,6 +218,69 @@ pub(crate) fn desugar_transitions(module: &mut Module, src: &str) -> String {
     ext
 }
 
+/// #76 (Decision 3): a `fault` and an `invariant` are two signifying ROLES; the same property
+/// should be stated once. A fault whose region is exactly the COMPLEMENT of an invariant's region
+/// (`F ≡ ¬I`) says nothing new — it restates the invariant from the other polarity. Report it so
+/// the author states the property once, as a fault or an invariant, not both.
+///
+/// Boolean fragment only, and a WARNING never an error: it can only ever be advisory, so it cannot
+/// change a verdict or cause a false certification. Equivalence is decided by two unsat checks:
+/// `F ∧ I` unsatisfiable (they never both hold) and `¬F ∧ ¬I` unsatisfiable (they never both fail),
+/// which together say `F` and `I` partition the states — i.e. `F` is precisely `¬I`.
+pub(crate) fn fault_restatement(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let bool_names = bool_names_of(d, src);
+        let obs: HashSet<String> = d
+            .items
+            .iter()
+            .filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given))
+            .filter_map(|it| it.name.clone())
+            .collect();
+        // Relational fragment: accept predicate atoms with entity arguments (`locked(r)`), which
+        // sat keys by head name — the same fragment `refinement`/`rely_discharge` reason over. A
+        // quantified or arithmetic body falls out of the fragment and is skipped (conservative).
+        let parse_body = |it: &crate::ast::Item| -> Option<Expr> {
+            let e = parse_predicate(it.body?.slice(src)).0;
+            if boolean_fragment_rel(&e, &bool_names, &obs) {
+                Some(e)
+            } else {
+                None
+            }
+        };
+        let invs: Vec<(&crate::ast::Item, Expr)> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Invariant)
+            .filter_map(|it| Some((it, parse_body(it)?)))
+            .collect();
+        if invs.is_empty() {
+            continue;
+        }
+        for fit in d.items.iter().filter(|it| it.kind == ItemKind::Fault) {
+            let Some(fe) = parse_body(fit) else { continue };
+            let not_f = Expr::Unary { op: UnOp::Not, e: Box::new(fe.clone()) };
+            for (iit, ie) in &invs {
+                let not_i = Expr::Unary { op: UnOp::Not, e: Box::new(ie.clone()) };
+                if crate::sat::satisfiable(&[&fe, ie], &bool_names).is_none()
+                    && crate::sat::satisfiable(&[&not_f, &not_i], &bool_names).is_none()
+                {
+                    let fname = fit.name.clone().unwrap_or_else(|| "<fault>".into());
+                    let iname = iit.name.clone().unwrap_or_else(|| "<invariant>".into());
+                    out.push(Diagnostic::warning(
+                        fit.span,
+                        format!(
+                            "fault `{fname}` restates invariant `{iname}`: its region is exactly the complement of the invariant, so it says nothing new. State the property once — as a fault or an invariant, not both."
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// As [`analyse`], but with definitions resolved from other modules via `use` (given bodies today).
 /// The CLI resolves the import graph and passes them; single-file callers use [`analyse`].
 pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> ParseResult {
@@ -255,6 +318,7 @@ pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> Pa
     r.diagnostics.append(&mut tier_report(&r.module, source));
     r.diagnostics.append(&mut refinement(&r.module, source, imports));
     r.diagnostics.append(&mut rely_discharge(&r.module, source, imports));
+    r.diagnostics.append(&mut fault_restatement(&r.module, source));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
     // "jointly satisfiable" while the (stronger) arithmetic tier reports it CONTRADICTORY or
     // VACUOUSLY. That dual message is misleading and the elicit gate reads it. The arithmetic
@@ -2939,6 +3003,20 @@ mod tests {
     }
 
     const HDR: &str = "-- allium: 4\ncomponent R\n  entity T\n  observable state a(T) : bool\n  observable state b(T) : bool\n  observable state c(T) : bool\n";
+
+    #[test]
+    fn fault_restating_an_invariant_is_flagged() {
+        // fault `bad` = a ∧ ¬b is exactly ¬(a ⟹ b), the complement of invariant `good`.
+        let src = format!("{HDR}  invariant good means a(t) implies b(t)\n  fault bad means a(t) and not b(t)\nend\n");
+        assert!(any(&src, "restates invariant `good`"), "expected restatement warning, got: {:?}", msgs(&src));
+    }
+
+    #[test]
+    fn fault_distinct_from_invariant_is_not_flagged() {
+        // fault `bad` = a ∧ ¬c is NOT the complement of invariant `good` = a ⟹ b.
+        let src = format!("{HDR}  invariant good means a(t) implies b(t)\n  fault bad means a(t) and not c(t)\nend\n");
+        assert!(!any(&src, "restates invariant"), "unexpected restatement warning: {:?}", msgs(&src));
+    }
 
     #[test]
     fn boolean_rely_is_a_pre_hypothesis_and_reported_conditional() {
