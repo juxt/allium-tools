@@ -16,7 +16,7 @@ pub struct ParseResult {
 /// Item keywords that terminate a raw predicate / type at bracket depth 0.
 const ITEM_STARTERS: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "objective", "budget", "terminal",
     "transitions", "pub", "abstract", "readable", "contract", "component", "use", "end", "satisfies",
 ];
 
@@ -24,7 +24,7 @@ const ITEM_STARTERS: &[&str] = &[
 /// block carries its own inner `terminal: <tag>` line, which must be captured, not treated as a new item.
 const TRANSITION_STOPS: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "transitions",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "objective", "budget", "transitions",
     "pub", "abstract", "readable", "contract", "component", "use", "end", "satisfies",
 ];
 
@@ -35,7 +35,7 @@ fn is_starter(s: &str) -> bool {
 /// Stops for reading a type: the item starters plus `where`, which begins a refinement clause.
 const TYPE_STOPS: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "objective", "budget", "terminal",
     "transitions", "pub", "abstract", "readable", "contract", "component", "use", "end", "satisfies", "where",
 ];
 
@@ -360,6 +360,22 @@ impl<'s> Parser<'s> {
                 it.body = self.read_raw(TRANSITION_STOPS, false);
                 it
             }
+            // `objective <goal> within <bound> [measure <obs> decreasing] [under <env>]` and
+            // `budget <metric> <cmp> <thr> over <window>`. Body captured whole for now (the inner
+            // `within`/`measure`/`under`/`over` clauses are not item starters, so they ride along);
+            // structuring and checking the clauses is a later increment. PROVISIONAL names.
+            Some("objective") => {
+                self.advance();
+                let mut it = Item::new(ItemKind::Objective, start);
+                it.body = self.read_raw(ITEM_STARTERS, false);
+                it
+            }
+            Some("budget") => {
+                self.advance();
+                let mut it = Item::new(ItemKind::Budget, start);
+                it.body = self.read_raw(ITEM_STARTERS, false);
+                it
+            }
             Some(role) if role_kind(role).is_some() => {
                 let kind = role_kind(role).unwrap();
                 self.advance();
@@ -527,21 +543,21 @@ impl<'s> Parser<'s> {
 
 const ITEM_STARTERS_PLUS_ENSURES: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "objective", "budget", "terminal",
     "pub", "abstract", "readable", "contract", "component", "use", "end",
     "satisfies", "ensures",
 ];
 
 const ITEM_STARTERS_PLUS_CLAUSES: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "objective", "budget", "terminal",
     "pub", "abstract", "readable", "contract", "component", "use", "end",
     "satisfies", "ensures", "requires",
 ];
 
 const ITEM_STARTERS_PLUS_BY: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "objective", "budget", "terminal",
     "pub", "abstract", "readable", "contract", "component", "use", "end",
     "satisfies", "by",
 ];

@@ -281,6 +281,37 @@ pub(crate) fn fault_restatement(module: &Module, src: &str) -> Vec<Diagnostic> {
     out
 }
 
+/// Ceiling-without-floor (the anti-vacuity check). A component that DOES something (has actions) and
+/// states what must NOT happen (invariants or faults) but never states what it must ACHIEVE (an
+/// objective, a budget, or a producibility requirement) is satisfiable by an implementation that does
+/// nothing: safety is a ceiling, and "nothing happens" honours every safety property. Warn, so the
+/// author states the floor. Generalises corpus E28 (naming the missing progress measure). Warning-only,
+/// never a gate.
+pub(crate) fn ceiling_without_floor(module: &Module) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        if d.kind != crate::ast::DeclKind::Component {
+            continue; // a contract states promises, not an implementable behaviour
+        }
+        let has = |k: ItemKind| d.items.iter().any(|it| it.kind == k);
+        let acts = has(ItemKind::Action);
+        let ceiling = has(ItemKind::Invariant) || has(ItemKind::Fault);
+        let floor = has(ItemKind::Objective)
+            || has(ItemKind::Budget)
+            || has(ItemKind::Requirement);
+        if acts && ceiling && !floor {
+            out.push(Diagnostic::warning(
+                d.span,
+                format!(
+                    "component `{}` states only what must not happen (invariants/faults) and never what it must achieve — it is satisfiable by an implementation that does nothing. State an `objective` (what it must bring about, and by when).",
+                    d.name
+                ),
+            ));
+        }
+    }
+    out
+}
+
 /// As [`analyse`], but with definitions resolved from other modules via `use` (given bodies today).
 /// The CLI resolves the import graph and passes them; single-file callers use [`analyse`].
 pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> ParseResult {
@@ -319,6 +350,7 @@ pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> Pa
     r.diagnostics.append(&mut refinement(&r.module, source, imports));
     r.diagnostics.append(&mut rely_discharge(&r.module, source, imports));
     r.diagnostics.append(&mut fault_restatement(&r.module, source));
+    r.diagnostics.append(&mut ceiling_without_floor(&r.module));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
     // "jointly satisfiable" while the (stronger) arithmetic tier reports it CONTRADICTORY or
     // VACUOUSLY. That dual message is misleading and the elicit gate reads it. The arithmetic
@@ -3027,6 +3059,28 @@ mod tests {
         // fault `bad` = a ∧ ¬c is NOT the complement of invariant `good` = a ⟹ b.
         let src = format!("{HDR}  invariant good means a(t) implies b(t)\n  fault bad means a(t) and not c(t)\nend\n");
         assert!(!any(&src, "restates invariant"), "unexpected restatement warning: {:?}", msgs(&src));
+    }
+
+    #[test]
+    fn objective_and_budget_parse() {
+        let obj = format!("{HDR}  action act\n    ensures a(t)\n  objective a(t) within deadline\n    measure b(t) decreasing\nend\n");
+        assert!(!any(&obj, "expected"), "objective should parse cleanly: {:?}", msgs(&obj));
+        let bud = "-- allium: 4\ncomponent Api\n  observable state responded : bool\n  budget latency p95 <= 100ms over 1d\nend\n";
+        assert!(!any(bud, "expected"), "budget should parse cleanly: {:?}", msgs(bud));
+    }
+
+    #[test]
+    fn ceiling_without_floor_is_flagged() {
+        // A component that acts and constrains but states no objective is vacuously satisfiable.
+        let src = format!("{HDR}  invariant safe means a(t) implies b(t)\n  action act\n    ensures a(t)\nend\n");
+        assert!(any(&src, "does nothing"), "expected anti-vacuity warning, got: {:?}", msgs(&src));
+    }
+
+    #[test]
+    fn an_objective_supplies_the_floor() {
+        // The same component with an objective is no longer flagged.
+        let src = format!("{HDR}  invariant safe means a(t) implies b(t)\n  action act\n    ensures a(t)\n  objective a(t) within deadline\nend\n");
+        assert!(!any(&src, "does nothing"), "objective should suppress the warning: {:?}", msgs(&src));
     }
 
     #[test]

@@ -69,6 +69,14 @@ pub enum ItemKind {
     /// idiom). Captured as a whole so it is not silently shredded into bogus items; not yet expanded to
     /// guarded actions (that needs a synthesised-predicate body mechanism), so a pass warns it is inert.
     Transitions,
+    /// `objective <goal> within <bound> [measure <obs> decreasing] [under <env>]` — a bounded liveness
+    /// obligation (the anti-vacuity FLOOR: what the system must ACHIEVE, dual to an invariant's ceiling).
+    /// PROVISIONAL name. Body captured raw for now; deeper checking (bound-as-safety, measure
+    /// well-foundedness) is a later increment. Its presence is what the ceiling-without-floor check reads.
+    Objective,
+    /// `budget <metric> <cmp> <threshold> over <window>` — a statistical/SLA obligation (latency
+    /// percentile, error rate) over a cohort window, monitored-never-proved. PROVISIONAL name. Body raw.
+    Budget,
 }
 
 #[derive(Debug, Clone, Serialize)]
