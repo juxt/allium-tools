@@ -390,8 +390,10 @@ fn run_multi_file(
             let result = match command {
                 "check" => allium_v4::check(source),
                 "analyse" => {
-                    let imports = resolve_v4_imports(path, source, &by_path);
-                    allium_v4::analyse_with_imports(source, &imports)
+                    let (imports, mut fetch_diags) = resolve_v4_imports(path, source, &by_path);
+                    let mut r = allium_v4::analyse_with_imports(source, &imports);
+                    r.diagnostics.append(&mut fetch_diags);
+                    r
                 }
                 _ => allium_v4::parse(source),
             };
@@ -798,8 +800,9 @@ fn resolve_v4_imports(
     path: &std::path::Path,
     source: &str,
     by_path: &std::collections::HashMap<PathBuf, String>,
-) -> allium_v4::arith::Imports {
+) -> (allium_v4::arith::Imports, Vec<allium_v4::diagnostic::Diagnostic>) {
     let mut imports = allium_v4::arith::Imports::default();
+    let mut diags: Vec<allium_v4::diagnostic::Diagnostic> = Vec::new();
     let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     for d in &allium_v4::parse(source).module.decls {
         if d.kind != allium_v4::ast::DeclKind::Import {
@@ -829,7 +832,12 @@ fn resolve_v4_imports(
                 .join("cache");
             match libfetch::resolve(&coord, &cache_root) {
                 Ok(src) => take(&src),
-                Err(e) => eprintln!("allium: could not resolve `{target}`: {e}"),
+                // A named remote dependency that cannot be fetched is a hard error, not a silent
+                // skip: a spec that `use`s a library it cannot resolve must not report a green check.
+                Err(e) => diags.push(allium_v4::diagnostic::Diagnostic::error(
+                    d.span,
+                    format!("could not resolve library spec `{target}`: {e}"),
+                )),
             }
             continue;
         }
@@ -839,7 +847,7 @@ fn resolve_v4_imports(
             }
         }
     }
-    imports
+    (imports, diags)
 }
 
 fn cmd_analyse(args: &[String]) -> ExitCode {

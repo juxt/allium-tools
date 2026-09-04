@@ -202,4 +202,11 @@ mod tests {
         assert!(parse_git_coord("./kafka.allium").is_none());
         assert!(parse_git_coord("kafka.allium").is_none());
     }
+
+    #[test]
+    fn resolving_an_unreachable_repo_is_an_error() {
+        let coord = parse_git_coord("git+file:///no/such/repo@v1#c.allium").unwrap();
+        let cache = std::env::temp_dir().join("allium_libfetch_test_missing");
+        assert!(resolve(&coord, &cache).is_err(), "an unreachable repo must fail, not resolve silently");
+    }
 }
