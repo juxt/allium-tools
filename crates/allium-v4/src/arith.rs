@@ -298,14 +298,14 @@ pub fn objective_discharge(module: &Module, src: &str, imports: &Imports) -> Vec
             }
         }
         // Objectives whose measure is a bare INTEGER (`Number`) state — the only airtight case.
-        let objs: Vec<(String, String)> = d
+        let objs: Vec<(String, Option<String>, String)> = d
             .items
             .iter()
             .filter(|it| it.kind == ItemKind::Objective)
             .filter_map(|it| {
                 let p = crate::analyse::parse_objective_body(it.body?.slice(src));
                 let m = p.measure?;
-                (st.get(&m).map(|t| t == "Number").unwrap_or(false)).then_some((p.goal, m))
+                (st.get(&m).map(|t| t == "Number").unwrap_or(false)).then_some((p.goal, p.bound, m))
             })
             .collect();
         if objs.is_empty() {
@@ -365,7 +365,7 @@ pub fn objective_discharge(module: &Module, src: &str, imports: &Imports) -> Vec
             }
             adata.push(ad);
         }
-        for (goal, m) in &objs {
+        for (goal, bound, m) in &objs {
             if action_items.is_empty() {
                 continue; // nothing changes — no progress to certify
             }
@@ -400,6 +400,31 @@ pub fn objective_discharge(module: &Module, src: &str, imports: &Imports) -> Vec
             });
             if all_strict {
                 let g = if goal.is_empty() { "<goal>" } else { goal };
+                // Bound verdict (N6/J50). The variant proves the goal in at most `m` steps. If the stated
+                // `within <bound>` is a numeric STEP BUDGET D and the invariants entail `m ≤ D`, that step
+                // count is provably within budget — a quantitative bound. A named TIME deadline
+                // (end_of_day, a next-business-day cutoff) is a MONITORED obligation, watched at runtime and
+                // never proved from step durations (N1/N6), so it is reported as such, not proved.
+                let bound_clause = match bound {
+                    None => String::new(),
+                    Some(b) => {
+                        let be = parse_predicate(b).0;
+                        let numeric_budget = matches!(be, Expr::Int(_))
+                            || matches!(&be, Expr::Name(n) if st.get(n).map(|t| t == "Number").unwrap_or(false));
+                        if numeric_budget {
+                            let le = Expr::Binary { op: BinOp::Le, lhs: Box::new(Expr::Name(m.clone())), rhs: Box::new(be) };
+                            let met = entails_guarded_linear(&inv_exprs, &le, &st)
+                                .or_else(|| entails_linear(&inv_exprs, &le, &st));
+                            if matches!(met, Some(true)) {
+                                format!(" The stated budget `{b}` is met: the invariants entail `{m}` ≤ `{b}`, so the goal is reached within `{b}` steps.")
+                            } else {
+                                format!(" The stated step budget `{b}` is NOT proven — `{m}` ≤ `{b}` does not follow from the invariants, so the goal may need more than `{b}` steps.")
+                            }
+                        } else {
+                            format!(" The `within {b}` deadline is a MONITORED obligation (watched and counted at runtime, not proved from step durations — N6/J50).")
+                        }
+                    }
+                };
                 // Goal-connection: does the floor state satisfy the goal? For integer m ≥ 0, that is
                 // `m = 0 ⟹ G`, equivalently `¬G ⟹ m ≥ 1` — a boolean-guarded arithmetic bound the
                 // invariants may entail. Only attempted for a goal with no unbound entity variable
@@ -421,11 +446,11 @@ pub fn objective_discharge(module: &Module, src: &str, imports: &Imports) -> Vec
                 };
                 if connected {
                     out.push(Diagnostic::warning(d.span, format!(
-                        "objective `{g}`: measure `{m}` is a well-founded variant (integer, bounded below by 0, strictly decreasing on every action) AND the floor state satisfies the goal (`{m}` = 0 ⟹ `{g}`), so the objective is REACHED in at most `{m}` steps — DISCHARGED, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6).",
+                        "objective `{g}`: measure `{m}` is a well-founded variant (integer, bounded below by 0, strictly decreasing on every action) AND the floor state satisfies the goal (`{m}` = 0 ⟹ `{g}`), so the objective is REACHED in at most `{m}` steps — DISCHARGED, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6).{bound_clause}",
                     )));
                 } else {
                     out.push(Diagnostic::warning(d.span, format!(
-                        "objective `{g}`: measure `{m}` is a well-founded variant (integer, bounded below by 0, strictly decreasing on every action) — the component TERMINATES, reaching `{m}`'s floor in at most `{m}` steps, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6). Remaining for full 'goal reached': prove the floor state satisfies `{g}` (state `not {g} implies {m} >= 1`).",
+                        "objective `{g}`: measure `{m}` is a well-founded variant (integer, bounded below by 0, strictly decreasing on every action) — the component TERMINATES, reaching `{m}`'s floor in at most `{m}` steps, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6). Remaining for full 'goal reached': prove the floor state satisfies `{g}` (state `not {g} implies {m} >= 1`).{bound_clause}",
                     )));
                 }
             }
@@ -3127,6 +3152,23 @@ mod tests {
         // A monotone measure (only `process`) produces no finding at all.
         let good = "-- allium: 4\ncomponent Q\n  entity R\n  observable state pending : Number\n  observable state drained(R) : bool\n  invariant nn means pending >= 0\n  action process\n    requires pending >= 1\n    ensures pending = old(pending) - 1\n  objective drained(r) within eod\n    measure pending decreasing\nend\n";
         assert!(prog(good).is_empty(), "monotone measure should be silent: {:#?}", prog(good));
+    }
+
+    #[test]
+    fn objective_discharge_bound_verdict() {
+        let disch = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::objective_discharge(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
+        };
+        let spec = |bound: &str, cap: &str| format!(
+            "-- allium: 4\ncomponent Q\n  entity R\n  observable state pending : Number\n  observable state done : bool\n  invariant nn means pending >= 0\n{cap}  invariant conn means done or pending >= 1\n  action process\n    requires pending >= 1\n    ensures pending = old(pending) - 1\n  objective done within {bound}\n    measure pending decreasing\nend\n"
+        );
+        // A named time deadline is reported as MONITORED, never proved from steps (N6/J50).
+        assert!(disch(&spec("eod", "")).iter().any(|m| m.contains("MONITORED")), "{:#?}", disch(&spec("eod", "")));
+        // A numeric step budget with a proven cap (pending ≤ 100) is met.
+        assert!(disch(&spec("100", "  invariant cap means pending <= 100\n")).iter().any(|m| m.contains("is met")), "{:#?}", disch(&spec("100", "  invariant cap means pending <= 100\n")));
+        // A numeric budget with no cap is honestly reported unproven.
+        assert!(disch(&spec("100", "")).iter().any(|m| m.contains("NOT proven")), "{:#?}", disch(&spec("100", "")));
     }
 
     #[test]
