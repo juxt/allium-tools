@@ -315,11 +315,12 @@ pub fn objective_discharge(module: &Module, src: &str, imports: &Imports) -> Vec
         let state_names: HashSet<String> =
             d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
         let mut all_pre: Vec<Con> = Vec::new();
+        let mut inv_exprs: Vec<Expr> = Vec::new(); // raw invariants, for the mixed goal-connection query
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
             let Some(b) = it.body else { continue };
-            let Some(inv) = arith_reduce(&crate::monitor::inline_defs(&parse_predicate(b.slice(src)).0, &defs)) else {
-                continue;
-            };
+            let raw = crate::monitor::inline_defs(&parse_predicate(b.slice(src)).0, &defs);
+            inv_exprs.push(raw.clone());
+            let Some(inv) = arith_reduce(&raw) else { continue };
             let (cons, notes) = ground(&inv, &st);
             if !notes {
                 all_pre.extend(cons);
@@ -399,9 +400,34 @@ pub fn objective_discharge(module: &Module, src: &str, imports: &Imports) -> Vec
             });
             if all_strict {
                 let g = if goal.is_empty() { "<goal>" } else { goal };
-                out.push(Diagnostic::warning(d.span, format!(
-                    "objective `{g}`: measure `{m}` is a well-founded variant (integer, bounded below by 0, strictly decreasing on every action) — the component TERMINATES, reaching `{m}`'s floor in at most `{m}` steps, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6). Remaining for full 'goal reached': the floor state satisfies `{g}`.",
-                )));
+                // Goal-connection: does the floor state satisfy the goal? For integer m ≥ 0, that is
+                // `m = 0 ⟹ G`, equivalently `¬G ⟹ m ≥ 1` — a boolean-guarded arithmetic bound the
+                // invariants may entail. Only attempted for a goal with no unbound entity variable
+                // (conservative); proven ⇒ upgrade "terminates" to "goal reached", else stay honest.
+                let goal_expr = parse_predicate(goal).0;
+                let mut gv = HashSet::new();
+                crate::analyse::collect_entity_vars(&goal_expr, &mut gv);
+                let connected = gv.is_empty() && {
+                    let conn = Expr::Binary {
+                        op: BinOp::Implies,
+                        lhs: Box::new(Expr::Unary { op: UnOp::Not, e: Box::new(goal_expr) }),
+                        rhs: Box::new(Expr::Binary {
+                            op: BinOp::Ge,
+                            lhs: Box::new(Expr::Name(m.clone())),
+                            rhs: Box::new(Expr::Int(1)),
+                        }),
+                    };
+                    matches!(entails_guarded_linear(&inv_exprs, &conn, &st), Some(true))
+                };
+                if connected {
+                    out.push(Diagnostic::warning(d.span, format!(
+                        "objective `{g}`: measure `{m}` is a well-founded variant (integer, bounded below by 0, strictly decreasing on every action) AND the floor state satisfies the goal (`{m}` = 0 ⟹ `{g}`), so the objective is REACHED in at most `{m}` steps — DISCHARGED, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6).",
+                    )));
+                } else {
+                    out.push(Diagnostic::warning(d.span, format!(
+                        "objective `{g}`: measure `{m}` is a well-founded variant (integer, bounded below by 0, strictly decreasing on every action) — the component TERMINATES, reaching `{m}`'s floor in at most `{m}` steps, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6). Remaining for full 'goal reached': prove the floor state satisfies `{g}` (state `not {g} implies {m} >= 1`).",
+                    )));
+                }
             }
         }
     }
@@ -3101,6 +3127,26 @@ mod tests {
         // A monotone measure (only `process`) produces no finding at all.
         let good = "-- allium: 4\ncomponent Q\n  entity R\n  observable state pending : Number\n  observable state drained(R) : bool\n  invariant nn means pending >= 0\n  action process\n    requires pending >= 1\n    ensures pending = old(pending) - 1\n  objective drained(r) within eod\n    measure pending decreasing\nend\n";
         assert!(prog(good).is_empty(), "monotone measure should be silent: {:#?}", prog(good));
+    }
+
+    #[test]
+    fn objective_discharge_goal_connection() {
+        let disch = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::objective_discharge(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
+        };
+        let spec = |conn: &str| format!(
+            "-- allium: 4\ncomponent Q\n  entity R\n  observable state pending : Number\n  observable state all_drained : bool\n  invariant nn means pending >= 0\n{conn}  action process\n    requires pending >= 1\n    ensures pending = old(pending) - 1\n  objective all_drained within eod\n    measure pending decreasing\nend\n"
+        );
+        // A genuine connection (`¬goal ⇒ pending ≥ 1`) upgrades TERMINATES to goal REACHED.
+        let good = spec("  invariant conn means not all_drained implies pending >= 1\n");
+        assert!(disch(&good).iter().any(|m| m.contains("objective is REACHED")), "{:#?}", disch(&good));
+        // No connection: certify termination only, never 'reached'.
+        let none = spec("");
+        assert!(disch(&none).iter().any(|m| m.contains("TERMINATES")) && !disch(&none).iter().any(|m| m.contains("REACHED")), "{:#?}", disch(&none));
+        // A useless connection (pending ≥ 0, always true) must NOT upgrade — soundness.
+        let weak = spec("  invariant weak means not all_drained implies pending >= 0\n");
+        assert!(!disch(&weak).iter().any(|m| m.contains("REACHED")), "useless connection wrongly upgraded: {:#?}", disch(&weak));
     }
 
     #[test]
