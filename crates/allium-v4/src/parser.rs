@@ -162,8 +162,9 @@ impl<'s> Parser<'s> {
         Decl { span: start.merge(end), kind, name, alias: None, params, satisfies, items }
     }
 
-    /// `use <target> as <alias>`. Target is a bare name or a string path. A banked
-    /// import (CONSTRUCTS.md:196); v4 cross-module resolution semantics are parked.
+    /// `use <target> as <alias>`. Target is a bare name or a string path. The alias is MANDATORY:
+    /// every imported name is referenced qualified as `alias/Name`, so a reader can always see which
+    /// import a name came from (the namespaced-imports decision, 2026-09-04). Clarity over brevity.
     fn parse_use(&mut self) -> Decl {
         let start = self.span();
         self.eat_ident("use");
@@ -191,6 +192,11 @@ impl<'s> Parser<'s> {
             } else {
                 self.error(self.span(), "expected an alias name after `as`");
             }
+        } else {
+            self.error(
+                start,
+                "a `use` import requires an alias: write `use \"…\" as <name>`, then reference imported names qualified as `<name>/Thing`",
+            );
         }
         let end = self.tokens[self.pos.saturating_sub(1)].span;
         Decl {

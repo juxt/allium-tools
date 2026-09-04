@@ -806,6 +806,20 @@ fn resolve_v4_imports(
             continue;
         }
         let target = d.name.trim().trim_matches('"');
+        // Every imported CONTRACT is keyed under the import's mandatory alias (`alias/Name`) so a
+        // reference always names its origin. Givens stay bare: they are ambient vocabulary the
+        // checker inlines to interpret a contract's promises, not names an author writes.
+        let alias = d.alias.clone();
+        let mut take = |src: &str| {
+            imports.givens.extend(allium_v4::arith::extract_givens(src));
+            let contracts = allium_v4::analyse::extract_contracts(src);
+            match &alias {
+                Some(a) => imports
+                    .contracts
+                    .extend(contracts.into_iter().map(|(k, v)| (format!("{a}/{k}"), v))),
+                None => imports.contracts.extend(contracts), // parser already flagged the missing alias
+            }
+        };
         // A git coordinate is fetched once into `.allium/cache` in the working directory and read
         // from there; a plain target resolves against the files passed on the command line.
         if let Some(coord) = libfetch::parse_git_coord(target) {
@@ -814,18 +828,14 @@ fn resolve_v4_imports(
                 .join(".allium")
                 .join("cache");
             match libfetch::resolve(&coord, &cache_root) {
-                Ok(src) => {
-                    imports.givens.extend(allium_v4::arith::extract_givens(&src));
-                    imports.contracts.extend(allium_v4::analyse::extract_contracts(&src));
-                }
+                Ok(src) => take(&src),
                 Err(e) => eprintln!("allium: could not resolve `{target}`: {e}"),
             }
             continue;
         }
         if let Ok(rp) = std::fs::canonicalize(dir.join(target)) {
             if let Some(src) = by_path.get(&rp) {
-                imports.givens.extend(allium_v4::arith::extract_givens(src));
-                imports.contracts.extend(allium_v4::analyse::extract_contracts(src));
+                take(src);
             }
         }
     }

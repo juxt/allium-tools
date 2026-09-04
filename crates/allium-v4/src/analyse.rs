@@ -1264,7 +1264,18 @@ pub fn refinement(module: &Module, src: &str, imports: &crate::arith::Imports) -
             let (promises, c_bool, _c_st) = match promises_of(cname) {
                 Some(x) => x,
                 None => {
-                    out.push(Diagnostic::warning(d.span, format!("{kw} `{}` claims to satisfy `{}`, but no such contract is declared.", d.name, cname)));
+                    // Enforce namespaced references: an imported contract must be named `alias/Name`.
+                    // If a bare `Name` matches an imported contract, point at the qualified form
+                    // rather than reporting it simply undeclared.
+                    let suggestion = imports
+                        .contracts
+                        .keys()
+                        .find(|k| k.rsplit('/').next() == Some(cname.as_str()));
+                    let msg = match suggestion {
+                        Some(q) => format!("{kw} `{}` references imported contract `{cname}` unqualified; name it by its import as `{q}`.", d.name),
+                        None => format!("{kw} `{}` claims to satisfy `{}`, but no such contract is declared.", d.name, cname),
+                    };
+                    out.push(Diagnostic::warning(d.span, msg));
                     continue;
                 }
             };
@@ -3016,6 +3027,43 @@ mod tests {
         // fault `bad` = a ∧ ¬c is NOT the complement of invariant `good` = a ⟹ b.
         let src = format!("{HDR}  invariant good means a(t) implies b(t)\n  fault bad means a(t) and not c(t)\nend\n");
         assert!(!any(&src, "restates invariant"), "unexpected restatement warning: {:?}", msgs(&src));
+    }
+
+    #[test]
+    fn use_without_alias_is_an_error() {
+        // Namespaced-imports decision: every `use` requires an alias.
+        let src = "-- allium: 4\nuse \"lib.allium\"\ncomponent C\n  entity E\n  observable state a(E) : bool\nend\n";
+        assert!(any(src, "requires an alias"), "expected mandatory-alias error, got: {:?}", msgs(src));
+    }
+
+    const KLIB: &str = "-- allium: 4\ncontract KafkaAtLeastOnce\n  entity Event\n  observable state applied(Event) : bool\n  observable state deduped(Event) : bool\n  guarantee apply_needs_dedup means applied(e) implies deduped(e)\nend\n";
+
+    fn kafka_imports() -> crate::arith::Imports {
+        // Mirror the CLI resolver: imported contracts keyed under the alias.
+        let mut imports = crate::arith::Imports::default();
+        imports
+            .contracts
+            .extend(super::extract_contracts(KLIB).into_iter().map(|(k, v)| (format!("kafka/{k}"), v)));
+        imports
+    }
+
+    #[test]
+    fn qualified_import_reference_resolves() {
+        let src = "-- allium: 4\ncomponent W satisfies (k : kafka/KafkaAtLeastOnce)\n  entity Event\n  observable state applied(Event) : bool\n  observable state deduped(Event) : bool\n  invariant apply_needs_dedup means applied(e) implies deduped(e)\nend\n";
+        let m = crate::parse(src).module;
+        let ds: Vec<String> = super::refinement(&m, src, &kafka_imports()).into_iter().map(|d| d.message).collect();
+        assert!(ds.iter().any(|m| m.contains("SATISFIES contract `kafka/KafkaAtLeastOnce`")), "{ds:?}");
+    }
+
+    #[test]
+    fn unqualified_import_reference_is_flagged_with_suggestion() {
+        let src = "-- allium: 4\ncomponent W satisfies (k : KafkaAtLeastOnce)\n  entity Event\n  observable state applied(Event) : bool\n  observable state deduped(Event) : bool\n  invariant apply_needs_dedup means applied(e) implies deduped(e)\nend\n";
+        let m = crate::parse(src).module;
+        let ds: Vec<String> = super::refinement(&m, src, &kafka_imports()).into_iter().map(|d| d.message).collect();
+        assert!(
+            ds.iter().any(|m| m.contains("unqualified") && m.contains("kafka/KafkaAtLeastOnce")),
+            "expected an unqualified-reference suggestion, got: {ds:?}"
+        );
     }
 
     #[test]
