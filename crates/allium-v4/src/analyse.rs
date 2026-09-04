@@ -456,6 +456,7 @@ pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> Pa
     r.diagnostics.append(&mut ceiling_without_floor(&r.module));
     r.diagnostics.append(&mut objective_report(&r.module, source));
     r.diagnostics.append(&mut crate::arith::objective_progress(&r.module, source, imports));
+    r.diagnostics.append(&mut crate::arith::objective_discharge(&r.module, source, imports));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
     // "jointly satisfiable" while the (stronger) arithmetic tier reports it CONTRADICTORY or
     // VACUOUSLY. That dual message is misleading and the elicit gate reads it. The arithmetic
