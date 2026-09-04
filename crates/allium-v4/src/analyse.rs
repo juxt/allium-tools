@@ -312,6 +312,109 @@ pub(crate) fn ceiling_without_floor(module: &Module) -> Vec<Diagnostic> {
     out
 }
 
+/// The clauses of an `objective <goal> within <bound> [measure <obs> decreasing] [under <env>]`.
+struct ObjectiveParts {
+    goal: String,
+    bound: Option<String>,
+    measure: Option<String>,
+    _under: Option<String>,
+}
+
+/// Split an objective's raw body into its clauses. Report-only, so loose parsing just yields a
+/// slightly-off note, never a wrong verdict.
+fn parse_objective_body(body: &str) -> ObjectiveParts {
+    let b = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (goal, rest) = match b.split_once(" within ") {
+        Some((g, r)) => (g.trim().to_string(), Some(r.to_string())),
+        None => (b.trim().to_string(), None),
+    };
+    let mut bound = None;
+    let mut measure = None;
+    let mut under = None;
+    if let Some(rest) = rest {
+        // after the bound come optional `measure … decreasing` and `under …`, in that order.
+        let (before_measure, after_measure) = match rest.split_once(" measure ") {
+            Some((a, b)) => (a.to_string(), Some(b.to_string())),
+            None => (rest.clone(), None),
+        };
+        match after_measure {
+            Some(m) => {
+                bound = Some(before_measure.trim().to_string());
+                let (meas, u) = match m.split_once(" under ") {
+                    Some((meas, u)) => (meas.to_string(), Some(u.trim().to_string())),
+                    None => (m, None),
+                };
+                measure = Some(meas.trim().trim_end_matches("decreasing").trim().to_string());
+                under = u;
+            }
+            None => match before_measure.split_once(" under ") {
+                Some((bnd, u)) => {
+                    bound = Some(bnd.trim().to_string());
+                    under = Some(u.trim().to_string());
+                }
+                None => bound = Some(before_measure.trim().to_string()),
+            },
+        }
+    }
+    ObjectiveParts { goal, bound, measure, _under: under }
+}
+
+/// Report each objective's DISPOSITION honestly, and flag a malformed one — the don't-over-claim rule
+/// applied to objectives. The checker parses objectives but does not yet PROVE them, so this pass makes
+/// that explicit rather than letting an objective pass silently unexamined:
+/// - no `within` bound → the objective is unbounded, which is neither provable nor monitorable (N6);
+/// - a `measure` naming a non-numeric / undeclared observable → malformed;
+/// - otherwise: state whether it is measure-dischargeable (design-time) or monitored, and that neither
+///   is verified yet. `budget` is always monitored-statistical.
+pub(crate) fn objective_report(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let numeric_obs: HashSet<String> = d
+            .items
+            .iter()
+            .filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given))
+            .filter(|it| {
+                it.body
+                    .map(|sp| crate::arith::numeric(sp.slice(src).trim()))
+                    .unwrap_or(false)
+            })
+            .filter_map(|it| it.name.clone())
+            .collect();
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Objective) {
+            let Some(body) = it.body.map(|sp| sp.slice(src).to_string()) else { continue };
+            let p = parse_objective_body(&body);
+            let g = if p.goal.is_empty() { "<goal>".to_string() } else { p.goal.clone() };
+            if p.bound.is_none() {
+                out.push(Diagnostic::warning(it.span, format!(
+                    "objective `{g}` has no `within <bound>` — an unbounded objective is neither provable nor monitorable (N6); give it a bound, or state it design-time-only and count it."
+                )));
+                continue;
+            }
+            if let Some(m) = &p.measure {
+                let head = m.split(['(', ' ']).next().unwrap_or(m);
+                if !numeric_obs.contains(head) {
+                    out.push(Diagnostic::warning(it.span, format!(
+                        "objective `{g}`: measure `{m}` is not a declared numeric observable, so it cannot witness progress."
+                    )));
+                    continue;
+                }
+                out.push(Diagnostic::warning(it.span, format!(
+                    "objective `{g}` — dischargeable at design time via measure `{m}` decreasing; parsed, NOT YET verified by the checker."
+                )));
+            } else {
+                out.push(Diagnostic::warning(it.span, format!(
+                    "objective `{g}` — MONITORED (no measure supplied): the checker does not prove it, it is watched on a trace; parsed, not verified."
+                )));
+            }
+        }
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Budget) {
+            out.push(Diagnostic::warning(it.span,
+                "budget is a statistical obligation over a cohort window — monitored, never proved; parsed, not verified.".to_string()));
+        }
+    }
+    out
+}
+
 /// As [`analyse`], but with definitions resolved from other modules via `use` (given bodies today).
 /// The CLI resolves the import graph and passes them; single-file callers use [`analyse`].
 pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> ParseResult {
@@ -351,6 +454,7 @@ pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> Pa
     r.diagnostics.append(&mut rely_discharge(&r.module, source, imports));
     r.diagnostics.append(&mut fault_restatement(&r.module, source));
     r.diagnostics.append(&mut ceiling_without_floor(&r.module));
+    r.diagnostics.append(&mut objective_report(&r.module, source));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
     // "jointly satisfiable" while the (stronger) arithmetic tier reports it CONTRADICTORY or
     // VACUOUSLY. That dual message is misleading and the elicit gate reads it. The arithmetic
@@ -3074,6 +3178,22 @@ mod tests {
         // A component that acts and constrains but states no objective is vacuously satisfiable.
         let src = format!("{HDR}  invariant safe means a(t) implies b(t)\n  action act\n    ensures a(t)\nend\n");
         assert!(any(&src, "does nothing"), "expected anti-vacuity warning, got: {:?}", msgs(&src));
+    }
+
+    #[test]
+    fn objective_disposition_is_reported_honestly() {
+        // measure present -> dischargeable, not-yet-verified
+        let m = format!("{HDR}  observable state n : Number\n  action act\n    ensures a(t)\n  objective a(t) within d\n    measure n decreasing\nend\n");
+        assert!(any(&m, "dischargeable at design time") && any(&m, "NOT YET verified"), "{:?}", msgs(&m));
+        // no measure -> monitored
+        let mon = format!("{HDR}  action act\n    ensures a(t)\n  objective a(t) within d\nend\n");
+        assert!(any(&mon, "MONITORED"), "{:?}", msgs(&mon));
+        // no bound -> malformed
+        let nb = format!("{HDR}  action act\n    ensures a(t)\n  objective a(t)\nend\n");
+        assert!(any(&nb, "has no `within"), "{:?}", msgs(&nb));
+        // measure not numeric -> malformed
+        let bad = format!("{HDR}  action act\n    ensures a(t)\n  objective a(t) within d\n    measure b(t) decreasing\nend\n");
+        assert!(any(&bad, "not a declared numeric observable"), "{:?}", msgs(&bad));
     }
 
     #[test]
