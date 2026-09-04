@@ -144,6 +144,133 @@ fn rate_typed_products(e: &Expr, st: &HashMap<String, String>, out: &mut HashSet
 /// violating the invariant — a value-safety bug the boolean check cannot see (e.g. `withdraw` breaking
 /// `balance >= 0`). SOUND: the whole invariant, guard and effect must lower to linear constraints with no
 /// skipped (nonlinear) term; any skip abandons the pair rather than risk a false alarm.
+/// Measure-monotonicity check for objectives — a SOUND slice of progress verification. A claimed
+/// progress `measure M decreasing` must never be INCREASED by an action, or it does not witness
+/// progress toward the goal (corpus E28: "queue position is not monotone — new arrivals displace
+/// waiting requests"). This pass ONLY reports a measure that CAN increase; it never certifies that a
+/// measure proves progress (the positive direction — strict decrease + well-foundedness ⇒ termination —
+/// is deferred). So it cannot manufacture a false discharge: every finding is a genuine counter-witness
+/// (a reachable transition that raises the measure), and any construct it cannot lower to linear
+/// arithmetic is skipped, never guessed.
+pub fn objective_progress(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let mut st: HashMap<String, String> = HashMap::new();
+        for it in &d.items {
+            if matches!(it.kind, ItemKind::State | ItemKind::Given) {
+                if let (Some(n), Some(b)) = (&it.name, it.body) {
+                    st.insert(n.clone(), b.slice(src).trim().to_string());
+                }
+            }
+        }
+        // Measures claimed by objectives, restricted to a bare NUMERIC state. A keyed or expression
+        // measure (E27 lexicographic tuple) is skipped — conservative; the disposition note already
+        // says such an objective is not yet verified.
+        let measures: Vec<String> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Objective)
+            .filter_map(|it| it.body.and_then(|b| crate::analyse::parse_objective_body(b.slice(src)).measure))
+            .filter(|m| st.get(m).map(|t| numeric(t)).unwrap_or(false))
+            .collect();
+        if measures.is_empty() {
+            continue;
+        }
+        let defs = component_defs(d, src, imports);
+        let state_names: HashSet<String> =
+            d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
+        // Pre-state context: the grounded linear invariants, so a measure-increase from an UNREACHABLE
+        // pre-state (one an invariant forbids) is not reported. Dropping these would only over-report a
+        // warning, never certify — but including them keeps the finding real.
+        let mut all_pre: Vec<Con> = Vec::new();
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
+            let Some(b) = it.body else { continue };
+            let Some(inv) = arith_reduce(&crate::monitor::inline_defs(&parse_predicate(b.slice(src)).0, &defs)) else {
+                continue;
+            };
+            let (cons, notes) = ground(&inv, &st);
+            if !notes {
+                all_pre.extend(cons);
+            }
+        }
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
+            let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
+            let Some(ensures_raw) = it.ensures_expr(src).map(|e| crate::monitor::inline_defs(&e, &defs)) else {
+                continue;
+            };
+            let guard_raw = it.requires.map(|sp| crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs));
+            let mut ev = HashSet::new();
+            crate::analyse::collect_entity_vars(&ensures_raw, &mut ev);
+            if let Some(g) = &guard_raw {
+                crate::analyse::collect_entity_vars(g, &mut ev);
+            }
+            if ev.len() > 1 {
+                continue; // two-entity action — not this slice
+            }
+            let ensures = crate::analyse::rename_entity(&ensures_raw, &ev);
+            let guard = guard_raw.map(|g| crate::analyse::rename_entity(&g, &ev));
+            let mut modified = HashSet::new();
+            crate::analyse::collect_writes(&ensures, false, &state_names, &mut modified);
+            let modified_numeric: HashSet<String> =
+                modified.iter().filter(|m| st.get(*m).map(|t| numeric(t)).unwrap_or(false)).cloned().collect();
+            if modified_numeric.is_empty() {
+                continue;
+            }
+            let mut st2 = st.clone();
+            for m in &modified_numeric {
+                if let Some(t) = st.get(m).cloned() {
+                    st2.insert(format!("{m}'"), t);
+                }
+            }
+            let effect_expr = crate::analyse::prime(&ensures, &modified_numeric, false);
+            let (effect_cons, effect_notes) = ground(&effect_expr, &st2);
+            if effect_notes || effect_cons.is_empty() {
+                continue;
+            }
+            let guard_cons = match &guard {
+                Some(g) => {
+                    let (c, n) = ground(g, &st2);
+                    if n {
+                        continue; // an unmodelled guard could hide a constraint — skip, don't false-alarm
+                    }
+                    c
+                }
+                None => Vec::new(),
+            };
+            for m in &measures {
+                if !modified_numeric.contains(m) {
+                    continue; // action leaves M framed — it cannot increase it
+                }
+                // VC: can this action raise the measure? all_pre ∧ guard ∧ effect ∧ (M' > M)
+                let inc = Expr::Binary {
+                    op: BinOp::Gt,
+                    lhs: Box::new(Expr::Name(format!("{m}'"))),
+                    rhs: Box::new(Expr::Name(m.clone())),
+                };
+                let (inc_cons, inc_notes) = ground(&inc, &st2);
+                if inc_notes || inc_cons.is_empty() {
+                    continue;
+                }
+                let mut q = all_pre.clone();
+                q.extend(guard_cons.iter().cloned());
+                q.extend(effect_cons.iter().cloned());
+                q.extend(inc_cons);
+                if let Outcome::Sat(wm) = solve(&q) {
+                    out.push(Diagnostic::warning(
+                        it.span,
+                        crate::analyse::pretty(&format!(
+                            "objective measure `{m}` can INCREASE under action `{aname}` in `{}` (e.g. {}) — it does not witness progress toward the goal (a non-monotone measure). Guard the increase, or use a measure that only decreases.",
+                            d.name,
+                            schedule(&wm, &st2)
+                        )),
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn arith_preservation(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for d in &module.decls {
@@ -2821,6 +2948,22 @@ mod tests {
         assert!(any(&egp(&retreat), "`retreat` in `L` can break state-guarded invariant `advances`"), "{:#?}", egp(&retreat));
         let advance = format!("{mhdr2}  action advance\n    requires status(s) = healthy\n    ensures wm(s) = old(wm(s)) + 1\nend\n");
         assert!(!any(&egp(&advance), "can break state-guarded"), "{:#?}", egp(&advance));
+    }
+
+    #[test]
+    fn objective_measure_monotonicity() {
+        let prog = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::objective_progress(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
+        };
+        // A non-monotone measure: `enqueue` raises `pending`, so it does not witness progress.
+        let bad = "-- allium: 4\ncomponent Q\n  entity R\n  observable state pending : Number\n  observable state drained(R) : bool\n  invariant nn means pending >= 0\n  action process\n    requires pending >= 1\n    ensures pending = old(pending) - 1\n  action enqueue\n    ensures pending = old(pending) + 1\n  objective drained(r) within eod\n    measure pending decreasing\nend\n";
+        assert!(any(&prog(bad), "can INCREASE under action `enqueue`"), "{:#?}", prog(bad));
+        // The decreasing action alone is never flagged (no false positive).
+        assert!(!prog(bad).iter().any(|m| m.contains("under action `process`")), "process wrongly flagged: {:#?}", prog(bad));
+        // A monotone measure (only `process`) produces no finding at all.
+        let good = "-- allium: 4\ncomponent Q\n  entity R\n  observable state pending : Number\n  observable state drained(R) : bool\n  invariant nn means pending >= 0\n  action process\n    requires pending >= 1\n    ensures pending = old(pending) - 1\n  objective drained(r) within eod\n    measure pending decreasing\nend\n";
+        assert!(prog(good).is_empty(), "monotone measure should be silent: {:#?}", prog(good));
     }
 
     #[test]

@@ -313,16 +313,16 @@ pub(crate) fn ceiling_without_floor(module: &Module) -> Vec<Diagnostic> {
 }
 
 /// The clauses of an `objective <goal> within <bound> [measure <obs> decreasing] [under <env>]`.
-struct ObjectiveParts {
-    goal: String,
-    bound: Option<String>,
-    measure: Option<String>,
-    _under: Option<String>,
+pub(crate) struct ObjectiveParts {
+    pub goal: String,
+    pub bound: Option<String>,
+    pub measure: Option<String>,
+    pub _under: Option<String>,
 }
 
 /// Split an objective's raw body into its clauses. Report-only, so loose parsing just yields a
 /// slightly-off note, never a wrong verdict.
-fn parse_objective_body(body: &str) -> ObjectiveParts {
+pub(crate) fn parse_objective_body(body: &str) -> ObjectiveParts {
     let b = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let (goal, rest) = match b.split_once(" within ") {
         Some((g, r)) => (g.trim().to_string(), Some(r.to_string())),
@@ -455,6 +455,7 @@ pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> Pa
     r.diagnostics.append(&mut fault_restatement(&r.module, source));
     r.diagnostics.append(&mut ceiling_without_floor(&r.module));
     r.diagnostics.append(&mut objective_report(&r.module, source));
+    r.diagnostics.append(&mut crate::arith::objective_progress(&r.module, source, imports));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
     // "jointly satisfiable" while the (stronger) arithmetic tier reports it CONTRADICTORY or
     // VACUOUSLY. That dual message is misleading and the elicit gate reads it. The arithmetic
