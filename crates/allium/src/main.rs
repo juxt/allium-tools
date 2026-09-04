@@ -1,5 +1,6 @@
 mod domain_model;
 mod libfetch;
+mod plan_v4;
 mod test_plan;
 
 use allium_parser::diagnostic::Severity;
@@ -949,6 +950,18 @@ fn cmd_parse(args: &[String]) -> ExitCode {
 }
 
 fn cmd_plan(args: &[String]) -> ExitCode {
+    // A v4 spec has constructs (objectives, contracts) the v3 test-plan cannot see, so route it to
+    // the v4 obligation emitter. Everything else stays on the v3 path.
+    if let Some(path) = args.first().filter(|_| args.len() == 1) {
+        if let Ok(source) = std::fs::read_to_string(path) {
+            if allium_v4::detect_version(&source) == Some(4) {
+                let module = allium_v4::parse(&source).module;
+                let plan = plan_v4::generate(&module, &source);
+                println!("{}", serde_json::to_string_pretty(&serde_json::to_value(plan).unwrap()).unwrap());
+                return ExitCode::SUCCESS;
+            }
+        }
+    }
     run_single_file("allium plan <file.allium>", args, |module, source| {
         let plan = test_plan::generate_test_plan(module, source);
         serde_json::to_value(plan).unwrap()

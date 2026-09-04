@@ -313,7 +313,7 @@ pub(crate) fn ceiling_without_floor(module: &Module) -> Vec<Diagnostic> {
 }
 
 /// The clauses of an `objective <goal> within <bound> [measure <obs> decreasing] [under <env>]`.
-pub(crate) struct ObjectiveParts {
+pub struct ObjectiveParts {
     pub goal: String,
     pub bound: Option<String>,
     pub measure: Option<String>,
@@ -322,7 +322,7 @@ pub(crate) struct ObjectiveParts {
 
 /// Split an objective's raw body into its clauses. Report-only, so loose parsing just yields a
 /// slightly-off note, never a wrong verdict.
-pub(crate) fn parse_objective_body(body: &str) -> ObjectiveParts {
+pub fn parse_objective_body(body: &str) -> ObjectiveParts {
     let b = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let (goal, rest) = match b.split_once(" within ") {
         Some((g, r)) => (g.trim().to_string(), Some(r.to_string())),
