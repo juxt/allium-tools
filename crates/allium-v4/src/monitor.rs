@@ -1065,7 +1065,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let lib = dir.join("allium_test_stdlib.allium");
         std::fs::write(&lib, "-- allium: 4\ncomponent Std\n  given umin(a,b) means if a < b then a else b\nend\n").unwrap();
-        let spec = format!("-- allium: 4\nuse \"{}\"\ncomponent F\n  entity P\n  given cap : Money\n  observable state computed(P) : Money\n  observable state fee(P) : Money\n  invariant capped means every p :: fee(p) = umin(computed(p), cap)\nend\n", lib.display());
+        let spec = format!("-- allium: 4\nuse \"{}\" as std\ncomponent F\n  entity P\n  given cap : Money\n  observable state computed(P) : Money\n  observable state fee(P) : Money\n  invariant capped means every p :: fee(p) = umin(computed(p), cap)\nend\n", lib.display());
         let ok = "period=0 computed=30.00 fee=25.00\ngiven cap=25.00\n";
         assert!(monitor_schedule(&spec, ok, 0.01).contains("\"ok\":true"), "imported umin should hold: {}", monitor_schedule(&spec, ok, 0.01));
         let bad = "period=0 computed=30.00 fee=30.00\ngiven cap=25.00\n";

@@ -144,6 +144,328 @@ fn rate_typed_products(e: &Expr, st: &HashMap<String, String>, out: &mut HashSet
 /// violating the invariant — a value-safety bug the boolean check cannot see (e.g. `withdraw` breaking
 /// `balance >= 0`). SOUND: the whole invariant, guard and effect must lower to linear constraints with no
 /// skipped (nonlinear) term; any skip abandons the pair rather than risk a false alarm.
+/// Measure-monotonicity check for objectives — a SOUND slice of progress verification. A claimed
+/// progress `measure M decreasing` must never be INCREASED by an action, or it does not witness
+/// progress toward the goal (corpus E28: "queue position is not monotone — new arrivals displace
+/// waiting requests"). This pass ONLY reports a measure that CAN increase; it never certifies that a
+/// measure proves progress (the positive direction — strict decrease + well-foundedness ⇒ termination —
+/// is deferred). So it cannot manufacture a false discharge: every finding is a genuine counter-witness
+/// (a reachable transition that raises the measure), and any construct it cannot lower to linear
+/// arithmetic is skipped, never guessed.
+pub fn objective_progress(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let mut st: HashMap<String, String> = HashMap::new();
+        for it in &d.items {
+            if matches!(it.kind, ItemKind::State | ItemKind::Given) {
+                if let (Some(n), Some(b)) = (&it.name, it.body) {
+                    st.insert(n.clone(), b.slice(src).trim().to_string());
+                }
+            }
+        }
+        // Measures claimed by objectives, restricted to a bare NUMERIC state. A keyed or expression
+        // measure (E27 lexicographic tuple) is skipped — conservative; the disposition note already
+        // says such an objective is not yet verified.
+        let measures: Vec<String> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Objective)
+            .filter_map(|it| it.body.and_then(|b| crate::analyse::parse_objective_body(b.slice(src)).measure))
+            .filter(|m| st.get(m).map(|t| numeric(t)).unwrap_or(false))
+            .collect();
+        if measures.is_empty() {
+            continue;
+        }
+        let defs = component_defs(d, src, imports);
+        let state_names: HashSet<String> =
+            d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
+        // Pre-state context: the grounded linear invariants, so a measure-increase from an UNREACHABLE
+        // pre-state (one an invariant forbids) is not reported. Dropping these would only over-report a
+        // warning, never certify — but including them keeps the finding real.
+        let mut all_pre: Vec<Con> = Vec::new();
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
+            let Some(b) = it.body else { continue };
+            let Some(inv) = arith_reduce(&crate::monitor::inline_defs(&parse_predicate(b.slice(src)).0, &defs)) else {
+                continue;
+            };
+            let (cons, notes) = ground(&inv, &st);
+            if !notes {
+                all_pre.extend(cons);
+            }
+        }
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Action) {
+            let aname = it.name.clone().unwrap_or_else(|| "<anon>".into());
+            let Some(ensures_raw) = it.ensures_expr(src).map(|e| crate::monitor::inline_defs(&e, &defs)) else {
+                continue;
+            };
+            let guard_raw = it.requires.map(|sp| crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs));
+            let mut ev = HashSet::new();
+            crate::analyse::collect_entity_vars(&ensures_raw, &mut ev);
+            if let Some(g) = &guard_raw {
+                crate::analyse::collect_entity_vars(g, &mut ev);
+            }
+            if ev.len() > 1 {
+                continue; // two-entity action — not this slice
+            }
+            let ensures = crate::analyse::rename_entity(&ensures_raw, &ev);
+            let guard = guard_raw.map(|g| crate::analyse::rename_entity(&g, &ev));
+            let mut modified = HashSet::new();
+            crate::analyse::collect_writes(&ensures, false, &state_names, &mut modified);
+            let modified_numeric: HashSet<String> =
+                modified.iter().filter(|m| st.get(*m).map(|t| numeric(t)).unwrap_or(false)).cloned().collect();
+            if modified_numeric.is_empty() {
+                continue;
+            }
+            let mut st2 = st.clone();
+            for m in &modified_numeric {
+                if let Some(t) = st.get(m).cloned() {
+                    st2.insert(format!("{m}'"), t);
+                }
+            }
+            let effect_expr = crate::analyse::prime(&ensures, &modified_numeric, false);
+            let (effect_cons, effect_notes) = ground(&effect_expr, &st2);
+            if effect_notes || effect_cons.is_empty() {
+                continue;
+            }
+            let guard_cons = match &guard {
+                Some(g) => {
+                    let (c, n) = ground(g, &st2);
+                    if n {
+                        continue; // an unmodelled guard could hide a constraint — skip, don't false-alarm
+                    }
+                    c
+                }
+                None => Vec::new(),
+            };
+            for m in &measures {
+                if !modified_numeric.contains(m) {
+                    continue; // action leaves M framed — it cannot increase it
+                }
+                // VC: can this action raise the measure? all_pre ∧ guard ∧ effect ∧ (M' > M)
+                let inc = Expr::Binary {
+                    op: BinOp::Gt,
+                    lhs: Box::new(Expr::Name(format!("{m}'"))),
+                    rhs: Box::new(Expr::Name(m.clone())),
+                };
+                let (inc_cons, inc_notes) = ground(&inc, &st2);
+                if inc_notes || inc_cons.is_empty() {
+                    continue;
+                }
+                let mut q = all_pre.clone();
+                q.extend(guard_cons.iter().cloned());
+                q.extend(effect_cons.iter().cloned());
+                q.extend(inc_cons);
+                if let Outcome::Sat(wm) = solve(&q) {
+                    out.push(Diagnostic::warning(
+                        it.span,
+                        crate::analyse::pretty(&format!(
+                            "objective measure `{m}` can INCREASE under action `{aname}` in `{}` (e.g. {}) — it does not witness progress toward the goal (a non-monotone measure). Guard the increase, or use a measure that only decreases.",
+                            d.name,
+                            schedule(&wm, &st2)
+                        )),
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Positive discharge for objectives (the CERTIFYING direction — where false certification would be
+/// the cardinal sin, so it is deliberately conservative). Certifies that an INTEGER measure is a
+/// well-founded variant: bounded below by a proven floor AND strictly decreasing on EVERY action. For
+/// an integer, strict decrease means each step drops it by at least one, so a bounded-below integer
+/// variant reaches its floor in finitely many steps — the component terminates (it cannot loop). This
+/// is a sound positive verdict, the dual of corpus E28's "no measure exists".
+///
+/// Restricted to `Number` (integer) measures on purpose: a rational/`Money` measure can decrease
+/// forever while bounded (1, ½, ¼, …), so strict decrease does NOT give termination there — certifying
+/// it would be unsound. Anything outside the airtight case is left to the honest "not yet verified"
+/// disposition note rather than guessed.
+///
+/// The verdict is stated CONDITIONAL on progress-fairness (that an enabled action keeps firing), which
+/// N6 holds as assumed-not-proved, and it certifies TERMINATION, not goal-reached: connecting the
+/// floor state to the goal is a further (mixed boolean/arithmetic) obligation, named but not claimed.
+pub fn objective_discharge(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let mut st: HashMap<String, String> = HashMap::new();
+        for it in &d.items {
+            if matches!(it.kind, ItemKind::State | ItemKind::Given) {
+                if let (Some(n), Some(b)) = (&it.name, it.body) {
+                    st.insert(n.clone(), b.slice(src).trim().to_string());
+                }
+            }
+        }
+        // Objectives whose measure is a bare INTEGER (`Number`) state — the only airtight case.
+        let objs: Vec<(String, Option<String>, String)> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Objective)
+            .filter_map(|it| {
+                let p = crate::analyse::parse_objective_body(it.body?.slice(src));
+                let m = p.measure?;
+                (st.get(&m).map(|t| numeric(t)).unwrap_or(false)).then_some((p.goal, p.bound, m))
+            })
+            .collect();
+        if objs.is_empty() {
+            continue;
+        }
+        let defs = component_defs(d, src, imports);
+        let state_names: HashSet<String> =
+            d.items.iter().filter(|it| it.kind == ItemKind::State).filter_map(|it| it.name.clone()).collect();
+        let mut all_pre: Vec<Con> = Vec::new();
+        let mut inv_exprs: Vec<Expr> = Vec::new(); // raw invariants, for the mixed goal-connection query
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
+            let Some(b) = it.body else { continue };
+            let raw = crate::monitor::inline_defs(&parse_predicate(b.slice(src)).0, &defs);
+            inv_exprs.push(raw.clone());
+            let Some(inv) = arith_reduce(&raw) else { continue };
+            let (cons, notes) = ground(&inv, &st);
+            if !notes {
+                all_pre.extend(cons);
+            }
+        }
+        // Per action, the effect on each numeric state (or None if it cannot be lowered soundly — an
+        // unanalysable action counts as "does not strictly decrease", so certification fails safe).
+        let action_items: Vec<&crate::ast::Item> = d.items.iter().filter(|it| it.kind == ItemKind::Action).collect();
+        struct AData {
+            modified_numeric: HashSet<String>,
+            guard_cons: Vec<Con>,
+            effect_cons: Vec<Con>,
+            st2: HashMap<String, String>,
+            ok: bool,
+        }
+        let mut adata: Vec<AData> = Vec::new();
+        for it in &action_items {
+            let mut ad = AData { modified_numeric: HashSet::new(), guard_cons: Vec::new(), effect_cons: Vec::new(), st2: st.clone(), ok: false };
+            'build: {
+                let Some(ensures_raw) = it.ensures_expr(src).map(|e| crate::monitor::inline_defs(&e, &defs)) else { break 'build };
+                let guard_raw = it.requires.map(|sp| crate::monitor::inline_defs(&parse_predicate(sp.slice(src)).0, &defs));
+                let mut ev = HashSet::new();
+                crate::analyse::collect_entity_vars(&ensures_raw, &mut ev);
+                if let Some(g) = &guard_raw { crate::analyse::collect_entity_vars(g, &mut ev); }
+                if ev.len() > 1 { break 'build }
+                let ensures = crate::analyse::rename_entity(&ensures_raw, &ev);
+                let guard = guard_raw.map(|g| crate::analyse::rename_entity(&g, &ev));
+                let mut modified = HashSet::new();
+                crate::analyse::collect_writes(&ensures, false, &state_names, &mut modified);
+                let modified_numeric: HashSet<String> =
+                    modified.iter().filter(|m| st.get(*m).map(|t| numeric(t)).unwrap_or(false)).cloned().collect();
+                let mut st2 = st.clone();
+                for m in &modified_numeric { if let Some(t) = st.get(m).cloned() { st2.insert(format!("{m}'"), t); } }
+                let effect_expr = crate::analyse::prime(&ensures, &modified_numeric, false);
+                let (effect_cons, effect_notes) = ground(&effect_expr, &st2);
+                if effect_notes { break 'build }
+                let guard_cons = match &guard {
+                    Some(g) => { let (c, n) = ground(g, &st2); if n { break 'build } c }
+                    None => Vec::new(),
+                };
+                ad = AData { modified_numeric, guard_cons, effect_cons, st2, ok: true };
+            }
+            adata.push(ad);
+        }
+        for (goal, bound, m) in &objs {
+            if action_items.is_empty() {
+                continue; // nothing changes — no progress to certify
+            }
+            // Bounded below by 0? `all_pre ∧ (m < 0)` unsatisfiable ⇒ the invariants entail m ≥ 0.
+            let below = Expr::Binary { op: BinOp::Lt, lhs: Box::new(Expr::Name(m.clone())), rhs: Box::new(Expr::Int(0)) };
+            let (below_cons, below_notes) = ground(&below, &st);
+            if below_notes || below_cons.is_empty() {
+                continue;
+            }
+            let mut bq = all_pre.clone();
+            bq.extend(below_cons);
+            if !matches!(solve(&bq), Outcome::Unsat) {
+                continue; // not proven bounded below — cannot certify a well-founded variant
+            }
+            // Every action decreases m by at least ONE whole unit? For any numeric m, "decrease by ≥ 1"
+            // ⇔ `m' > m - 1` is impossible under the action. Bounded below + fixed ≥1 decrease terminates
+            // even for a rational/`Money` measure (no Zeno: a step cannot shrink the decrement toward 0).
+            // An integer's strict decrease is exactly this. An action that does not modify m (m' = m) is
+            // NOT a decrease, and an unanalysable action (ok=false) is treated as such — fails safe.
+            let all_strict = adata.iter().all(|ad| {
+                if !ad.ok || !ad.modified_numeric.contains(m) {
+                    return false;
+                }
+                // ¬(m' ≤ m − 1), i.e. m' > m − 1 — satisfiable ⇒ the action can fail to decrease by 1.
+                let notdec = Expr::Binary {
+                    op: BinOp::Gt,
+                    lhs: Box::new(Expr::Name(format!("{m}'"))),
+                    rhs: Box::new(Expr::Binary { op: BinOp::Sub, lhs: Box::new(Expr::Name(m.clone())), rhs: Box::new(Expr::Int(1)) }),
+                };
+                let (nd_cons, nd_notes) = ground(&notdec, &ad.st2);
+                if nd_notes || nd_cons.is_empty() {
+                    return false;
+                }
+                let mut q = all_pre.clone();
+                q.extend(ad.guard_cons.iter().cloned());
+                q.extend(ad.effect_cons.iter().cloned());
+                q.extend(nd_cons);
+                matches!(solve(&q), Outcome::Unsat)
+            });
+            if all_strict {
+                let g = if goal.is_empty() { "<goal>" } else { goal };
+                // Bound verdict (N6/J50). The variant proves the goal in at most `m` steps. If the stated
+                // `within <bound>` is a numeric STEP BUDGET D and the invariants entail `m ≤ D`, that step
+                // count is provably within budget — a quantitative bound. A named TIME deadline
+                // (end_of_day, a next-business-day cutoff) is a MONITORED obligation, watched at runtime and
+                // never proved from step durations (N1/N6), so it is reported as such, not proved.
+                let bound_clause = match bound {
+                    None => String::new(),
+                    Some(b) => {
+                        let be = parse_predicate(b).0;
+                        let numeric_budget = matches!(be, Expr::Int(_))
+                            || matches!(&be, Expr::Name(n) if st.get(n).map(|t| t == "Number").unwrap_or(false));
+                        if numeric_budget {
+                            let le = Expr::Binary { op: BinOp::Le, lhs: Box::new(Expr::Name(m.clone())), rhs: Box::new(be) };
+                            let met = entails_guarded_linear(&inv_exprs, &le, &st)
+                                .or_else(|| entails_linear(&inv_exprs, &le, &st));
+                            if matches!(met, Some(true)) {
+                                format!(" The stated budget `{b}` is met: the invariants entail `{m}` ≤ `{b}`, so the goal is reached within `{b}` steps.")
+                            } else {
+                                format!(" The stated step budget `{b}` is NOT proven — `{m}` ≤ `{b}` does not follow from the invariants, so the goal may need more than `{b}` steps.")
+                            }
+                        } else {
+                            format!(" The `within {b}` deadline is a MONITORED obligation (watched and counted at runtime, not proved from step durations — N6/J50).")
+                        }
+                    }
+                };
+                // Goal-connection: does the floor state satisfy the goal? For integer m ≥ 0, that is
+                // `m = 0 ⟹ G`, equivalently `¬G ⟹ m ≥ 1` — a boolean-guarded arithmetic bound the
+                // invariants may entail. Only attempted for a goal with no unbound entity variable
+                // (conservative); proven ⇒ upgrade "terminates" to "goal reached", else stay honest.
+                let goal_expr = parse_predicate(goal).0;
+                let mut gv = HashSet::new();
+                crate::analyse::collect_entity_vars(&goal_expr, &mut gv);
+                let connected = gv.is_empty() && {
+                    let conn = Expr::Binary {
+                        op: BinOp::Implies,
+                        lhs: Box::new(Expr::Unary { op: UnOp::Not, e: Box::new(goal_expr) }),
+                        rhs: Box::new(Expr::Binary {
+                            op: BinOp::Ge,
+                            lhs: Box::new(Expr::Name(m.clone())),
+                            rhs: Box::new(Expr::Int(1)),
+                        }),
+                    };
+                    matches!(entails_guarded_linear(&inv_exprs, &conn, &st), Some(true))
+                };
+                if connected {
+                    out.push(Diagnostic::warning(d.span, format!(
+                        "objective `{g}`: measure `{m}` is a well-founded variant (numeric, bounded below by 0, decreasing by at least 1 on every action) AND the floor state satisfies the goal (`{m}` = 0 ⟹ `{g}`), so the objective is REACHED in at most `{m}` steps — DISCHARGED, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6).{bound_clause}",
+                    )));
+                } else {
+                    out.push(Diagnostic::warning(d.span, format!(
+                        "objective `{g}`: measure `{m}` is a well-founded variant (numeric, bounded below by 0, decreasing by at least 1 on every action) — the component TERMINATES, reaching `{m}`'s floor in at most `{m}` steps, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6). Remaining for full 'goal reached': prove the floor state satisfies `{g}` (state `not {g} implies {m} >= 1`).{bound_clause}",
+                    )));
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn arith_preservation(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for d in &module.decls {
@@ -2821,6 +3143,87 @@ mod tests {
         assert!(any(&egp(&retreat), "`retreat` in `L` can break state-guarded invariant `advances`"), "{:#?}", egp(&retreat));
         let advance = format!("{mhdr2}  action advance\n    requires status(s) = healthy\n    ensures wm(s) = old(wm(s)) + 1\nend\n");
         assert!(!any(&egp(&advance), "can break state-guarded"), "{:#?}", egp(&advance));
+    }
+
+    #[test]
+    fn objective_measure_monotonicity() {
+        let prog = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::objective_progress(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
+        };
+        // A non-monotone measure: `enqueue` raises `pending`, so it does not witness progress.
+        let bad = "-- allium: 4\ncomponent Q\n  entity R\n  observable state pending : Number\n  observable state drained(R) : bool\n  invariant nn means pending >= 0\n  action process\n    requires pending >= 1\n    ensures pending = old(pending) - 1\n  action enqueue\n    ensures pending = old(pending) + 1\n  objective drained(r) within eod\n    measure pending decreasing\nend\n";
+        assert!(any(&prog(bad), "can INCREASE under action `enqueue`"), "{:#?}", prog(bad));
+        // The decreasing action alone is never flagged (no false positive).
+        assert!(!prog(bad).iter().any(|m| m.contains("under action `process`")), "process wrongly flagged: {:#?}", prog(bad));
+        // A monotone measure (only `process`) produces no finding at all.
+        let good = "-- allium: 4\ncomponent Q\n  entity R\n  observable state pending : Number\n  observable state drained(R) : bool\n  invariant nn means pending >= 0\n  action process\n    requires pending >= 1\n    ensures pending = old(pending) - 1\n  objective drained(r) within eod\n    measure pending decreasing\nend\n";
+        assert!(prog(good).is_empty(), "monotone measure should be silent: {:#?}", prog(good));
+    }
+
+    #[test]
+    fn objective_discharge_bound_verdict() {
+        let disch = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::objective_discharge(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
+        };
+        let spec = |bound: &str, cap: &str| format!(
+            "-- allium: 4\ncomponent Q\n  entity R\n  observable state pending : Number\n  observable state done : bool\n  invariant nn means pending >= 0\n{cap}  invariant conn means done or pending >= 1\n  action process\n    requires pending >= 1\n    ensures pending = old(pending) - 1\n  objective done within {bound}\n    measure pending decreasing\nend\n"
+        );
+        // A named time deadline is reported as MONITORED, never proved from steps (N6/J50).
+        assert!(disch(&spec("eod", "")).iter().any(|m| m.contains("MONITORED")), "{:#?}", disch(&spec("eod", "")));
+        // A numeric step budget with a proven cap (pending ≤ 100) is met.
+        assert!(disch(&spec("100", "  invariant cap means pending <= 100\n")).iter().any(|m| m.contains("is met")), "{:#?}", disch(&spec("100", "  invariant cap means pending <= 100\n")));
+        // A numeric budget with no cap is honestly reported unproven.
+        assert!(disch(&spec("100", "")).iter().any(|m| m.contains("NOT proven")), "{:#?}", disch(&spec("100", "")));
+    }
+
+    #[test]
+    fn objective_discharge_goal_connection() {
+        let disch = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::objective_discharge(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
+        };
+        let spec = |conn: &str| format!(
+            "-- allium: 4\ncomponent Q\n  entity R\n  observable state pending : Number\n  observable state all_drained : bool\n  invariant nn means pending >= 0\n{conn}  action process\n    requires pending >= 1\n    ensures pending = old(pending) - 1\n  objective all_drained within eod\n    measure pending decreasing\nend\n"
+        );
+        // A genuine connection (`¬goal ⇒ pending ≥ 1`) upgrades TERMINATES to goal REACHED.
+        let good = spec("  invariant conn means not all_drained implies pending >= 1\n");
+        assert!(disch(&good).iter().any(|m| m.contains("objective is REACHED")), "{:#?}", disch(&good));
+        // No connection: certify termination only, never 'reached'.
+        let none = spec("");
+        assert!(disch(&none).iter().any(|m| m.contains("TERMINATES")) && !disch(&none).iter().any(|m| m.contains("REACHED")), "{:#?}", disch(&none));
+        // A useless connection (pending ≥ 0, always true) must NOT upgrade — soundness.
+        let weak = spec("  invariant weak means not all_drained implies pending >= 0\n");
+        assert!(!disch(&weak).iter().any(|m| m.contains("REACHED")), "useless connection wrongly upgraded: {:#?}", disch(&weak));
+    }
+
+    #[test]
+    fn objective_discharge_certifies_only_a_sound_variant() {
+        let disch = |src: &str| -> Vec<String> {
+            let m = parse(src).module;
+            super::objective_discharge(&m, src, &super::Imports::default()).into_iter().map(|d| d.message).collect()
+        };
+        let base = |extra_action: &str, inv: &str, ty: &str| format!(
+            "-- allium: 4\ncomponent Q\n  entity R\n  observable state pending : {ty}\n  observable state drained(R) : bool\n{inv}  action process\n    requires pending >= 1\n    ensures pending = old(pending) - 1\n{extra_action}  objective drained(r) within eod\n    measure pending decreasing\nend\n"
+        );
+        // GOOD: integer, bounded below by 0, only a strictly-decreasing action -> DISCHARGED.
+        let good = base("", "  invariant nn means pending >= 0\n", "Number");
+        assert!(disch(&good).iter().any(|m| m.contains("well-founded variant")), "{:#?}", disch(&good));
+        // UNSOUND to certify, each must be REFUSED (no discharge):
+        // (a) a non-decreasing action (enqueue raises the measure)
+        let inc = base("  action enqueue\n    ensures pending = old(pending) + 1\n", "  invariant nn means pending >= 0\n", "Number");
+        assert!(!disch(&inc).iter().any(|m| m.contains("well-founded variant")), "non-monotone wrongly certified: {:#?}", disch(&inc));
+        // (b) no proven floor (measure not bounded below)
+        let unb = base("", "", "Number");
+        assert!(!disch(&unb).iter().any(|m| m.contains("well-founded variant")), "unbounded wrongly certified: {:#?}", disch(&unb));
+        // (c) a rational (Money) measure that decreases by a WHOLE unit each step IS certifiable —
+        // bounded below + fixed ≥1 decrease terminates even for a rational (no Zeno).
+        let money1 = base("", "  invariant nn means pending >= 0\n", "Money");
+        assert!(disch(&money1).iter().any(|m| m.contains("well-founded variant")), "whole-unit Money variant wrongly refused: {:#?}", disch(&money1));
+        // (d) a SUB-unit decrease (½ each step) is a Zeno risk — must be REFUSED.
+        let zeno = "-- allium: 4\ncomponent Q\n  entity R\n  observable state pending : Money\n  observable state drained(R) : bool\n  invariant nn means pending >= 0\n  action process\n    requires pending >= 1\n    ensures pending = old(pending) - 0.5\n  objective drained(r) within eod\n    measure pending decreasing\nend\n";
+        assert!(!disch(zeno).iter().any(|m| m.contains("well-founded variant")), "sub-unit (Zeno) measure wrongly certified: {:#?}", disch(zeno));
     }
 
     #[test]

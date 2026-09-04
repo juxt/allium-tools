@@ -16,7 +16,7 @@ pub struct ParseResult {
 /// Item keywords that terminate a raw predicate / type at bracket depth 0.
 const ITEM_STARTERS: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "objective", "budget", "terminal",
     "transitions", "pub", "abstract", "readable", "contract", "component", "use", "end", "satisfies",
 ];
 
@@ -24,7 +24,7 @@ const ITEM_STARTERS: &[&str] = &[
 /// block carries its own inner `terminal: <tag>` line, which must be captured, not treated as a new item.
 const TRANSITION_STOPS: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "transitions",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "objective", "budget", "transitions",
     "pub", "abstract", "readable", "contract", "component", "use", "end", "satisfies",
 ];
 
@@ -35,7 +35,7 @@ fn is_starter(s: &str) -> bool {
 /// Stops for reading a type: the item starters plus `where`, which begins a refinement clause.
 const TYPE_STOPS: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "objective", "budget", "terminal",
     "transitions", "pub", "abstract", "readable", "contract", "component", "use", "end", "satisfies", "where",
 ];
 
@@ -162,8 +162,9 @@ impl<'s> Parser<'s> {
         Decl { span: start.merge(end), kind, name, alias: None, params, satisfies, items }
     }
 
-    /// `use <target> as <alias>`. Target is a bare name or a string path. A banked
-    /// import (CONSTRUCTS.md:196); v4 cross-module resolution semantics are parked.
+    /// `use <target> as <alias>`. Target is a bare name or a string path. The alias is MANDATORY:
+    /// every imported name is referenced qualified as `alias/Name`, so a reader can always see which
+    /// import a name came from (the namespaced-imports decision, 2026-09-04). Clarity over brevity.
     fn parse_use(&mut self) -> Decl {
         let start = self.span();
         self.eat_ident("use");
@@ -191,6 +192,11 @@ impl<'s> Parser<'s> {
             } else {
                 self.error(self.span(), "expected an alias name after `as`");
             }
+        } else {
+            self.error(
+                start,
+                "a `use` import requires an alias: write `use \"…\" as <name>`, then reference imported names qualified as `<name>/Thing`",
+            );
         }
         let end = self.tokens[self.pos.saturating_sub(1)].span;
         Decl {
@@ -352,6 +358,22 @@ impl<'s> Parser<'s> {
                 self.advance();
                 let mut it = Item::new(ItemKind::Transitions, start);
                 it.body = self.read_raw(TRANSITION_STOPS, false);
+                it
+            }
+            // `objective <goal> within <bound> [measure <obs> decreasing] [under <env>]` and
+            // `budget <metric> <cmp> <thr> over <window>`. Body captured whole for now (the inner
+            // `within`/`measure`/`under`/`over` clauses are not item starters, so they ride along);
+            // structuring and checking the clauses is a later increment. PROVISIONAL names.
+            Some("objective") => {
+                self.advance();
+                let mut it = Item::new(ItemKind::Objective, start);
+                it.body = self.read_raw(ITEM_STARTERS, false);
+                it
+            }
+            Some("budget") => {
+                self.advance();
+                let mut it = Item::new(ItemKind::Budget, start);
+                it.body = self.read_raw(ITEM_STARTERS, false);
                 it
             }
             Some(role) if role_kind(role).is_some() => {
@@ -521,21 +543,21 @@ impl<'s> Parser<'s> {
 
 const ITEM_STARTERS_PLUS_ENSURES: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "objective", "budget", "terminal",
     "pub", "abstract", "readable", "contract", "component", "use", "end",
     "satisfies", "ensures",
 ];
 
 const ITEM_STARTERS_PLUS_CLAUSES: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "objective", "budget", "terminal",
     "pub", "abstract", "readable", "contract", "component", "use", "end",
     "satisfies", "ensures", "requires",
 ];
 
 const ITEM_STARTERS_PLUS_BY: &[&str] = &[
     "entity", "observable", "state", "given", "let", "action", "init", "invariant",
-    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "terminal",
+    "guarantee", "fault", "requirement", "axiom", "rely", "relies", "establish", "objective", "budget", "terminal",
     "pub", "abstract", "readable", "contract", "component", "use", "end",
     "satisfies", "by",
 ];

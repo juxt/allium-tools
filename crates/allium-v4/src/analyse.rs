@@ -281,6 +281,140 @@ pub(crate) fn fault_restatement(module: &Module, src: &str) -> Vec<Diagnostic> {
     out
 }
 
+/// Ceiling-without-floor (the anti-vacuity check). A component that DOES something (has actions) and
+/// states what must NOT happen (invariants or faults) but never states what it must ACHIEVE (an
+/// objective, a budget, or a producibility requirement) is satisfiable by an implementation that does
+/// nothing: safety is a ceiling, and "nothing happens" honours every safety property. Warn, so the
+/// author states the floor. Generalises corpus E28 (naming the missing progress measure). Warning-only,
+/// never a gate.
+pub(crate) fn ceiling_without_floor(module: &Module) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        if d.kind != crate::ast::DeclKind::Component {
+            continue; // a contract states promises, not an implementable behaviour
+        }
+        let has = |k: ItemKind| d.items.iter().any(|it| it.kind == k);
+        let acts = has(ItemKind::Action);
+        let ceiling = has(ItemKind::Invariant) || has(ItemKind::Fault);
+        let floor = has(ItemKind::Objective)
+            || has(ItemKind::Budget)
+            || has(ItemKind::Requirement);
+        if acts && ceiling && !floor {
+            out.push(Diagnostic::warning(
+                d.span,
+                format!(
+                    "component `{}` states only what must not happen (invariants/faults) and never what it must achieve — it is satisfiable by an implementation that does nothing. State an `objective` (what it must bring about, and by when).",
+                    d.name
+                ),
+            ));
+        }
+    }
+    out
+}
+
+/// The clauses of an `objective <goal> within <bound> [measure <obs> decreasing] [under <env>]`.
+pub(crate) struct ObjectiveParts {
+    pub goal: String,
+    pub bound: Option<String>,
+    pub measure: Option<String>,
+    pub _under: Option<String>,
+}
+
+/// Split an objective's raw body into its clauses. Report-only, so loose parsing just yields a
+/// slightly-off note, never a wrong verdict.
+pub(crate) fn parse_objective_body(body: &str) -> ObjectiveParts {
+    let b = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (goal, rest) = match b.split_once(" within ") {
+        Some((g, r)) => (g.trim().to_string(), Some(r.to_string())),
+        None => (b.trim().to_string(), None),
+    };
+    let mut bound = None;
+    let mut measure = None;
+    let mut under = None;
+    if let Some(rest) = rest {
+        // after the bound come optional `measure … decreasing` and `under …`, in that order.
+        let (before_measure, after_measure) = match rest.split_once(" measure ") {
+            Some((a, b)) => (a.to_string(), Some(b.to_string())),
+            None => (rest.clone(), None),
+        };
+        match after_measure {
+            Some(m) => {
+                bound = Some(before_measure.trim().to_string());
+                let (meas, u) = match m.split_once(" under ") {
+                    Some((meas, u)) => (meas.to_string(), Some(u.trim().to_string())),
+                    None => (m, None),
+                };
+                measure = Some(meas.trim().trim_end_matches("decreasing").trim().to_string());
+                under = u;
+            }
+            None => match before_measure.split_once(" under ") {
+                Some((bnd, u)) => {
+                    bound = Some(bnd.trim().to_string());
+                    under = Some(u.trim().to_string());
+                }
+                None => bound = Some(before_measure.trim().to_string()),
+            },
+        }
+    }
+    ObjectiveParts { goal, bound, measure, _under: under }
+}
+
+/// Report each objective's DISPOSITION honestly, and flag a malformed one — the don't-over-claim rule
+/// applied to objectives. The checker parses objectives but does not yet PROVE them, so this pass makes
+/// that explicit rather than letting an objective pass silently unexamined:
+/// - no `within` bound → the objective is unbounded, which is neither provable nor monitorable (N6);
+/// - a `measure` naming a non-numeric / undeclared observable → malformed;
+/// - otherwise: state whether it is measure-dischargeable (design-time) or monitored, and that neither
+///   is verified yet. `budget` is always monitored-statistical.
+pub(crate) fn objective_report(module: &Module, src: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &module.decls {
+        let numeric_obs: HashSet<String> = d
+            .items
+            .iter()
+            .filter(|it| matches!(it.kind, ItemKind::State | ItemKind::Given))
+            .filter(|it| {
+                it.body
+                    .map(|sp| crate::arith::numeric(sp.slice(src).trim()))
+                    .unwrap_or(false)
+            })
+            .filter_map(|it| it.name.clone())
+            .collect();
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Objective) {
+            let Some(body) = it.body.map(|sp| sp.slice(src).to_string()) else { continue };
+            let p = parse_objective_body(&body);
+            let g = if p.goal.is_empty() { "<goal>".to_string() } else { p.goal.clone() };
+            if p.bound.is_none() {
+                out.push(Diagnostic::warning(it.span, format!(
+                    "objective `{g}` has no `within <bound>` — an unbounded objective is neither provable nor monitorable (N6); give it a bound, or state it design-time-only and count it."
+                )));
+                continue;
+            }
+            if let Some(m) = &p.measure {
+                let head = m.split(['(', ' ']).next().unwrap_or(m);
+                if !numeric_obs.contains(head) {
+                    out.push(Diagnostic::warning(it.span, format!(
+                        "objective `{g}`: measure `{m}` is not a declared numeric observable, so it cannot witness progress."
+                    )));
+                    continue;
+                }
+                out.push(Diagnostic::warning(it.span, format!(
+                    "objective `{g}` — dischargeable at design time via measure `{m}` decreasing; parsed, NOT YET verified by the checker."
+                )));
+            } else {
+                out.push(Diagnostic::warning(it.span, format!(
+                    "objective `{g}` — MONITORED (no measure supplied): the checker does not prove it, it is watched on a trace; parsed, not verified."
+                )));
+            }
+        }
+        for it in d.items.iter().filter(|it| it.kind == ItemKind::Budget) {
+            out.push(Diagnostic::warning(it.span,
+                "budget is a statistical obligation over a cohort window — monitored, never proved; parsed, not verified.".to_string()));
+        }
+    }
+    out
+}
+
 /// As [`analyse`], but with definitions resolved from other modules via `use` (given bodies today).
 /// The CLI resolves the import graph and passes them; single-file callers use [`analyse`].
 pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> ParseResult {
@@ -319,6 +453,10 @@ pub fn analyse_with_imports(source: &str, imports: &crate::arith::Imports) -> Pa
     r.diagnostics.append(&mut refinement(&r.module, source, imports));
     r.diagnostics.append(&mut rely_discharge(&r.module, source, imports));
     r.diagnostics.append(&mut fault_restatement(&r.module, source));
+    r.diagnostics.append(&mut ceiling_without_floor(&r.module));
+    r.diagnostics.append(&mut objective_report(&r.module, source));
+    r.diagnostics.append(&mut crate::arith::objective_progress(&r.module, source, imports));
+    r.diagnostics.append(&mut crate::arith::objective_discharge(&r.module, source, imports));
     // The boolean consistency check treats arithmetic as opaque, so it can report a component
     // "jointly satisfiable" while the (stronger) arithmetic tier reports it CONTRADICTORY or
     // VACUOUSLY. That dual message is misleading and the elicit gate reads it. The arithmetic
@@ -1264,7 +1402,18 @@ pub fn refinement(module: &Module, src: &str, imports: &crate::arith::Imports) -
             let (promises, c_bool, _c_st) = match promises_of(cname) {
                 Some(x) => x,
                 None => {
-                    out.push(Diagnostic::warning(d.span, format!("{kw} `{}` claims to satisfy `{}`, but no such contract is declared.", d.name, cname)));
+                    // Enforce namespaced references: an imported contract must be named `alias/Name`.
+                    // If a bare `Name` matches an imported contract, point at the qualified form
+                    // rather than reporting it simply undeclared.
+                    let suggestion = imports
+                        .contracts
+                        .keys()
+                        .find(|k| k.rsplit('/').next() == Some(cname.as_str()));
+                    let msg = match suggestion {
+                        Some(q) => format!("{kw} `{}` references imported contract `{cname}` unqualified; name it by its import as `{q}`.", d.name),
+                        None => format!("{kw} `{}` claims to satisfy `{}`, but no such contract is declared.", d.name, cname),
+                    };
+                    out.push(Diagnostic::warning(d.span, msg));
                     continue;
                 }
             };
@@ -3016,6 +3165,81 @@ mod tests {
         // fault `bad` = a ∧ ¬c is NOT the complement of invariant `good` = a ⟹ b.
         let src = format!("{HDR}  invariant good means a(t) implies b(t)\n  fault bad means a(t) and not c(t)\nend\n");
         assert!(!any(&src, "restates invariant"), "unexpected restatement warning: {:?}", msgs(&src));
+    }
+
+    #[test]
+    fn objective_and_budget_parse() {
+        let obj = format!("{HDR}  action act\n    ensures a(t)\n  objective a(t) within deadline\n    measure b(t) decreasing\nend\n");
+        assert!(!any(&obj, "expected"), "objective should parse cleanly: {:?}", msgs(&obj));
+        let bud = "-- allium: 4\ncomponent Api\n  observable state responded : bool\n  budget latency p95 <= 100ms over 1d\nend\n";
+        assert!(!any(bud, "expected"), "budget should parse cleanly: {:?}", msgs(bud));
+    }
+
+    #[test]
+    fn ceiling_without_floor_is_flagged() {
+        // A component that acts and constrains but states no objective is vacuously satisfiable.
+        let src = format!("{HDR}  invariant safe means a(t) implies b(t)\n  action act\n    ensures a(t)\nend\n");
+        assert!(any(&src, "does nothing"), "expected anti-vacuity warning, got: {:?}", msgs(&src));
+    }
+
+    #[test]
+    fn objective_disposition_is_reported_honestly() {
+        // measure present -> dischargeable, not-yet-verified
+        let m = format!("{HDR}  observable state n : Number\n  action act\n    ensures a(t)\n  objective a(t) within d\n    measure n decreasing\nend\n");
+        assert!(any(&m, "dischargeable at design time") && any(&m, "NOT YET verified"), "{:?}", msgs(&m));
+        // no measure -> monitored
+        let mon = format!("{HDR}  action act\n    ensures a(t)\n  objective a(t) within d\nend\n");
+        assert!(any(&mon, "MONITORED"), "{:?}", msgs(&mon));
+        // no bound -> malformed
+        let nb = format!("{HDR}  action act\n    ensures a(t)\n  objective a(t)\nend\n");
+        assert!(any(&nb, "has no `within"), "{:?}", msgs(&nb));
+        // measure not numeric -> malformed
+        let bad = format!("{HDR}  action act\n    ensures a(t)\n  objective a(t) within d\n    measure b(t) decreasing\nend\n");
+        assert!(any(&bad, "not a declared numeric observable"), "{:?}", msgs(&bad));
+    }
+
+    #[test]
+    fn an_objective_supplies_the_floor() {
+        // The same component with an objective is no longer flagged.
+        let src = format!("{HDR}  invariant safe means a(t) implies b(t)\n  action act\n    ensures a(t)\n  objective a(t) within deadline\nend\n");
+        assert!(!any(&src, "does nothing"), "objective should suppress the warning: {:?}", msgs(&src));
+    }
+
+    #[test]
+    fn use_without_alias_is_an_error() {
+        // Namespaced-imports decision: every `use` requires an alias.
+        let src = "-- allium: 4\nuse \"lib.allium\"\ncomponent C\n  entity E\n  observable state a(E) : bool\nend\n";
+        assert!(any(src, "requires an alias"), "expected mandatory-alias error, got: {:?}", msgs(src));
+    }
+
+    const KLIB: &str = "-- allium: 4\ncontract KafkaAtLeastOnce\n  entity Event\n  observable state applied(Event) : bool\n  observable state deduped(Event) : bool\n  guarantee apply_needs_dedup means applied(e) implies deduped(e)\nend\n";
+
+    fn kafka_imports() -> crate::arith::Imports {
+        // Mirror the CLI resolver: imported contracts keyed under the alias.
+        let mut imports = crate::arith::Imports::default();
+        imports
+            .contracts
+            .extend(super::extract_contracts(KLIB).into_iter().map(|(k, v)| (format!("kafka/{k}"), v)));
+        imports
+    }
+
+    #[test]
+    fn qualified_import_reference_resolves() {
+        let src = "-- allium: 4\ncomponent W satisfies (k : kafka/KafkaAtLeastOnce)\n  entity Event\n  observable state applied(Event) : bool\n  observable state deduped(Event) : bool\n  invariant apply_needs_dedup means applied(e) implies deduped(e)\nend\n";
+        let m = crate::parse(src).module;
+        let ds: Vec<String> = super::refinement(&m, src, &kafka_imports()).into_iter().map(|d| d.message).collect();
+        assert!(ds.iter().any(|m| m.contains("SATISFIES contract `kafka/KafkaAtLeastOnce`")), "{ds:?}");
+    }
+
+    #[test]
+    fn unqualified_import_reference_is_flagged_with_suggestion() {
+        let src = "-- allium: 4\ncomponent W satisfies (k : KafkaAtLeastOnce)\n  entity Event\n  observable state applied(Event) : bool\n  observable state deduped(Event) : bool\n  invariant apply_needs_dedup means applied(e) implies deduped(e)\nend\n";
+        let m = crate::parse(src).module;
+        let ds: Vec<String> = super::refinement(&m, src, &kafka_imports()).into_iter().map(|d| d.message).collect();
+        assert!(
+            ds.iter().any(|m| m.contains("unqualified") && m.contains("kafka/KafkaAtLeastOnce")),
+            "expected an unqualified-reference suggestion, got: {ds:?}"
+        );
     }
 
     #[test]
