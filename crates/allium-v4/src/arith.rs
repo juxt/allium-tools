@@ -305,7 +305,7 @@ pub fn objective_discharge(module: &Module, src: &str, imports: &Imports) -> Vec
             .filter_map(|it| {
                 let p = crate::analyse::parse_objective_body(it.body?.slice(src));
                 let m = p.measure?;
-                (st.get(&m).map(|t| t == "Number").unwrap_or(false)).then_some((p.goal, p.bound, m))
+                (st.get(&m).map(|t| numeric(t)).unwrap_or(false)).then_some((p.goal, p.bound, m))
             })
             .collect();
         if objs.is_empty() {
@@ -380,22 +380,29 @@ pub fn objective_discharge(module: &Module, src: &str, imports: &Imports) -> Vec
             if !matches!(solve(&bq), Outcome::Unsat) {
                 continue; // not proven bounded below — cannot certify a well-founded variant
             }
-            // Every action strictly decreases m? For an integer, strict decrease ⇔ `m' >= m` is
-            // impossible under the action. An action that does not modify m (m' = m) is NOT strict, and
-            // an unanalysable action (ok=false) is treated as not-strict — certification fails safe.
+            // Every action decreases m by at least ONE whole unit? For any numeric m, "decrease by ≥ 1"
+            // ⇔ `m' > m - 1` is impossible under the action. Bounded below + fixed ≥1 decrease terminates
+            // even for a rational/`Money` measure (no Zeno: a step cannot shrink the decrement toward 0).
+            // An integer's strict decrease is exactly this. An action that does not modify m (m' = m) is
+            // NOT a decrease, and an unanalysable action (ok=false) is treated as such — fails safe.
             let all_strict = adata.iter().all(|ad| {
                 if !ad.ok || !ad.modified_numeric.contains(m) {
                     return false;
                 }
-                let ge = Expr::Binary { op: BinOp::Ge, lhs: Box::new(Expr::Name(format!("{m}'"))), rhs: Box::new(Expr::Name(m.clone())) };
-                let (ge_cons, ge_notes) = ground(&ge, &ad.st2);
-                if ge_notes || ge_cons.is_empty() {
+                // ¬(m' ≤ m − 1), i.e. m' > m − 1 — satisfiable ⇒ the action can fail to decrease by 1.
+                let notdec = Expr::Binary {
+                    op: BinOp::Gt,
+                    lhs: Box::new(Expr::Name(format!("{m}'"))),
+                    rhs: Box::new(Expr::Binary { op: BinOp::Sub, lhs: Box::new(Expr::Name(m.clone())), rhs: Box::new(Expr::Int(1)) }),
+                };
+                let (nd_cons, nd_notes) = ground(&notdec, &ad.st2);
+                if nd_notes || nd_cons.is_empty() {
                     return false;
                 }
                 let mut q = all_pre.clone();
                 q.extend(ad.guard_cons.iter().cloned());
                 q.extend(ad.effect_cons.iter().cloned());
-                q.extend(ge_cons);
+                q.extend(nd_cons);
                 matches!(solve(&q), Outcome::Unsat)
             });
             if all_strict {
@@ -446,11 +453,11 @@ pub fn objective_discharge(module: &Module, src: &str, imports: &Imports) -> Vec
                 };
                 if connected {
                     out.push(Diagnostic::warning(d.span, format!(
-                        "objective `{g}`: measure `{m}` is a well-founded variant (integer, bounded below by 0, strictly decreasing on every action) AND the floor state satisfies the goal (`{m}` = 0 ⟹ `{g}`), so the objective is REACHED in at most `{m}` steps — DISCHARGED, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6).{bound_clause}",
+                        "objective `{g}`: measure `{m}` is a well-founded variant (numeric, bounded below by 0, decreasing by at least 1 on every action) AND the floor state satisfies the goal (`{m}` = 0 ⟹ `{g}`), so the objective is REACHED in at most `{m}` steps — DISCHARGED, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6).{bound_clause}",
                     )));
                 } else {
                     out.push(Diagnostic::warning(d.span, format!(
-                        "objective `{g}`: measure `{m}` is a well-founded variant (integer, bounded below by 0, strictly decreasing on every action) — the component TERMINATES, reaching `{m}`'s floor in at most `{m}` steps, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6). Remaining for full 'goal reached': prove the floor state satisfies `{g}` (state `not {g} implies {m} >= 1`).{bound_clause}",
+                        "objective `{g}`: measure `{m}` is a well-founded variant (numeric, bounded below by 0, decreasing by at least 1 on every action) — the component TERMINATES, reaching `{m}`'s floor in at most `{m}` steps, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6). Remaining for full 'goal reached': prove the floor state satisfies `{g}` (state `not {g} implies {m} >= 1`).{bound_clause}",
                     )));
                 }
             }
@@ -3210,9 +3217,13 @@ mod tests {
         // (b) no proven floor (measure not bounded below)
         let unb = base("", "", "Number");
         assert!(!disch(&unb).iter().any(|m| m.contains("well-founded variant")), "unbounded wrongly certified: {:#?}", disch(&unb));
-        // (c) a rational measure (Money) — strict decrease + bounded does NOT terminate (Zeno)
-        let money = base("", "  invariant nn means pending >= 0\n", "Money");
-        assert!(!disch(&money).iter().any(|m| m.contains("well-founded variant")), "rational measure wrongly certified: {:#?}", disch(&money));
+        // (c) a rational (Money) measure that decreases by a WHOLE unit each step IS certifiable —
+        // bounded below + fixed ≥1 decrease terminates even for a rational (no Zeno).
+        let money1 = base("", "  invariant nn means pending >= 0\n", "Money");
+        assert!(disch(&money1).iter().any(|m| m.contains("well-founded variant")), "whole-unit Money variant wrongly refused: {:#?}", disch(&money1));
+        // (d) a SUB-unit decrease (½ each step) is a Zeno risk — must be REFUSED.
+        let zeno = "-- allium: 4\ncomponent Q\n  entity R\n  observable state pending : Money\n  observable state drained(R) : bool\n  invariant nn means pending >= 0\n  action process\n    requires pending >= 1\n    ensures pending = old(pending) - 0.5\n  objective drained(r) within eod\n    measure pending decreasing\nend\n";
+        assert!(!disch(zeno).iter().any(|m| m.contains("well-founded variant")), "sub-unit (Zeno) measure wrongly certified: {:#?}", disch(zeno));
     }
 
     #[test]
