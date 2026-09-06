@@ -1639,6 +1639,63 @@ fn nonlinear_reason(e: &Expr, num: &HashSet<String>) -> Option<String> {
     }
 }
 
+/// Does `e` contain an arithmetic ordering comparison (`<`, `>`, `<=`, `>=`) over a numeric variable?
+fn has_arith_comparison(e: &Expr, num: &HashSet<String>) -> bool {
+    match e {
+        Expr::Binary { op: BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge, lhs, rhs } => {
+            has_num_var(lhs, num) || has_num_var(rhs, num)
+        }
+        Expr::Binary { lhs, rhs, .. } => has_arith_comparison(lhs, num) || has_arith_comparison(rhs, num),
+        Expr::Unary { e, .. } => has_arith_comparison(e, num),
+        Expr::Cond { cond, then_, els } => {
+            has_arith_comparison(cond, num) || has_arith_comparison(then_, num) || has_arith_comparison(els, num)
+        }
+        _ => false,
+    }
+}
+
+/// Does `e` reference a boolean state or an enum-value condition anywhere? (A boolean/enum *atom*, as
+/// opposed to a numeric ordering.) Used to detect the arithmetic-guards-a-boolean seam.
+fn refs_bool_or_enum(e: &Expr, bool_names: &HashSet<String>, enum_names: &HashSet<String>) -> bool {
+    if is_enum_eq(e, enum_names) || is_enum_membership(e, enum_names) {
+        return true;
+    }
+    match e {
+        Expr::Name(n) => bool_names.contains(n),
+        Expr::App { head, args } => {
+            matches!(&**head, Expr::Name(h) if bool_names.contains(h)) || args.iter().any(|a| refs_bool_or_enum(a, bool_names, enum_names))
+        }
+        Expr::Field { name, base } => bool_names.contains(name) || refs_bool_or_enum(base, bool_names, enum_names),
+        Expr::Unary { e, .. } => refs_bool_or_enum(e, bool_names, enum_names),
+        Expr::Binary { lhs, rhs, .. } => refs_bool_or_enum(lhs, bool_names, enum_names) || refs_bool_or_enum(rhs, bool_names, enum_names),
+        Expr::Cond { cond, then_, els } => {
+            refs_bool_or_enum(cond, bool_names, enum_names) || refs_bool_or_enum(then_, bool_names, enum_names) || refs_bool_or_enum(els, bool_names, enum_names)
+        }
+        _ => false,
+    }
+}
+
+/// The arithmetic-guards-a-boolean seam: an implication whose ANTECEDENT carries a numeric threshold and
+/// whose CONSEQUENT is a boolean/enum requirement, e.g. `notional > 1000000 implies has_lei = true`. The
+/// linear-arithmetic rung cannot represent the boolean consequent, and the boolean rung cannot take the
+/// arithmetic antecedent, so the invariant falls through the seam and is not actually checked. We detect it
+/// so it is reported honestly as not-statically-checked rather than silently listed under a tier.
+///
+/// DIRECTIONAL on purpose: the reverse shape — a finite (enum/boolean) guard implying an arithmetic bound,
+/// e.g. `kind = swap implies count >= 0` — IS handled by state-guarded preservation, so we do NOT flag it
+/// (its antecedent has no arithmetic ordering comparison). Broader mixed forms remain the SMT-rung's job.
+fn arith_guards_bool(body: &Expr, num: &HashSet<String>, bool_names: &HashSet<String>, enum_names: &HashSet<String>) -> bool {
+    match body {
+        Expr::Binary { op: BinOp::Implies, lhs, rhs } => {
+            has_arith_comparison(lhs, num) && refs_bool_or_enum(rhs, bool_names, enum_names)
+        }
+        Expr::Binary { op: BinOp::And | BinOp::Or, lhs, rhs } => {
+            arith_guards_bool(lhs, num, bool_names, enum_names) || arith_guards_bool(rhs, num, bool_names, enum_names)
+        }
+        _ => false,
+    }
+}
+
 /// Classify an invariant by the rung it needs. Existential quantifiers and 3+ entity variables are honestly
 /// reported as not-statically-covered; a nonlinear term names its shape; otherwise boolean or linear.
 fn classify(inv: &Expr, bool_base: &HashSet<String>, all_obs: &HashSet<String>, num: &HashSet<String>, enum_names: &HashSet<String>) -> Tier {
@@ -1660,6 +1717,12 @@ fn classify(inv: &Expr, bool_base: &HashSet<String>, all_obs: &HashSet<String>, 
     }
     if boolean_fragment_rel(&body, bool_base, all_obs) {
         Tier::Boolean
+    } else if arith_guards_bool(&body, num, bool_base, enum_names) {
+        // A numeric threshold guarding a boolean/enum requirement falls through the SAT/LRA seam and is not
+        // actually checked — report it honestly instead of listing it under a rung it does not cover.
+        Tier::NotStatic(
+            "a numeric threshold guarding a boolean/enum requirement (mixed arithmetic and boolean) — outside the current statically-checkable fragment".into(),
+        )
     } else {
         Tier::LinearArith
     }
@@ -3445,6 +3508,23 @@ mod tests {
         assert!(cov.contains("linear-arithmetic tier: sum_ok"), "{cov}");
         assert!(cov.contains("int_ok (a product of two unknowns"), "{cov}");
         assert!(cov.contains("verify with `monitor`"), "{cov}");
+    }
+
+    #[test]
+    fn mixed_arith_bool_reported_not_covered_not_over_claimed() {
+        // A numeric threshold guarding a boolean requirement (`notional > 1000000 implies has_lei`) falls
+        // through the SAT/LRA seam: it is NOT actually checked, so the coverage note must report it honestly
+        // as not-statically-checked, NOT list it under the linear-arithmetic tier (the transparency bug).
+        let mixed = "-- allium: 4\ncomponent R\n  entity T\n  observable state notional : Money\n  observable state has_lei : bool\n  invariant large_needs_lei means notional > 1000000 implies has_lei = true\nend\n";
+        let cov = msgs(mixed).into_iter().find(|m| m.contains("analysis coverage")).unwrap();
+        assert!(cov.contains("NOT statically checked") && cov.contains("large_needs_lei"), "mixed rule must be honest, not over-claimed: {cov}");
+        assert!(!cov.contains("linear-arithmetic tier: large_needs_lei"), "mixed rule must NOT be listed as covered: {cov}");
+
+        // The REVERSE direction — a finite guard implying an arithmetic bound — IS handled by state-guarded
+        // preservation, so it must STILL be tiered as checked (not wrongly swept into not-covered).
+        let guarded = "-- allium: 4\ncomponent A\n  entity X\n  observable state kind : { spot | swap }\n  observable state count : Number\n  invariant swap_nonneg means kind = swap implies count >= 0\nend\n";
+        let cov2 = msgs(guarded).into_iter().find(|m| m.contains("analysis coverage")).unwrap();
+        assert!(!cov2.contains("NOT statically checked"), "enum-guard->arith must stay checked: {cov2}");
     }
 
     #[test]
