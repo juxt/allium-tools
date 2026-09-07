@@ -1024,6 +1024,10 @@ pub fn enum_guarded_preservation(module: &Module, src: &str, imports: &Imports) 
 
         // Enum-guarded linear invariants, and the unconditional linear invariants (pre-hypotheses that
         // rule out impossible pre-states, so a break is only reported from a genuinely reachable one).
+        // Name-sets for the contrapositive rewrite (below): numeric states, boolean states, enum-typed states.
+        let num_names: HashSet<String> = st.iter().filter(|(_, t)| numeric(t)).map(|(n, _)| n.clone()).collect();
+        let bool_names = crate::analyse::bool_names_of(d, src);
+        let enum_names: HashSet<String> = crate::analyse::enum_values_of(d, src, false).into_keys().collect();
         let mut guarded: Vec<(String, Vec<(String, String, bool)>, Vec<Expr>, Expr)> = Vec::new();
         let mut uncond_pre: Vec<Con> = Vec::new();
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Invariant) {
@@ -1031,7 +1035,13 @@ pub fn enum_guarded_preservation(module: &Module, src: &str, imports: &Imports) 
                 (Some(n), Some(b)) => (n.clone(), b),
                 _ => continue,
             };
-            let qf = match arith_reduce(&crate::monitor::inline_defs(&parse_predicate(body.slice(src)).0, &defs)) {
+            // A numeric threshold guarding a boolean/enum requirement (`notional > 1M implies has_lei`) is
+            // rewritten to its equivalent contrapositive (`not has_lei implies notional <= 1M`), a finite
+            // guard implying an arithmetic bound that this pass checks. Sound (logically equivalent); no-op
+            // for invariants that are not this shape.
+            let parsed = parse_predicate(body.slice(src)).0;
+            let parsed = crate::analyse::contrapose_arith_guards_bool(&parsed, &num_names, &bool_names, &enum_names).unwrap_or(parsed);
+            let qf = match arith_reduce(&crate::monitor::inline_defs(&parsed, &defs)) {
                 Some(e) => e,
                 None => continue,
             };

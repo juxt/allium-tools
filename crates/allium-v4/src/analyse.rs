@@ -1696,6 +1696,49 @@ fn arith_guards_bool(body: &Expr, num: &HashSet<String>, bool_names: &HashSet<St
     }
 }
 
+/// The opposite ordering operator (`>` ↔ `<=`, `>=` ↔ `<`), for negating a comparison.
+fn flip_cmp(op: BinOp) -> Option<BinOp> {
+    match op {
+        BinOp::Gt => Some(BinOp::Le),
+        BinOp::Ge => Some(BinOp::Lt),
+        BinOp::Lt => Some(BinOp::Ge),
+        BinOp::Le => Some(BinOp::Gt),
+        _ => None,
+    }
+}
+
+/// Negate a boolean/enum atom: flip `=`↔`≠`, wrap anything else in `not`.
+fn negate_bool_enum_atom(e: &Expr) -> Expr {
+    match e {
+        Expr::Binary { op: BinOp::Eq, lhs, rhs } => Expr::Binary { op: BinOp::Ne, lhs: lhs.clone(), rhs: rhs.clone() },
+        Expr::Binary { op: BinOp::Ne, lhs, rhs } => Expr::Binary { op: BinOp::Eq, lhs: lhs.clone(), rhs: rhs.clone() },
+        _ => Expr::Unary { op: UnOp::Not, e: Box::new(e.clone()) },
+    }
+}
+
+/// Rewrite a numeric-threshold-guards-a-boolean invariant to its equivalent CONTRAPOSITIVE, which the
+/// state-guarded arithmetic checker can handle. `A implies B`, where A is a single arithmetic ordering
+/// comparison over a numeric variable and B a boolean/enum atom, becomes `not B implies not A` — a finite
+/// (boolean/enum) guard implying an arithmetic bound. Logically equivalent, hence sound. Returns None if the
+/// invariant is not this clean shape (a compound antecedent is left alone — honestly reported as not-checked
+/// rather than rewritten with a De Morgan expansion this pass does not yet handle).
+pub(crate) fn contrapose_arith_guards_bool(inv: &Expr, num: &HashSet<String>, bool_names: &HashSet<String>, enum_names: &HashSet<String>) -> Option<Expr> {
+    let Expr::Binary { op: BinOp::Implies, lhs, rhs } = inv else { return None };
+    // Antecedent: exactly a single arithmetic ordering comparison over a numeric variable.
+    let Expr::Binary { op, lhs: al, rhs: ar } = &**lhs else { return None };
+    let flipped = flip_cmp(op.clone())?;
+    if !has_arith_comparison(lhs, num) {
+        return None;
+    }
+    // Consequent: a boolean/enum atom with no arithmetic of its own.
+    if !refs_bool_or_enum(rhs, bool_names, enum_names) || has_arith_comparison(rhs, num) {
+        return None;
+    }
+    let neg_a = Expr::Binary { op: flipped, lhs: al.clone(), rhs: ar.clone() };
+    let neg_b = negate_bool_enum_atom(rhs);
+    Some(Expr::Binary { op: BinOp::Implies, lhs: Box::new(neg_b), rhs: Box::new(neg_a) })
+}
+
 /// Classify an invariant by the rung it needs. Existential quantifiers and 3+ entity variables are honestly
 /// reported as not-statically-covered; a nonlinear term names its shape; otherwise boolean or linear.
 fn classify(inv: &Expr, bool_base: &HashSet<String>, all_obs: &HashSet<String>, num: &HashSet<String>, enum_names: &HashSet<String>) -> Tier {
@@ -1717,9 +1760,15 @@ fn classify(inv: &Expr, bool_base: &HashSet<String>, all_obs: &HashSet<String>, 
     }
     if boolean_fragment_rel(&body, bool_base, all_obs) {
         Tier::Boolean
+    } else if let Some(cp) = contrapose_arith_guards_bool(&body, num, bool_base, enum_names) {
+        // A numeric threshold guarding a boolean requirement is rewritten to its equivalent contrapositive
+        // (a finite guard implying an arithmetic bound), which the state-guarded checker DOES handle. Tier it
+        // by the rewritten form — it is genuinely checked, not a seam skip. (The contrapositive's antecedent
+        // is boolean, so this does not recurse into this branch again.)
+        classify(&cp, bool_base, all_obs, num, enum_names)
     } else if arith_guards_bool(&body, num, bool_base, enum_names) {
-        // A numeric threshold guarding a boolean/enum requirement falls through the SAT/LRA seam and is not
-        // actually checked — report it honestly instead of listing it under a rung it does not cover.
+        // Matched the seam pattern but not the clean single-comparison shape we can rewrite (e.g. a compound
+        // antecedent) — report it honestly as not-checked rather than list it under a rung it does not cover.
         Tier::NotStatic(
             "a numeric threshold guarding a boolean/enum requirement (mixed arithmetic and boolean) — outside the current statically-checkable fragment".into(),
         )
@@ -3511,17 +3560,28 @@ mod tests {
     }
 
     #[test]
-    fn mixed_arith_bool_reported_not_covered_not_over_claimed() {
-        // A numeric threshold guarding a boolean requirement (`notional > 1000000 implies has_lei`) falls
-        // through the SAT/LRA seam: it is NOT actually checked, so the coverage note must report it honestly
-        // as not-statically-checked, NOT list it under the linear-arithmetic tier (the transparency bug).
-        let mixed = "-- allium: 4\ncomponent R\n  entity T\n  observable state notional : Money\n  observable state has_lei : bool\n  invariant large_needs_lei means notional > 1000000 implies has_lei = true\nend\n";
-        let cov = msgs(mixed).into_iter().find(|m| m.contains("analysis coverage")).unwrap();
-        assert!(cov.contains("NOT statically checked") && cov.contains("large_needs_lei"), "mixed rule must be honest, not over-claimed: {cov}");
-        assert!(!cov.contains("linear-arithmetic tier: large_needs_lei"), "mixed rule must NOT be listed as covered: {cov}");
+    fn mixed_arith_bool_checked_via_contrapositive() {
+        // A numeric threshold guarding a boolean requirement (`notional > 1000000 implies has_lei`) is now
+        // CHECKED via the sound contrapositive rewrite (`not has_lei implies notional <= 1M`). A violating
+        // action must be caught, and the coverage note must tier it as checked (linear-arithmetic), NOT list
+        // it as not-statically-checked.
+        let mixed = "-- allium: 4\ncomponent R\n  entity T\n  observable state notional : Money\n  observable state has_lei : bool\n  invariant large_needs_lei means notional > 1000000 implies has_lei = true\n  action book_large_no_lei\n    ensures notional = 2000000 and has_lei = false\nend\n";
+        assert!(any(mixed, "`book_large_no_lei` in `R` can break"), "mixed rule violation must be caught: {:#?}", msgs(mixed));
+        let cov = msgs(mixed).into_iter().find(|s| s.contains("analysis coverage")).unwrap();
+        assert!(cov.contains("linear-arithmetic tier: large_needs_lei"), "mixed rule must now be tiered as checked: {cov}");
+        assert!(!cov.contains("NOT statically checked"), "mixed rule is checked, not skipped: {cov}");
 
-        // The REVERSE direction — a finite guard implying an arithmetic bound — IS handled by state-guarded
-        // preservation, so it must STILL be tiered as checked (not wrongly swept into not-covered).
+        // A COMPLIANT spec must not false-alarm.
+        let ok = "-- allium: 4\ncomponent R\n  entity T\n  observable state notional : Money\n  observable state has_lei : bool\n  invariant large_needs_lei means notional > 1000000 implies has_lei = true\n  action book_large_with_lei\n    ensures notional = 2000000 and has_lei = true\nend\n";
+        assert!(!any(ok, "can break"), "compliant mixed rule must not false-alarm: {:#?}", msgs(ok));
+
+        // A pattern we cannot cleanly rewrite (compound arithmetic antecedent) must still be reported
+        // honestly as not-statically-checked — never silently listed as covered.
+        let compound = "-- allium: 4\ncomponent R\n  entity T\n  observable state a : Money\n  observable state b : Money\n  observable state flag : bool\n  invariant needs_flag means (a > 100 and b > 100) implies flag = true\nend\n";
+        let cov3 = msgs(compound).into_iter().find(|m| m.contains("analysis coverage")).unwrap();
+        assert!(cov3.contains("NOT statically checked"), "un-rewritable compound mixed rule must stay honest: {cov3}");
+
+        // The reverse direction (finite guard implying an arithmetic bound) stays checked as before.
         let guarded = "-- allium: 4\ncomponent A\n  entity X\n  observable state kind : { spot | swap }\n  observable state count : Number\n  invariant swap_nonneg means kind = swap implies count >= 0\nend\n";
         let cov2 = msgs(guarded).into_iter().find(|m| m.contains("analysis coverage")).unwrap();
         assert!(!cov2.contains("NOT statically checked"), "enum-guard->arith must stay checked: {cov2}");
