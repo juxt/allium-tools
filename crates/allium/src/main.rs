@@ -113,7 +113,7 @@ fn main() -> ExitCode {
         }
         "--version" | "-V" => {
             println!(
-                "allium {} (language versions: 1, 2, 3)",
+                "allium {} (language versions: 1, 2, 3, 4)",
                 env!("CARGO_PKG_VERSION")
             );
             return ExitCode::SUCCESS;
