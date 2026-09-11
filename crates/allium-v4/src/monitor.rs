@@ -958,6 +958,87 @@ pub fn monitor_schedule(source: &str, trace: &str, tol: f64) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Unified entry: one `monitor` over either trace world
+// ---------------------------------------------------------------------------
+// The two engines above observe two different kinds of system: an event stream
+// (entities evolving over time; boolean/temporal/relational invariants) and a
+// computed schedule (ordered numeric periods; arithmetic/aggregate invariants).
+// That difference is a property of the TRACE, not a reason for two commands: the
+// trace's keying tells us which world it is, and each engine already dispatches
+// per invariant and honestly skips what its world cannot evaluate. So one entry
+// detects the format and routes to the right engine — the format is an input
+// detail, not a separate tool.
+
+/// Which world a trace describes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TraceFormat {
+    /// `t=<n> entity=<id> <pred>=T ...` — boolean predicates over entities across time.
+    Event,
+    /// `period=<i> <field>=<number> ...` — numeric fields over ordered periods.
+    Schedule,
+}
+
+impl TraceFormat {
+    fn label(self) -> &'static str {
+        match self {
+            TraceFormat::Event => "event",
+            TraceFormat::Schedule => "schedule",
+        }
+    }
+}
+
+/// Detect a trace's world from how its data rows are keyed. A `period=` row is a schedule; an
+/// `entity=`/`t=` row is an event stream. `given ...` lines are the data dictionary, not rows, so
+/// they do not count. Event keying is decisive: a schedule never carries `entity=`/`t=`, so if event
+/// keying appears we route to the event engine (never silently dropping temporal/relational safety);
+/// a caller who means the schedule can force it. A trace with no recognisable keying (including the
+/// empty trace) is treated as an event stream, the boolean default.
+pub fn detect_format(trace: &str) -> TraceFormat {
+    let mut has_period = false;
+    let mut has_event = false;
+    for line in trace.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        if toks.iter().any(|t| *t == "given" || t.starts_with("given=")) {
+            continue;
+        }
+        for tok in &toks {
+            if tok.starts_with("period=") {
+                has_period = true;
+            }
+            if tok.starts_with("entity=") || tok.starts_with("t=") {
+                has_event = true;
+            }
+        }
+    }
+    if has_event {
+        TraceFormat::Event
+    } else if has_period {
+        TraceFormat::Schedule
+    } else {
+        TraceFormat::Event
+    }
+}
+
+/// Run the monitor over either trace world under one entry. `format` forces a world; `None`
+/// auto-detects from the trace. `tol` is used only by the schedule (arithmetic) engine. The
+/// returned JSON is the chosen engine's own report, prefixed with `"format"` (which world ran) and
+/// `"detected"` (whether it was auto-detected). `ok` is preserved, so exit-code handling is uniform.
+pub fn monitor_auto(source: &str, trace: &str, format: Option<TraceFormat>, tol: f64) -> String {
+    let detected = format.is_none();
+    let fmt = format.unwrap_or_else(|| detect_format(trace));
+    let inner = match fmt {
+        TraceFormat::Event => monitor(source, trace),
+        TraceFormat::Schedule => monitor_schedule(source, trace, tol),
+    };
+    let body = inner.strip_prefix('{').unwrap_or(&inner);
+    format!("{{\"format\":\"{}\",\"detected\":{},{}", fmt.label(), detected, body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1232,5 +1313,57 @@ mod tests {
         // when a block with uti=U9 exists, no violation
         let good = "t=1 entity=R1 allocation=F prior=none uti=U9\nt=2 entity=R2 allocation=T prior=U9 uti=U2\n";
         assert!(monitor(spec, good).contains("\"ok\":true"), "{}", monitor(spec, good));
+    }
+
+    // --- unified entry: one `monitor` over either trace world -----------------
+
+    #[test]
+    fn detect_format_routes_by_keying() {
+        // period-keyed rows are a schedule; entity/t-keyed rows are an event stream.
+        assert_eq!(detect_format("period=0 emi=8.33 principal=8.33\ngiven disbursed=100\n"), TraceFormat::Schedule);
+        assert_eq!(detect_format("t=1 entity=R1 cleared=T\n"), TraceFormat::Event);
+        assert_eq!(detect_format("entity=R1 cleared=T\n"), TraceFormat::Event);
+        // givens alone, or an empty trace, default to the boolean (event) world.
+        assert_eq!(detect_format("given disbursed=100\n"), TraceFormat::Event);
+        assert_eq!(detect_format(""), TraceFormat::Event);
+        // event keying is decisive when both appear, so temporal/relational safety is never dropped.
+        assert_eq!(detect_format("entity=R1 period=0 x=T\n"), TraceFormat::Event);
+    }
+
+    #[test]
+    fn auto_routes_event_trace_to_boolean_engine() {
+        // The reporting spec + a point violation: monitor_auto must detect `event`, run the boolean
+        // engine, tag the format, and still expose `ok`.
+        let r = monitor_auto(SPEC, "t=1 entity=R1 collateralised=T has_code=F accepted=F rejected=F\n", None, 0.005);
+        assert!(r.contains("\"format\":\"event\""), "{r}");
+        assert!(r.contains("\"detected\":true"), "{r}");
+        assert!(r.contains("collat_needs_code") && r.contains("\"ok\":false"), "{r}");
+    }
+
+    #[test]
+    fn auto_routes_schedule_trace_to_arithmetic_engine() {
+        // The loan spec + a broken-conservation schedule (principals 300/330/360 = 990 ≠ 1000): the
+        // SAME command must detect `schedule`, run the arithmetic engine, and name conservation. This
+        // is the whole point — arithmetic now works through `monitor`, not a second command.
+        let bad = "period=0 emi=400 interest=100 principal=300 outstanding_start=1000 is_last=F\nperiod=1 emi=400 interest=70 principal=330 outstanding_start=700 is_last=F\nperiod=2 emi=400 interest=10 principal=360 outstanding_start=370 is_last=T\ngiven disbursed=1000\n";
+        let r = monitor_auto(LOAN, bad, None, 0.005);
+        assert!(r.contains("\"format\":\"schedule\""), "{r}");
+        assert!(r.contains("\"invariant\":\"conservation\",\"holds\":false"), "{r}");
+        assert!(r.contains("\"ok\":false"), "{r}");
+        // a correct schedule passes through the same entry
+        assert!(monitor_auto(LOAN, GOOD, None, 0.005).contains("\"ok\":true"));
+    }
+
+    #[test]
+    fn forced_format_overrides_detection() {
+        // Forcing `event` on a period-keyed schedule routes to the boolean engine (which finds no
+        // boolean/temporal/relational invariants to run here): detected=false, and it does not run the
+        // arithmetic conservation check. Proves --format is an honest override.
+        let forced = monitor_auto(LOAN, GOOD, Some(TraceFormat::Event), 0.005);
+        assert!(forced.contains("\"format\":\"event\"") && forced.contains("\"detected\":false"), "{forced}");
+        // The event engine does not RUN the arithmetic invariants; it honestly SKIPS them (no
+        // schedule-style `"holds":` result), so nothing is silently mis-evaluated.
+        assert!(forced.contains("\"monitored\":0") && !forced.contains("\"holds\":"), "event engine must not run arithmetic: {forced}");
+        assert!(forced.contains("boolean-only"), "arithmetic invariants must be skipped with a reason: {forced}");
     }
 }

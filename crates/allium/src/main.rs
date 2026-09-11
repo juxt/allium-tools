@@ -23,6 +23,7 @@ Commands:
   parse    Parse a spec file and print the AST as JSON
   plan     Derive test obligations from a spec
   model    Extract the domain model as structured data
+  monitor  Check a spec's invariants against an execution trace (JSON)
   help     Print help for the CLI or for a specific command
 
 Options:
@@ -98,6 +99,35 @@ derived from the spec. The output carries a `diagnostics` array mirroring
 diagnostic.
 ";
 
+const MONITOR_HELP: &str = "\
+allium monitor - check a spec's invariants against an execution trace
+
+Usage: allium monitor <spec.allium> <trace> [--format auto|event|schedule] [--tol N]
+
+Evaluates the spec's `invariant` items against a trace, one row per line. The
+trace world is auto-detected from how its rows are keyed:
+
+  event     `t=<n> entity=<id> <pred>=T ...` — boolean, temporal (old(...)) and
+            relational (quantified) invariants over entities across time.
+  schedule  `period=<i> <field>=<number> ...` — arithmetic and aggregate (sum)
+            invariants over ordered periods, reported with a numeric residual.
+
+Each invariant is dispatched to the evaluator its form needs; anything the
+detected world cannot faithfully evaluate is reported under `skipped`, never
+guessed. `--format` forces a world (default auto); `--tol` sets the numeric
+tolerance for the schedule world (default 0.005).
+
+Output is JSON tagged with the `format` that ran and whether it was `detected`;
+`ok` is false on any violation.
+
+Exit codes:
+  0  No violation
+  1  A violation was found
+  2  Bad arguments, or a file could not be read
+
+`monitor-schedule` remains as a deprecated alias for the schedule world.
+";
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -142,7 +172,13 @@ fn main() -> ExitCode {
             }
         }
         "route" => cmd_route(rest),
-        "monitor" => cmd_monitor(rest),
+        "monitor" => {
+            if rest.iter().any(|a| a == "--help" || a == "-h") {
+                print!("{MONITOR_HELP}");
+                return ExitCode::SUCCESS;
+            }
+            cmd_monitor(rest)
+        }
         "monitor-schedule" => cmd_monitor_schedule(rest),
         other => {
             eprintln!("allium: unknown command `{other}`");
@@ -173,8 +209,10 @@ fn cmd_route(args: &[String]) -> ExitCode {
     }
 }
 
-/// v4-only arithmetic schedule monitor: `allium monitor-schedule <spec> <trace> [--tol N]`.
-/// Evaluates arithmetic/quantified invariants over a concrete numeric schedule trace.
+/// DEPRECATED ALIAS. `allium monitor` now auto-detects a schedule trace and runs the same
+/// arithmetic engine, so prefer `allium monitor <spec> <trace>` (or `--format schedule`). This
+/// entry is kept, with byte-identical output (no `format` envelope), so existing scripts and gates
+/// that call `monitor-schedule` keep working unchanged.
 fn cmd_monitor_schedule(args: &[String]) -> ExitCode {
     let tol_pos = args.iter().position(|a| a == "--tol");
     let tol = tol_pos
@@ -216,11 +254,50 @@ fn cmd_monitor_schedule(args: &[String]) -> ExitCode {
     }
 }
 
-/// v4-only runtime monitor: `allium monitor <spec.allium> <trace>`.
+/// v4-only runtime monitor: `allium monitor <spec.allium> <trace> [--format auto|event|schedule] [--tol N]`.
+/// One command over either trace world: the format is auto-detected from the trace's keying (or forced
+/// with `--format`), and each invariant is dispatched to the evaluator its form needs.
 fn cmd_monitor(args: &[String]) -> ExitCode {
-    let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+    use allium_v4::monitor::TraceFormat;
+    // Flag values that should not be taken as positional files: the argument after --tol / --format.
+    let mut skip_val: HashSet<usize> = HashSet::new();
+    let mut tol = 0.005;
+    let mut format: Option<TraceFormat> = None;
+    for (i, a) in args.iter().enumerate() {
+        match a.as_str() {
+            "--tol" => {
+                if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<f64>().ok()) {
+                    tol = v;
+                }
+                skip_val.insert(i + 1);
+            }
+            "--format" => {
+                match args.get(i + 1).map(String::as_str) {
+                    Some("event") => format = Some(TraceFormat::Event),
+                    Some("schedule") => format = Some(TraceFormat::Schedule),
+                    Some("auto") => format = None,
+                    Some(other) => {
+                        eprintln!("monitor: unknown --format `{other}` (expected auto|event|schedule)");
+                        return ExitCode::from(2);
+                    }
+                    None => {
+                        eprintln!("monitor: --format needs a value (auto|event|schedule)");
+                        return ExitCode::from(2);
+                    }
+                }
+                skip_val.insert(i + 1);
+            }
+            _ => {}
+        }
+    }
+    let files: Vec<&String> = args
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| !a.starts_with('-') && !skip_val.contains(i))
+        .map(|(_, a)| a)
+        .collect();
     if files.len() != 2 {
-        eprintln!("monitor: need <spec.allium> <trace>");
+        eprintln!("monitor: need <spec.allium> <trace> [--format auto|event|schedule] [--tol N]");
         return ExitCode::from(2);
     }
     let source = match std::fs::read_to_string(files[0]) {
@@ -237,7 +314,7 @@ fn cmd_monitor(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let report = allium_v4::monitor::monitor(&source, &trace);
+    let report = allium_v4::monitor::monitor_auto(&source, &trace, format, tol);
     println!("{report}");
     // Exit non-zero when a violation is found, so it composes in a pipeline / CI.
     if report.contains("\"ok\":false") {
@@ -253,7 +330,7 @@ fn cmd_help(args: &[String]) -> ExitCode {
             print!("{HELP}");
             ExitCode::SUCCESS
         }
-        Some("check") | Some("analyse") | Some("parse") | Some("plan") | Some("model") => {
+        Some("check") | Some("analyse") | Some("parse") | Some("plan") | Some("model") | Some("monitor") => {
             print!("{}", subcommand_help(args[0].as_str()));
             ExitCode::SUCCESS
         }
@@ -272,6 +349,7 @@ fn subcommand_help(name: &str) -> &'static str {
         "parse" => PARSE_HELP,
         "plan" => PLAN_HELP,
         "model" => MODEL_HELP,
+        "monitor" => MONITOR_HELP,
         _ => HELP,
     }
 }
