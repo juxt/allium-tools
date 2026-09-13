@@ -76,9 +76,9 @@ pub fn arithmetic(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnost
         let mut uniq: Vec<String> = notes.clone();
         uniq.sort();
         uniq.dedup();
-        feasibility_probe(&d.name, &grounded, &st, uniq.len(), &mut out);
-        entailment_probe(&d.name, &grounded, &st, &mut out);
-        requirement_probe(&d.name, &grounded, &d.items, &st, src, &mut out);
+        feasibility_probe(&d.name, d.span, &grounded, &st, uniq.len(), &mut out);
+        entailment_probe(&d.name, d.span, &grounded, &st, &mut out);
+        requirement_probe(&d.name, d.span, &grounded, &d.items, &st, src, &mut out);
         if !uniq.is_empty() {
             out.push(Diagnostic::warning(
                 d.span,
@@ -2317,6 +2317,7 @@ fn negate_con(c: &Con) -> Vec<Con> {
 /// principal and disbursed to a positive constant so the witness is a real schedule.
 fn feasibility_probe(
     comp: &str,
+    comp_span: crate::span::Span,
     grounded: &[(String, Vec<Con>)],
     st: &HashMap<String, String>,
     skipped: usize,
@@ -2340,7 +2341,7 @@ fn feasibility_probe(
     }
     match solve(&cons) {
         Outcome::Sat(m) => out.push(Diagnostic::warning(
-            comp_span(),
+            comp_span,
             format!(
                 "arithmetic invariants in `{comp}` are JOINTLY SATISFIABLE over {N} periods.{partial} Witness schedule: {}",
                 schedule(&m, st)
@@ -2350,7 +2351,7 @@ fn feasibility_probe(
             let core = unsat_core(&cons);
             out.push(
                 Diagnostic::warning(
-                    comp_span(),
+                    comp_span,
                     format!("arithmetic invariants in `{comp}` are CONTRADICTORY over {N} periods: no schedule satisfies them all. Conflicting core: {}.", core.join(", ")),
                 )
                 .with_code("contradictory-invariants")
@@ -2367,6 +2368,7 @@ fn feasibility_probe(
 /// for an independent inequality, the counterexample that reveals the hidden assumption.
 fn entailment_probe(
     comp: &str,
+    comp_span: crate::span::Span,
     grounded: &[(String, Vec<Con>)],
     st: &HashMap<String, String>,
     out: &mut Vec<Diagnostic>,
@@ -2394,7 +2396,7 @@ fn entailment_probe(
         }
         match counter {
             None => out.push(Diagnostic::warning(
-                comp_span(),
+                comp_span,
                 format!("invariant `{name}` in `{comp}` is ENTAILED by the other invariants (redundant under the bounded model)."),
             )),
             Some(m) => {
@@ -2402,7 +2404,7 @@ fn entailment_probe(
                 // interesting "what does this silently assume" case.
                 if cons_i.iter().any(|c| c.rel != Rel::Eq) {
                     out.push(Diagnostic::warning(
-                        comp_span(),
+                        comp_span,
                         format!(
                             "invariant `{name}` in `{comp}` is NOT entailed by the others: they permit `{}`, which it forbids. So it relies on an assumption not captured by the other invariants (typically a sign or ordering constraint on an input), state that assumption if it is meant to hold.",
                             schedule(&m, st)
@@ -2410,7 +2412,7 @@ fn entailment_probe(
                     ));
                 } else {
                     out.push(Diagnostic::warning(
-                        comp_span(),
+                        comp_span,
                         format!("invariant `{name}` in `{comp}` is independent of the others (not derivable)."),
                     ));
                 }
@@ -2574,6 +2576,7 @@ fn emit(
 /// "satisfiable" only by the fee never applying, which the requirement rules out.
 fn requirement_probe(
     comp: &str,
+    comp_span: crate::span::Span,
     inv_cons: &[(String, Vec<Con>)],
     items: &[crate::ast::Item],
     st: &HashMap<String, String>,
@@ -2614,7 +2617,7 @@ fn requirement_probe(
         if let Outcome::Unsat = solve(&all) {
             let core = unsat_core(&all);
             out.push(Diagnostic::warning(
-                comp_span(),
+                comp_span,
                 format!(
                     "requirement `{name}` in `{comp}` is INFEASIBLE against the invariants (arithmetic): no model has it hold together with them (core: {}). The invariants are satisfiable only by this scenario never occurring.",
                     core.join(", ")
@@ -2979,9 +2982,6 @@ fn ground_name(name: &str, args: &[Expr], env: &HashMap<String, usize>) -> Strin
 }
 
 /// Constraints attach to the component; predicate sub-terms carry no span.
-fn comp_span() -> crate::span::Span {
-    crate::span::Span::new(0, 0)
-}
 
 #[cfg(test)]
 mod tests {
