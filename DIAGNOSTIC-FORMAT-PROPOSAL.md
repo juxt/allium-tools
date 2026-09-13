@@ -124,3 +124,22 @@ Structural unification, real locations, dedup, and em-dash removal are done and 
 Remaining hardening (tracked, not yet done): assign codes to the rest of the ~72 v4 diagnostic
 sites; the malformed-predicate checker gap (a `= =` predicate parses without a diagnostic) is a
 separate parser bug, not a formatting issue.
+
+## Further silent-acceptance gaps found by probing (verified, tracked)
+
+Fixed: `malformed-predicate` (dangling operator / stray token / unknown operator / empty body) now
+surfaced. Remaining "green means nothing" gaps found by probing the v4 check, each reproduced:
+
+1. **Undeclared entity in a state sort passes silently.** `observable state x(Ghost) : Number` with
+   no `entity Ghost` → 0 diagnostics. The state is meaningless yet check is clean. Should flag the
+   undeclared entity sort (analogous to the name-resolution check, but on the state's entity
+   parameter). Needs the AST's state-sort representation, deferred rather than rushed.
+2. **Empty component passes silently.** `component C end` (no items) → 0 diagnostics. Debatable
+   whether to flag, low priority.
+3. **`parse` and `model` commands run the v3 parser on v4 specs.** Both route through the v3 pipeline
+   regardless of the `-- allium: 4` marker, so a v4 spec yields spurious v3-grammar errors
+   ("invariant name must start with an uppercase letter"). `check`/`analyse` correctly use the v4
+   pipeline; `parse`/`model` do not. A command-routing gap, not a formatting one.
+
+These are checker-correctness follow-ups beyond the diagnostic-format feature; recorded here so they
+are not lost.
