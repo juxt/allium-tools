@@ -1,4 +1,5 @@
 mod domain_model;
+mod domain_model_v4;
 mod libfetch;
 mod plan_v4;
 mod test_plan;
@@ -965,14 +966,28 @@ fn cmd_parse(args: &[String]) -> ExitCode {
         }
     };
 
-    // `parse` dumps the v1-v3 AST. On a v4 spec it would parse with the wrong grammar and emit
-    // misleading v3-grammar errors, so refuse honestly rather than mislead.
+    // v4 specs get the v4 pipeline: parse with the v4 grammar and dump the v4 AST, with diagnostics
+    // in the unified shape. (The v1-v3 path below is untouched.)
     if allium_parser::detect_version(&source) == Some(4) {
-        eprintln!("Usage: allium parse <file.allium>");
-        eprintln!(
-            "error: `parse` does not yet support allium v4; use `allium check` or `allium analyse` for v4 specs."
-        );
-        return ExitCode::from(2);
+        let pr = allium_v4::parse(&source);
+        let source_map = SourceMap::new(&source);
+        let mut seen = HashSet::new();
+        let diagnostics: Vec<serde_json::Value> = pr
+            .diagnostics
+            .iter()
+            .filter(|d| seen.insert((d.message.clone(), d.span.start, d.span.end)))
+            .map(|d| v4_diagnostic_to_json(d, path, &source_map))
+            .collect();
+        let has_error = pr.diagnostics.iter().any(|d| d.is_error());
+        let output = serde_json::json!({
+            "command": "parse",
+            "spec_file": path.display().to_string(),
+            "language_version": 4,
+            "module": pr.module,
+            "diagnostics": diagnostics,
+        });
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        return if has_error { ExitCode::from(1) } else { ExitCode::SUCCESS };
     }
 
     let result = allium_parser::parse(&source);
@@ -1000,6 +1015,19 @@ fn cmd_plan(args: &[String]) -> ExitCode {
 }
 
 fn cmd_model(args: &[String]) -> ExitCode {
+    // A v4 spec is component-centric (components, observable states, givens, objectives), which the
+    // v1-v3 entity/field model cannot represent, so route it to the v4 extractor. Everything else
+    // stays on the v3 path.
+    if let Some(path) = args.first().filter(|_| args.len() == 1) {
+        if let Ok(source) = std::fs::read_to_string(path) {
+            if allium_v4::detect_version(&source) == Some(4) {
+                let module = allium_v4::parse(&source).module;
+                let model = domain_model_v4::extract_v4_domain_model(&module, &source);
+                println!("{}", serde_json::to_string_pretty(&serde_json::to_value(model).unwrap()).unwrap());
+                return ExitCode::SUCCESS;
+            }
+        }
+    }
     run_single_file("allium model <file.allium>", args, |module, source| {
         let model = domain_model::extract_domain_model(module, source);
         serde_json::to_value(model).unwrap()

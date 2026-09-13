@@ -282,24 +282,36 @@ fn v4_undeclared_entity_sort_is_flagged() {
     );
 }
 
-// `parse`/`model` run the v1-v3 pipeline. On a v4 spec they must refuse honestly, not emit
-// misleading v3-grammar errors ("invariant name must start with an uppercase letter").
-const V4_MINIMAL: &str = "-- allium: 4\ncomponent C\n  observable state x : Number\n  invariant i means x >= 0\nend\n";
+// `parse` and `model` now run the v4 pipeline on a v4 spec (not the v3 grammar): `parse` dumps the
+// v4 AST, `model` extracts the v4 component/state/objective domain model. Neither emits the old
+// misleading v3-grammar error ("invariant name must start with an uppercase letter").
+const V4_MINIMAL: &str = "-- allium: 4\ncomponent C\n  entity E\n  observable state x(E) : Number\n  invariant i means every p :: x(p) >= 0\n  objective drained within eod\nend\n";
 
 #[test]
-fn parse_and_model_refuse_v4_specs_honestly() {
-    for command in ["parse", "model"] {
-        let spec = SpecFile::new(&format!("v4-refuse-{command}"), V4_MINIMAL);
-        let out = allium().arg(command).arg(spec.arg()).output().expect("spawn allium");
-        assert_eq!(out.status.code(), Some(2), "{command} on a v4 spec should exit 2");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("does not yet support allium v4"),
-            "{command} should refuse v4 honestly, not run the v3 grammar: {stderr}"
-        );
-        assert!(
-            !stderr.contains("uppercase letter"),
-            "{command} must not emit misleading v3-grammar errors on a v4 spec: {stderr}"
-        );
-    }
+fn parse_supports_v4_and_dumps_the_ast() {
+    let spec = SpecFile::new("v4-parse", V4_MINIMAL);
+    let out = allium().arg("parse").arg(spec.arg()).output().expect("spawn allium");
+    assert!(out.status.success(), "parse on a valid v4 spec should exit 0, got {:?}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("parse v4 output should be valid JSON");
+    assert_eq!(json["language_version"], 4, "should report v4: {stdout}");
+    assert!(json["module"]["decls"].is_array(), "should dump the v4 module AST: {stdout}");
+    assert!(!stdout.contains("uppercase letter"), "must not emit v3-grammar errors: {stdout}");
+}
+
+#[test]
+fn model_supports_v4_and_extracts_the_domain_model() {
+    let spec = SpecFile::new("v4-model", V4_MINIMAL);
+    let out = allium().arg("model").arg(spec.arg()).output().expect("spawn allium");
+    assert!(out.status.success(), "model on a valid v4 spec should exit 0, got {:?}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("model v4 output should be valid JSON");
+    assert_eq!(json["version"], 4, "should report v4: {stdout}");
+    let comp = &json["components"][0];
+    assert_eq!(comp["name"], "C", "component name: {stdout}");
+    assert_eq!(comp["entities"][0], "E", "entity extracted: {stdout}");
+    assert_eq!(comp["states"][0]["name"], "x", "state extracted: {stdout}");
+    assert_eq!(comp["states"][0]["sort"], "E", "state sort extracted: {stdout}");
+    assert_eq!(comp["objectives"][0]["goal"], "drained", "objective extracted: {stdout}");
+    assert!(!stdout.contains("uppercase letter"), "must not emit v3-grammar errors: {stdout}");
 }

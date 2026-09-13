@@ -135,10 +135,11 @@ surfaced. Remaining "green means nothing" gaps found by probing the v4 check, ea
    corpus; cli_smoke test locks it.
 2. **Empty component passes silently.** `component C end` (no items) → 0 diagnostics. Debatable
    whether to flag, low priority.
-3. **`parse` and `model` on v4 specs.** FIXED: both now detect a v4 spec and refuse honestly (exit 2,
-   "does not yet support allium v4; use check/analyse") instead of emitting spurious v3-grammar
-   errors. `plan` already routed v4 to its own emitter. cli_smoke test locks it. (Full v4 parse/model
-   output remains unimplemented, a feature, not a bug.)
+3. **`parse` and `model` on v4 specs.** FIXED + now fully supported. `parse` runs the v4 grammar and
+   dumps the v4 AST (with unified diagnostics); `model` extracts a v4 component-centric domain model
+   (entities, observable states with sort + value type, givens, actions, role-tagged predicates,
+   objectives) via the new `domain_model_v4` module. `plan` already had its v4 emitter. cli_smoke
+   tests lock both. No command now runs the v3 grammar on a v4 spec.
 
 These are checker-correctness follow-ups beyond the diagnostic-format feature; recorded here so they
 are not lost.
