@@ -2348,10 +2348,17 @@ fn feasibility_probe(
         )),
         Outcome::Unsat => {
             let core = unsat_core(&cons);
-            out.push(Diagnostic::warning(
-                comp_span(),
-                format!("arithmetic invariants in `{comp}` are CONTRADICTORY over {N} periods: no schedule satisfies them all. Conflicting core: {}.", core.join(", ")),
-            ));
+            out.push(
+                Diagnostic::warning(
+                    comp_span(),
+                    format!("arithmetic invariants in `{comp}` are CONTRADICTORY over {N} periods: no schedule satisfies them all. Conflicting core: {}.", core.join(", ")),
+                )
+                .with_code("contradictory-invariants")
+                .with_fix(format!(
+                    "Remove or reconcile at least one invariant in the conflicting core ({}) so a schedule can satisfy them together.",
+                    core.join(", ")
+                )),
+            );
         }
     }
 }

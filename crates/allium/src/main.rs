@@ -410,11 +410,22 @@ fn run_multi_file(
             }) {
                 any_issues = true;
             }
+            // Route v4 diagnostics through the unified serializer: resolve the byte span to a
+            // {file,line,col} location, lowercase the severity, carry code/fix, and drop exact
+            // duplicates (name resolution can report the same undeclared name twice).
+            let source_map = SourceMap::new(source.as_str());
+            let mut seen = HashSet::new();
+            let diagnostics: Vec<serde_json::Value> = result
+                .diagnostics
+                .iter()
+                .filter(|d| seen.insert((d.message.clone(), d.span.start, d.span.end)))
+                .map(|d| v4_diagnostic_to_json(d, path, &source_map))
+                .collect();
             let output = serde_json::json!({
                 "command": command,
                 "spec_file": path.display().to_string(),
                 "language_version": 4,
-                "diagnostics": result.diagnostics,
+                "diagnostics": diagnostics,
                 "findings": [],
             });
             println!("{}", serde_json::to_string_pretty(&output).unwrap());
@@ -978,6 +989,37 @@ fn cmd_model(args: &[String]) -> ExitCode {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+/// Serialise a v4 diagnostic into the unified LLM-facing shape: a stable `code`, lowercased
+/// `severity`, the `message` (what is wrong), an optional `fix` (the remedy, structural only), and a
+/// resolved `location` (file/line/col from the byte span). This replaces the raw serde dump of the
+/// v4 `Diagnostic` (which leaked byte offsets and a capitalised severity) so `check` and `analyse`
+/// speak one schema to their LLM consumers.
+fn v4_diagnostic_to_json(
+    d: &allium_v4::diagnostic::Diagnostic,
+    path: &Path,
+    source_map: &SourceMap,
+) -> serde_json::Value {
+    let (line, col) = source_map.line_col(d.span.start);
+    let severity = match d.severity {
+        allium_v4::diagnostic::Severity::Error => "error",
+        allium_v4::diagnostic::Severity::Warning => "warning",
+    };
+    let mut obj = serde_json::json!({
+        "code": d.code,
+        "severity": severity,
+        "message": d.message,
+        "location": {
+            "file": path.display().to_string(),
+            "line": line + 1,
+            "col": col + 1,
+        }
+    });
+    if let Some(fix) = &d.fix {
+        obj["fix"] = serde_json::Value::String(fix.clone());
+    }
+    obj
+}
 
 fn diagnostic_to_json(
     d: &allium_parser::Diagnostic,

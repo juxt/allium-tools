@@ -144,10 +144,16 @@ fn resolve_names(module: &Module, src: &str) -> Vec<Diagnostic> {
                 free_names(&e, &mut bound, &mut names);
                 for (n, _sp) in names {
                     if !scope.contains(&n) && !it.params.contains(&n) && !is_builtin_pred(&n) {
-                        out.push(Diagnostic::warning(
-                            it.span,
-                            format!("`{n}` is not declared (name resolution, in `{}`)", d.name),
-                        ));
+                        out.push(
+                            Diagnostic::warning(
+                                it.span,
+                                format!("`{n}` is not a declared name in component `{}`.", d.name),
+                            )
+                            .with_code("undeclared-name")
+                            .with_fix(format!(
+                                "Reference a declared observable state, entity or given, or declare `{n}`."
+                            )),
+                        );
                     }
                 }
             }

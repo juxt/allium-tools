@@ -300,13 +300,17 @@ pub(crate) fn ceiling_without_floor(module: &Module) -> Vec<Diagnostic> {
             || has(ItemKind::Budget)
             || has(ItemKind::Requirement);
         if acts && ceiling && !floor {
-            out.push(Diagnostic::warning(
-                d.span,
-                format!(
-                    "component `{}` states only what must not happen (invariants/faults) and never what it must achieve — it is satisfiable by an implementation that does nothing. State an `objective` (what it must bring about, and by when).",
-                    d.name
-                ),
-            ));
+            out.push(
+                Diagnostic::warning(
+                    d.span,
+                    format!(
+                        "component `{}` has invariants or faults but no objective, budget or requirement. It constrains what must not happen and requires nothing to happen, so an implementation that does nothing satisfies it.",
+                        d.name
+                    ),
+                )
+                .with_code("vacuous-component")
+                .with_fix("Add an objective naming what the component must achieve, and by when."),
+            );
         }
     }
     out
@@ -3050,10 +3054,17 @@ pub fn consistency(module: &Module, src: &str) -> Vec<Diagnostic> {
                 }
                 let core: Vec<String> =
                     rules.iter().enumerate().filter(|(k, _)| active[*k]).map(|(_, (nm, _))| nm.clone()).collect();
-                out.push(Diagnostic::warning(
-                    d.span,
-                    format!("rule set in `{}` is CONTRADICTORY: no state satisfies all constraints. Minimal conflicting core: {}. These rules cannot hold together.", d.name, core.join(", ")),
-                ));
+                out.push(
+                    Diagnostic::warning(
+                        d.span,
+                        format!("rule set in `{}` is CONTRADICTORY: no state satisfies all constraints. Minimal conflicting core: {}.", d.name, core.join(", ")),
+                    )
+                    .with_code("contradictory-rules")
+                    .with_fix(format!(
+                        "Remove or reconcile at least one rule in the conflicting core ({}) so a state can satisfy them together.",
+                        core.join(", ")
+                    )),
+                );
             }
         }
     }
