@@ -82,7 +82,7 @@ pub fn arithmetic(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnost
         if !uniq.is_empty() {
             out.push(Diagnostic::warning(
                 d.span,
-                format!("arithmetic tier in `{}`: {} term(s) not linearisable and NOT CHECKED (nonlinear): {}. The satisfiability verdict is PARTIAL — these constraints are outside the decidable fragment.", d.name, uniq.len(), uniq.join("; ")),
+                format!("arithmetic tier in `{}`: {} term(s) not linearisable and NOT CHECKED (nonlinear): {}. The satisfiability verdict is PARTIAL, these constraints are outside the decidable fragment.", d.name, uniq.len(), uniq.join("; ")),
             ));
             // Elicit: a Rate-typed per-period observable multiplied by a state is the usual reason a schedule
             // is only PARTIAL. If the rate is fixed, pinning it to a constant makes the relation checkable.
@@ -91,7 +91,7 @@ pub fn arithmetic(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnost
             for obs in rates {
                 out.push(Diagnostic::warning(
                     d.span,
-                    format!("suggestion: `{obs}` is a per-period rate multiplied by a state, so its product is nonlinear and left unchecked. If the rate is fixed across periods, declare it as a constant (`given {obs} means <value>`) — the product then becomes linear and the relation is fully checkable at that rate."),
+                    format!("suggestion: `{obs}` is a per-period rate multiplied by a state, so its product is nonlinear and left unchecked. If the rate is fixed across periods, declare it as a constant (`given {obs} means <value>`), the product then becomes linear and the relation is fully checkable at that rate."),
                 ));
             }
         }
@@ -259,7 +259,7 @@ pub fn objective_progress(module: &Module, src: &str, imports: &Imports) -> Vec<
                     out.push(Diagnostic::warning(
                         it.span,
                         crate::analyse::pretty(&format!(
-                            "objective measure `{m}` can INCREASE under action `{aname}` in `{}` (e.g. {}) — it does not witness progress toward the goal (a non-monotone measure). Guard the increase, or use a measure that only decreases.",
+                            "objective measure `{m}` can INCREASE under action `{aname}` in `{}` (e.g. {}), it does not witness progress toward the goal (a non-monotone measure). Guard the increase, or use a measure that only decreases.",
                             d.name,
                             schedule(&wm, &st2)
                         )),
@@ -425,10 +425,10 @@ pub fn objective_discharge(module: &Module, src: &str, imports: &Imports) -> Vec
                             if matches!(met, Some(true)) {
                                 format!(" The stated budget `{b}` is met: the invariants entail `{m}` ≤ `{b}`, so the goal is reached within `{b}` steps.")
                             } else {
-                                format!(" The stated step budget `{b}` is NOT proven — `{m}` ≤ `{b}` does not follow from the invariants, so the goal may need more than `{b}` steps.")
+                                format!(" The stated step budget `{b}` is NOT proven, `{m}` ≤ `{b}` does not follow from the invariants, so the goal may need more than `{b}` steps.")
                             }
                         } else {
-                            format!(" The `within {b}` deadline is a MONITORED obligation (watched and counted at runtime, not proved from step durations — N6/J50).")
+                            format!(" The `within {b}` deadline is a MONITORED obligation (watched and counted at runtime, not proved from step durations, N6/J50).")
                         }
                     }
                 };
@@ -453,11 +453,11 @@ pub fn objective_discharge(module: &Module, src: &str, imports: &Imports) -> Vec
                 };
                 if connected {
                     out.push(Diagnostic::warning(d.span, format!(
-                        "objective `{g}`: measure `{m}` is a well-founded variant (numeric, bounded below by 0, decreasing by at least 1 on every action) AND the floor state satisfies the goal (`{m}` = 0 ⟹ `{g}`), so the objective is REACHED in at most `{m}` steps — DISCHARGED, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6).{bound_clause}",
+                        "objective `{g}`: measure `{m}` is a well-founded variant (numeric, bounded below by 0, decreasing by at least 1 on every action) AND the floor state satisfies the goal (`{m}` = 0 ⟹ `{g}`), so the objective is REACHED in at most `{m}` steps, DISCHARGED, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved, N6).{bound_clause}",
                     )));
                 } else {
                     out.push(Diagnostic::warning(d.span, format!(
-                        "objective `{g}`: measure `{m}` is a well-founded variant (numeric, bounded below by 0, decreasing by at least 1 on every action) — the component TERMINATES, reaching `{m}`'s floor in at most `{m}` steps, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved — N6). Remaining for full 'goal reached': prove the floor state satisfies `{g}` (state `not {g} implies {m} >= 1`).{bound_clause}",
+                        "objective `{g}`: measure `{m}` is a well-founded variant (numeric, bounded below by 0, decreasing by at least 1 on every action), the component TERMINATES, reaching `{m}`'s floor in at most `{m}` steps, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved, N6). Remaining for full 'goal reached': prove the floor state satisfies `{g}` (state `not {g} implies {m} >= 1`).{bound_clause}",
                     )));
                 }
             }
@@ -538,7 +538,7 @@ pub fn arith_preservation(module: &Module, src: &str, imports: &Imports) -> Vec<
             if matches!(solve(&cons), Outcome::Unsat) {
                 out.push(Diagnostic::warning(
                     d.span,
-                    format!("rely `{name}` in `{}` is unsatisfiable (contradictory) — it can never hold, so every guarantee proved under it would be vacuous. Fix or remove it.", d.name),
+                    format!("rely `{name}` in `{}` is unsatisfiable (contradictory), it can never hold, so every guarantee proved under it would be vacuous. Fix or remove it.", d.name),
                 ));
                 continue;
             }
@@ -549,7 +549,7 @@ pub fn arith_preservation(module: &Module, src: &str, imports: &Imports) -> Vec<
             assumed_relies.sort();
             out.push(Diagnostic::warning(
                 d.span,
-                format!("arithmetic preservation in `{}` is conditional on assumed rely(s): {} (assumed — trusted, not checked; not an unconditional guarantee).", d.name, assumed_relies.join(", ")),
+                format!("arithmetic preservation in `{}` is conditional on assumed rely(s): {} (assumed, trusted, not checked; not an unconditional guarantee).", d.name, assumed_relies.join(", ")),
             ));
         }
 
@@ -1137,7 +1137,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str, imports: &Imports) 
                         // — surface it so the user can add it (the elicit value).
                         let residual = subst_consts(a, &init_consts);
                         let hint = if has_free_ref(&residual) {
-                            format!(" It holds at init only if `{}` — state this assumption (e.g. a `where` refinement on the input).", crate::analyse::pretty(&crate::analyse::canon(&residual)))
+                            format!(" It holds at init only if `{}`, state this assumption (e.g. a `where` refinement on the input).", crate::analyse::pretty(&crate::analyse::canon(&residual)))
                         } else {
                             String::new()
                         };
@@ -1343,7 +1343,7 @@ pub fn enum_guarded_preservation(module: &Module, src: &str, imports: &Imports) 
                         .collect::<Vec<_>>()
                         .join(" and ");
                     let fix = if !a_pre && !src_desc.is_empty() {
-                        format!(" To fix, state the bound for the source state — add `{} implies {}` — or guard the action.", src_desc, crate::analyse::canon(a))
+                        format!(" To fix, state the bound for the source state, add `{} implies {}`, or guard the action.", src_desc, crate::analyse::canon(a))
                     } else {
                         " Guard the action or maintain the bound.".to_string()
                     };
@@ -2404,7 +2404,7 @@ fn entailment_probe(
                     out.push(Diagnostic::warning(
                         comp_span(),
                         format!(
-                            "invariant `{name}` in `{comp}` is NOT entailed by the others: they permit `{}`, which it forbids. So it relies on an assumption not captured by the other invariants (typically a sign or ordering constraint on an input) — state that assumption if it is meant to hold.",
+                            "invariant `{name}` in `{comp}` is NOT entailed by the others: they permit `{}`, which it forbids. So it relies on an assumption not captured by the other invariants (typically a sign or ordering constraint on an input), state that assumption if it is meant to hold.",
                             schedule(&m, st)
                         ),
                     ));

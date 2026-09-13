@@ -270,7 +270,7 @@ pub(crate) fn fault_restatement(module: &Module, src: &str) -> Vec<Diagnostic> {
                     out.push(Diagnostic::warning(
                         fit.span,
                         format!(
-                            "fault `{fname}` restates invariant `{iname}`: its region is exactly the complement of the invariant, so it says nothing new. State the property once — as a fault or an invariant, not both."
+                            "fault `{fname}` restates invariant `{iname}`: its region is exactly the complement of the invariant, so it says nothing new. State the property once, as a fault or an invariant, not both."
                         ),
                     ));
                     break;
@@ -390,7 +390,7 @@ pub(crate) fn objective_report(module: &Module, src: &str) -> Vec<Diagnostic> {
             let g = if p.goal.is_empty() { "<goal>".to_string() } else { p.goal.clone() };
             if p.bound.is_none() {
                 out.push(Diagnostic::warning(it.span, format!(
-                    "objective `{g}` has no `within <bound>` — an unbounded objective is neither provable nor monitorable (N6); give it a bound, or state it design-time-only and count it."
+                    "objective `{g}` has no `within <bound>`, an unbounded objective is neither provable nor monitorable (N6); give it a bound, or state it design-time-only and count it."
                 )));
                 continue;
             }
@@ -403,17 +403,17 @@ pub(crate) fn objective_report(module: &Module, src: &str) -> Vec<Diagnostic> {
                     continue;
                 }
                 out.push(Diagnostic::warning(it.span, format!(
-                    "objective `{g}` — dischargeable at design time via measure `{m}` decreasing; parsed, NOT YET verified by the checker."
+                    "objective `{g}`, dischargeable at design time via measure `{m}` decreasing; parsed, NOT YET verified by the checker."
                 )));
             } else {
                 out.push(Diagnostic::warning(it.span, format!(
-                    "objective `{g}` — MONITORED (no measure supplied): the checker does not prove it, it is watched on a trace; parsed, not verified."
+                    "objective `{g}`, MONITORED (no measure supplied): the checker does not prove it, it is watched on a trace; parsed, not verified."
                 )));
             }
         }
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Budget) {
             out.push(Diagnostic::warning(it.span,
-                "budget is a statistical obligation over a cohort window — monitored, never proved; parsed, not verified.".to_string()));
+                "budget is a statistical obligation over a cohort window, monitored, never proved; parsed, not verified.".to_string()));
         }
     }
     out
@@ -614,7 +614,7 @@ pub fn stuck_states(module: &Module, src: &str) -> Vec<Diagnostic> {
                 if !can_fire {
                     out.push(Diagnostic::warning(
                         d.span,
-                        pretty(&format!("state `{ckey}` in `{}` is reachable but no action can fire from it, and it is not `terminal` — a stuck state. Add an action to leave it, or mark it `terminal`.", d.name)),
+                        pretty(&format!("state `{ckey}` in `{}` is reachable but no action can fire from it, and it is not `terminal`, a stuck state. Add an action to leave it, or mark it `terminal`.", d.name)),
                     ));
                 }
             }
@@ -686,7 +686,7 @@ pub fn dead_states(module: &Module, src: &str) -> Vec<Diagnostic> {
                 if !produced.contains(tag) {
                     out.push(Diagnostic::warning(
                         d.span,
-                        format!("enum value `{tag}` of `{obs}` in `{}` is never produced by `init` or any action — it is unreachable (a dead lifecycle state). Add an action that reaches it, or remove the value.", d.name),
+                        format!("enum value `{tag}` of `{obs}` in `{}` is never produced by `init` or any action, it is unreachable (a dead lifecycle state). Add an action that reaches it, or remove the value.", d.name),
                     ));
                 }
             }
@@ -945,7 +945,7 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
             names.sort();
             out.push(Diagnostic::warning(
                 d.span,
-                format!("preservation in `{}` is conditional on assumed rely(s): {} (assumed — trusted, not checked; not an unconditional guarantee).", d.name, names.join(", ")),
+                format!("preservation in `{}` is conditional on assumed rely(s): {} (assumed, trusted, not checked; not an unconditional guarantee).", d.name, names.join(", ")),
             ));
         }
 
@@ -1477,7 +1477,7 @@ pub fn refinement(module: &Module, src: &str, imports: &crate::arith::Imports) -
                 out.push(Diagnostic::warning(d.span, format!("{kw} `{}` SATISFIES contract `{}`: its invariants entail every promise ({}).{}{}", d.name, cname, entailed.join(", "), assuming, footing)));
             } else {
                 for f in &failed {
-                    out.push(Diagnostic::warning(d.span, format!("{kw} `{}` does NOT satisfy contract `{}`: promise `{}` is not entailed by its invariants — the detailed layer does not guarantee the abstract contract.", d.name, cname, f)));
+                    out.push(Diagnostic::warning(d.span, format!("{kw} `{}` does NOT satisfy contract `{}`: promise `{}` is not entailed by its invariants, the detailed layer does not guarantee the abstract contract.", d.name, cname, f)));
                 }
                 if !entailed.is_empty() {
                     out.push(Diagnostic::warning(d.span, format!("{kw} `{}` vs contract `{}`: entailed {}.", d.name, cname, entailed.join(", "))));
@@ -1557,7 +1557,7 @@ pub fn rely_discharge(module: &Module, src: &str, imports: &crate::arith::Import
                 {
                     out.push(Diagnostic::warning(
                         d.span,
-                        format!("rely `{rname}` in `{}` is DISCHARGED by a library guarantee in scope — the dependency provides it, so it is backed, not merely assumed of the environment.", d.name),
+                        format!("rely `{rname}` in `{}` is DISCHARGED by a library guarantee in scope, the dependency provides it, so it is backed, not merely assumed of the environment.", d.name),
                     ));
                 }
                 continue;
@@ -1568,7 +1568,7 @@ pub fn rely_discharge(module: &Module, src: &str, imports: &crate::arith::Import
             if crate::sat::satisfiable(&es, &bnames).is_none() {
                 out.push(Diagnostic::warning(
                     d.span,
-                    format!("rely `{rname}` in `{}` is DISCHARGED by a library guarantee in scope — the dependency provides it, so it is backed, not merely assumed of the environment.", d.name),
+                    format!("rely `{rname}` in `{}` is DISCHARGED by a library guarantee in scope, the dependency provides it, so it is backed, not merely assumed of the environment.", d.name),
                 ));
             } else if boolean_fragment_rel(&body, &lib_bool, &lib_bool) {
                 // Only flag an UNDISCHARGED rely when it is expressed entirely in a library's vocabulary —
@@ -1577,7 +1577,7 @@ pub fn rely_discharge(module: &Module, src: &str, imports: &crate::arith::Import
                 // genuine environmental assumption, left to the rely role's "assumed" report, not flagged.
                 out.push(Diagnostic::warning(
                     d.span,
-                    format!("rely `{rname}` in `{}` is NOT discharged by any library guarantee in scope — the component depends on a property no library it uses provides. Verify the assumption or depend on a library that guarantees it.", d.name),
+                    format!("rely `{rname}` in `{}` is NOT discharged by any library guarantee in scope, the component depends on a property no library it uses provides. Verify the assumption or depend on a library that guarantees it.", d.name),
                 ));
             }
         }
@@ -1774,7 +1774,7 @@ fn classify(inv: &Expr, bool_base: &HashSet<String>, all_obs: &HashSet<String>, 
         // Matched the seam pattern but not the clean single-comparison shape we can rewrite (e.g. a compound
         // antecedent) — report it honestly as not-checked rather than list it under a rung it does not cover.
         Tier::NotStatic(
-            "a numeric threshold guarding a boolean/enum requirement (mixed arithmetic and boolean) — outside the current statically-checkable fragment".into(),
+            "a numeric threshold guarding a boolean/enum requirement (mixed arithmetic and boolean), outside the current statically-checkable fragment".into(),
         )
     } else {
         Tier::LinearArith
@@ -1837,7 +1837,7 @@ pub fn tier_report(module: &Module, src: &str) -> Vec<Diagnostic> {
         }
         out.push(Diagnostic::warning(
             d.span,
-            format!("analysis coverage for `{}` ({} invariant(s)) — {}.", d.name, invs.len(), parts.join(" | ")),
+            format!("analysis coverage for `{}` ({} invariant(s)), {}.", d.name, invs.len(), parts.join(" | ")),
         ));
     }
     out
@@ -2293,7 +2293,7 @@ pub fn bmc(module: &Module, src: &str) -> Vec<Diagnostic> {
             if !live {
                 out.push(Diagnostic::warning(
                     d.span,
-                    format!("action `{}` in `{}` is never enabled in any reachable state (within {BMC_MAX} steps): its guard is never satisfied, so it can never fire — dead code, or a guard that contradicts the reachable states.", act.name, d.name),
+                    format!("action `{}` in `{}` is never enabled in any reachable state (within {BMC_MAX} steps): its guard is never satisfied, so it can never fire, dead code, or a guard that contradicts the reachable states.", act.name, d.name),
                 ));
             }
         }
@@ -3239,7 +3239,7 @@ pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
         } else if overlaps > 0 {
             out.push(Diagnostic::warning(
                 d.span,
-                format!("case-split in `{}` is NOT disjoint: actions {} both fire in {overlaps}/{combos} condition-combinations (e.g. {}) — an ambiguous classification.", d.name, over_names.join(" + "), over_eg.unwrap()),
+                format!("case-split in `{}` is NOT disjoint: actions {} both fire in {overlaps}/{combos} condition-combinations (e.g. {}), an ambiguous classification.", d.name, over_names.join(" + "), over_eg.unwrap()),
             ));
         } else {
             out.push(Diagnostic::warning(
@@ -3251,7 +3251,7 @@ pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
         if gaps > 0 {
             out.push(Diagnostic::warning(
                 d.span,
-                format!("case-split in `{}` may leave {gaps}/{combos} atom-combinations uncovered (e.g. {}) — a subject in that state matches no action. Bounded/axiom-relative: state the domain axioms (e.g. every cleared trade has a CCP) for a sound verdict.", d.name, gap_eg.unwrap()),
+                format!("case-split in `{}` may leave {gaps}/{combos} atom-combinations uncovered (e.g. {}), a subject in that state matches no action. Bounded/axiom-relative: state the domain axioms (e.g. every cleared trade has a CCP) for a sound verdict.", d.name, gap_eg.unwrap()),
             ));
         } else {
             out.push(Diagnostic::warning(
