@@ -98,3 +98,29 @@ Run-level envelope gains a summary so a model can branch before scanning:
 - Keep raw `span:{start,end}` at all (editor use), or drop entirely?
 - `suggested_edit` (machine-applicable patch) for high-confidence codes — worth it, or is
   imperative `fix` prose enough for an LLM that will edit anyway?
+
+## Implemented (v4 branch)
+
+Structural unification, real locations, dedup, and em-dash removal are done and test-locked
+(`crates/allium/tests/cli_smoke.rs`). Stable `code` slugs assigned so far (others still emit
+`code: null`, a consistent shape, pending an incremental sweep):
+
+| code | command | has structural `fix` |
+|---|---|---|
+| `undeclared-name` | check | yes |
+| `vacuous-component` | analyse | yes |
+| `contradictory-invariants` | analyse | yes |
+| `contradictory-rules` | analyse | yes |
+| `nonlinear-not-checked` | analyse | (remedy in message) |
+| `invariant-not-entailed` | analyse | (remedy in message) |
+| `objective-unbounded` | analyse | (remedy in message) |
+| `action-never-enabled` | analyse | (remedy in message) |
+| `enum-value-unreachable` | analyse | (remedy in message) |
+| `stuck-state` | analyse | (remedy in message) |
+| `contract-not-satisfied` | analyse | (remedy in message) |
+| `case-split-not-disjoint` | analyse | (remedy in message) |
+| `case-split-incomplete` | analyse | (remedy in message) |
+
+Remaining hardening (tracked, not yet done): assign codes to the rest of the ~72 v4 diagnostic
+sites; the malformed-predicate checker gap (a `= =` predicate parses without a diagnostic) is a
+separate parser bug, not a formatting issue.

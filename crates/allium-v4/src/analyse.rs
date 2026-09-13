@@ -391,7 +391,7 @@ pub(crate) fn objective_report(module: &Module, src: &str) -> Vec<Diagnostic> {
             if p.bound.is_none() {
                 out.push(Diagnostic::warning(it.span, format!(
                     "objective `{g}` has no `within <bound>`, an unbounded objective is neither provable nor monitorable (N6); give it a bound, or state it design-time-only and count it."
-                )));
+                )).with_code("objective-unbounded"));
                 continue;
             }
             if let Some(m) = &p.measure {
@@ -615,7 +615,7 @@ pub fn stuck_states(module: &Module, src: &str) -> Vec<Diagnostic> {
                     out.push(Diagnostic::warning(
                         d.span,
                         pretty(&format!("state `{ckey}` in `{}` is reachable but no action can fire from it, and it is not `terminal`, a stuck state. Add an action to leave it, or mark it `terminal`.", d.name)),
-                    ));
+                    ).with_code("stuck-state"));
                 }
             }
         }
@@ -687,7 +687,7 @@ pub fn dead_states(module: &Module, src: &str) -> Vec<Diagnostic> {
                     out.push(Diagnostic::warning(
                         d.span,
                         format!("enum value `{tag}` of `{obs}` in `{}` is never produced by `init` or any action, it is unreachable (a dead lifecycle state). Add an action that reaches it, or remove the value.", d.name),
-                    ));
+                    ).with_code("enum-value-unreachable"));
                 }
             }
         }
@@ -1477,7 +1477,7 @@ pub fn refinement(module: &Module, src: &str, imports: &crate::arith::Imports) -
                 out.push(Diagnostic::warning(d.span, format!("{kw} `{}` SATISFIES contract `{}`: its invariants entail every promise ({}).{}{}", d.name, cname, entailed.join(", "), assuming, footing)));
             } else {
                 for f in &failed {
-                    out.push(Diagnostic::warning(d.span, format!("{kw} `{}` does NOT satisfy contract `{}`: promise `{}` is not entailed by its invariants, the detailed layer does not guarantee the abstract contract.", d.name, cname, f)));
+                    out.push(Diagnostic::warning(d.span, format!("{kw} `{}` does NOT satisfy contract `{}`: promise `{}` is not entailed by its invariants, the detailed layer does not guarantee the abstract contract.", d.name, cname, f)).with_code("contract-not-satisfied"));
                 }
                 if !entailed.is_empty() {
                     out.push(Diagnostic::warning(d.span, format!("{kw} `{}` vs contract `{}`: entailed {}.", d.name, cname, entailed.join(", "))));
@@ -2294,7 +2294,7 @@ pub fn bmc(module: &Module, src: &str) -> Vec<Diagnostic> {
                 out.push(Diagnostic::warning(
                     d.span,
                     format!("action `{}` in `{}` is never enabled in any reachable state (within {BMC_MAX} steps): its guard is never satisfied, so it can never fire, dead code, or a guard that contradicts the reachable states.", act.name, d.name),
-                ));
+                ).with_code("action-never-enabled"));
             }
         }
     }
@@ -3240,7 +3240,7 @@ pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
             out.push(Diagnostic::warning(
                 d.span,
                 format!("case-split in `{}` is NOT disjoint: actions {} both fire in {overlaps}/{combos} condition-combinations (e.g. {}), an ambiguous classification.", d.name, over_names.join(" + "), over_eg.unwrap()),
-            ));
+            ).with_code("case-split-not-disjoint"));
         } else {
             out.push(Diagnostic::warning(
                 d.span,
@@ -3252,7 +3252,7 @@ pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
             out.push(Diagnostic::warning(
                 d.span,
                 format!("case-split in `{}` may leave {gaps}/{combos} atom-combinations uncovered (e.g. {}), a subject in that state matches no action. Bounded/axiom-relative: state the domain axioms (e.g. every cleared trade has a CCP) for a sound verdict.", d.name, gap_eg.unwrap()),
-            ));
+            ).with_code("case-split-incomplete"));
         } else {
             out.push(Diagnostic::warning(
                 d.span,

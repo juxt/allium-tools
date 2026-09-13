@@ -83,7 +83,7 @@ pub fn arithmetic(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnost
             out.push(Diagnostic::warning(
                 d.span,
                 format!("arithmetic tier in `{}`: {} term(s) not linearisable and NOT CHECKED (nonlinear): {}. The satisfiability verdict is PARTIAL, these constraints are outside the decidable fragment.", d.name, uniq.len(), uniq.join("; ")),
-            ));
+            ).with_code("nonlinear-not-checked"));
             // Elicit: a Rate-typed per-period observable multiplied by a state is the usual reason a schedule
             // is only PARTIAL. If the rate is fixed, pinning it to a constant makes the relation checkable.
             let mut rates: Vec<String> = rate_obs.into_iter().collect();
@@ -2409,7 +2409,7 @@ fn entailment_probe(
                             "invariant `{name}` in `{comp}` is NOT entailed by the others: they permit `{}`, which it forbids. So it relies on an assumption not captured by the other invariants (typically a sign or ordering constraint on an input), state that assumption if it is meant to hold.",
                             schedule(&m, st)
                         ),
-                    ));
+                    ).with_code("invariant-not-entailed"));
                 } else {
                     out.push(Diagnostic::warning(
                         comp_span,
