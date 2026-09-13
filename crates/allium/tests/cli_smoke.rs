@@ -246,3 +246,21 @@ fn v4_messages_have_no_em_dashes() {
         }
     }
 }
+
+// A malformed predicate body (here a dangling operator) must NOT pass silently: it constrains
+// nothing, so a clean check would mean nothing. It is surfaced with the `malformed-predicate` code.
+const V4_MALFORMED: &str = "-- allium: 4\n\
+    component C\n  observable state emi : Number\n  invariant i means emi +\nend\n";
+
+#[test]
+fn v4_malformed_predicate_is_not_silently_accepted() {
+    let spec = SpecFile::new("v4-malformed", V4_MALFORMED);
+    let out = allium().arg("check").arg(spec.arg()).output().expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    let diags = json["diagnostics"].as_array().expect("diagnostics array");
+    assert!(
+        diags.iter().any(|d| d["code"] == "malformed-predicate"),
+        "a dangling-operator predicate must be flagged, not accepted silently: {stdout}"
+    );
+}

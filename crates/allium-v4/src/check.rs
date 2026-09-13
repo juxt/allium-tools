@@ -138,7 +138,27 @@ fn resolve_names(module: &Module, src: &str) -> Vec<Diagnostic> {
             };
             for span in spans {
                 let text = strip_means(span.slice(src));
-                let (e, _pd) = parse_predicate(text);
+                let (e, pd) = parse_predicate(text);
+                // Surface predicate syntax errors instead of discarding them. A body that does not
+                // parse as a complete expression (a dangling operator, a stray token, an empty body)
+                // otherwise slips through as a clean check while constraining nothing, so a green
+                // result would mean nothing. Anchor to the item; report once per malformed body.
+                let empty_body = text.trim().is_empty();
+                if empty_body || !pd.is_empty() {
+                    let reason = if empty_body {
+                        "the body is empty".to_string()
+                    } else {
+                        pd[0].message.clone()
+                    };
+                    out.push(
+                        Diagnostic::warning(
+                            it.span,
+                            format!("predicate in `{}` does not parse: {reason}.", d.name),
+                        )
+                        .with_code("malformed-predicate")
+                        .with_fix("Correct the predicate so it reads as one complete expression."),
+                    );
+                }
                 let mut bound = Vec::new();
                 let mut names = Vec::new();
                 free_names(&e, &mut bound, &mut names);
