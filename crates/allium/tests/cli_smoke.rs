@@ -264,3 +264,20 @@ fn v4_malformed_predicate_is_not_silently_accepted() {
         "a dangling-operator predicate must be flagged, not accepted silently: {stdout}"
     );
 }
+
+// A state whose entity sort is undeclared (`observable state x(Ghost)` with no `entity Ghost`) is
+// meaningless; it must be flagged, not accepted silently.
+const V4_UNDECLARED_ENTITY: &str = "-- allium: 4\n\
+    component C\n  observable state x(Ghost) : Number\n  invariant i means every p :: x(p) >= 0\nend\n";
+
+#[test]
+fn v4_undeclared_entity_sort_is_flagged() {
+    let spec = SpecFile::new("v4-undeclared-entity", V4_UNDECLARED_ENTITY);
+    let out = allium().arg("check").arg(spec.arg()).output().expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert!(
+        json["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "undeclared-entity"),
+        "a state over an undeclared entity sort must be flagged: {stdout}"
+    );
+}

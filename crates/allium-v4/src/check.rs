@@ -121,6 +121,38 @@ fn resolve_names(module: &Module, src: &str) -> Vec<Diagnostic> {
             }
         }
 
+        // An observable state's parameter is the entity SORT it ranges over (`E` in
+        // `observable state x(E)`), which must be a declared entity. A state over an unknown sort is
+        // meaningless yet would otherwise check clean, another "green means nothing" gap.
+        let local_entities: HashSet<String> = d
+            .items
+            .iter()
+            .filter(|it| it.kind == ItemKind::Entity)
+            .filter_map(|it| it.name.clone())
+            .collect();
+        for it in &d.items {
+            if it.kind == ItemKind::State {
+                for sort in &it.params {
+                    if !local_entities.contains(sort) && !imported.contains(sort) {
+                        out.push(
+                            Diagnostic::warning(
+                                it.span,
+                                format!(
+                                    "state `{}` in `{}` ranges over `{sort}`, which is not a declared entity.",
+                                    it.name.clone().unwrap_or_default(),
+                                    d.name
+                                ),
+                            )
+                            .with_code("undeclared-entity")
+                            .with_fix(format!(
+                                "Declare `entity {sort}`, or correct the sort to a declared entity."
+                            )),
+                        );
+                    }
+                }
+            }
+        }
+
         // Resolve each predicate body in the declaration.
         for it in &d.items {
             let spans: Vec<_> = match it.kind {

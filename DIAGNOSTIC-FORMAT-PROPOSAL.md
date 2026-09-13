@@ -130,10 +130,9 @@ separate parser bug, not a formatting issue.
 Fixed: `malformed-predicate` (dangling operator / stray token / unknown operator / empty body) now
 surfaced. Remaining "green means nothing" gaps found by probing the v4 check, each reproduced:
 
-1. **Undeclared entity in a state sort passes silently.** `observable state x(Ghost) : Number` with
-   no `entity Ghost` → 0 diagnostics. The state is meaningless yet check is clean. Should flag the
-   undeclared entity sort (analogous to the name-resolution check, but on the state's entity
-   parameter). Needs the AST's state-sort representation, deferred rather than rushed.
+1. **Undeclared entity in a state sort passes silently.** FIXED: `observable state x(Ghost)` with no
+   `entity Ghost` now emits `undeclared-entity`. Verified: 0 false positives across the real v4
+   corpus; cli_smoke test locks it.
 2. **Empty component passes silently.** `component C end` (no items) → 0 diagnostics. Debatable
    whether to flag, low priority.
 3. **`parse` and `model` commands run the v3 parser on v4 specs.** Both route through the v3 pipeline
