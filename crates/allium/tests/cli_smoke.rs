@@ -281,3 +281,25 @@ fn v4_undeclared_entity_sort_is_flagged() {
         "a state over an undeclared entity sort must be flagged: {stdout}"
     );
 }
+
+// `parse`/`model` run the v1-v3 pipeline. On a v4 spec they must refuse honestly, not emit
+// misleading v3-grammar errors ("invariant name must start with an uppercase letter").
+const V4_MINIMAL: &str = "-- allium: 4\ncomponent C\n  observable state x : Number\n  invariant i means x >= 0\nend\n";
+
+#[test]
+fn parse_and_model_refuse_v4_specs_honestly() {
+    for command in ["parse", "model"] {
+        let spec = SpecFile::new(&format!("v4-refuse-{command}"), V4_MINIMAL);
+        let out = allium().arg(command).arg(spec.arg()).output().expect("spawn allium");
+        assert_eq!(out.status.code(), Some(2), "{command} on a v4 spec should exit 2");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("does not yet support allium v4"),
+            "{command} should refuse v4 honestly, not run the v3 grammar: {stderr}"
+        );
+        assert!(
+            !stderr.contains("uppercase letter"),
+            "{command} must not emit misleading v3-grammar errors on a v4 spec: {stderr}"
+        );
+    }
+}

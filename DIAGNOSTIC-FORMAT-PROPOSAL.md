@@ -135,10 +135,10 @@ surfaced. Remaining "green means nothing" gaps found by probing the v4 check, ea
    corpus; cli_smoke test locks it.
 2. **Empty component passes silently.** `component C end` (no items) → 0 diagnostics. Debatable
    whether to flag, low priority.
-3. **`parse` and `model` commands run the v3 parser on v4 specs.** Both route through the v3 pipeline
-   regardless of the `-- allium: 4` marker, so a v4 spec yields spurious v3-grammar errors
-   ("invariant name must start with an uppercase letter"). `check`/`analyse` correctly use the v4
-   pipeline; `parse`/`model` do not. A command-routing gap, not a formatting one.
+3. **`parse` and `model` on v4 specs.** FIXED: both now detect a v4 spec and refuse honestly (exit 2,
+   "does not yet support allium v4; use check/analyse") instead of emitting spurious v3-grammar
+   errors. `plan` already routed v4 to its own emitter. cli_smoke test locks it. (Full v4 parse/model
+   output remains unimplemented, a feature, not a bug.)
 
 These are checker-correctness follow-ups beyond the diagnostic-format feature; recorded here so they
 are not lost.

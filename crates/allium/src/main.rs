@@ -921,6 +921,16 @@ fn run_single_file(
         }
     };
 
+    // This command runs the v1-v3 pipeline. Running it on a v4 spec would parse it with the wrong
+    // grammar and emit misleading v3-grammar errors. Refuse honestly instead.
+    if allium_parser::detect_version(&source) == Some(4) {
+        eprintln!("{usage}");
+        eprintln!(
+            "error: this command does not yet support allium v4; use `allium check` or `allium analyse` for v4 specs."
+        );
+        return ExitCode::from(2);
+    }
+
     let result = allium_parser::parse(&source);
     let source_map = SourceMap::new(&source);
     let diagnostics: Vec<serde_json::Value> = result
@@ -954,6 +964,16 @@ fn cmd_parse(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+
+    // `parse` dumps the v1-v3 AST. On a v4 spec it would parse with the wrong grammar and emit
+    // misleading v3-grammar errors, so refuse honestly rather than mislead.
+    if allium_parser::detect_version(&source) == Some(4) {
+        eprintln!("Usage: allium parse <file.allium>");
+        eprintln!(
+            "error: `parse` does not yet support allium v4; use `allium check` or `allium analyse` for v4 specs."
+        );
+        return ExitCode::from(2);
+    }
 
     let result = allium_parser::parse(&source);
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
