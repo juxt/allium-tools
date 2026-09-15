@@ -958,10 +958,13 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         if !relies.is_empty() {
             let mut names: Vec<String> = relies.iter().map(|(n, _)| n.clone()).collect();
             names.sort();
-            out.push(Diagnostic::warning(
-                d.span,
-                format!("preservation in `{}` is conditional on assumed rely(s): {} (assumed, trusted, not checked; not an unconditional guarantee).", d.name, names.join(", ")),
-            ));
+            out.push(
+                Diagnostic::info(
+                    d.span,
+                    format!("preservation in `{}` is conditional on assumed rely(s): {} (assumed, trusted, not checked; not an unconditional guarantee).", d.name, names.join(", ")),
+                )
+                .with_code("preservation-conditional"),
+            );
         }
 
         // Base case of induction: does `init` establish each invariant? `init ∧ ¬I` satisfiable means
@@ -1082,10 +1085,13 @@ pub fn preservation(module: &Module, src: &str) -> Vec<Diagnostic> {
         if init_pred.is_some() {
             for (i, (iname, _)) in invariants.iter().enumerate() {
                 if established[i] && !broken[i] {
-                    out.push(Diagnostic::warning(
-                        d.span,
-                        format!("invariant `{iname}` in `{}` is INDUCTIVE: established by `init` and preserved by every action, so it holds in every reachable state.", d.name),
-                    ));
+                    out.push(
+                        Diagnostic::info(
+                            d.span,
+                            format!("invariant `{iname}` in `{}` is INDUCTIVE: established by `init` and preserved by every action, so it holds in every reachable state.", d.name),
+                        )
+                        .with_code("invariant-inductive"),
+                    );
                 }
             }
         }
@@ -1570,10 +1576,13 @@ pub fn rely_discharge(module: &Module, src: &str, imports: &crate::arith::Import
                 if let Some(true) = crate::arith::entails_guarded_linear(&lib_guars, r, &st)
                     .or_else(|| crate::arith::entails_linear(&lib_guars, r, &st))
                 {
-                    out.push(Diagnostic::warning(
-                        d.span,
-                        format!("rely `{rname}` in `{}` is DISCHARGED by a library guarantee in scope, the dependency provides it, so it is backed, not merely assumed of the environment.", d.name),
-                    ));
+                    out.push(
+                        Diagnostic::info(
+                            d.span,
+                            format!("rely `{rname}` in `{}` is DISCHARGED by a library guarantee in scope, the dependency provides it, so it is backed, not merely assumed of the environment.", d.name),
+                        )
+                        .with_code("rely-discharged"),
+                    );
                 }
                 continue;
             }
@@ -1581,10 +1590,13 @@ pub fn rely_discharge(module: &Module, src: &str, imports: &crate::arith::Import
             let mut es = guar_refs.clone();
             es.push(&neg);
             if crate::sat::satisfiable(&es, &bnames).is_none() {
-                out.push(Diagnostic::warning(
-                    d.span,
-                    format!("rely `{rname}` in `{}` is DISCHARGED by a library guarantee in scope, the dependency provides it, so it is backed, not merely assumed of the environment.", d.name),
-                ));
+                out.push(
+                    Diagnostic::info(
+                        d.span,
+                        format!("rely `{rname}` in `{}` is DISCHARGED by a library guarantee in scope, the dependency provides it, so it is backed, not merely assumed of the environment.", d.name),
+                    )
+                    .with_code("rely-discharged"),
+                );
             } else if boolean_fragment_rel(&body, &lib_bool, &lib_bool) {
                 // Only flag an UNDISCHARGED rely when it is expressed entirely in a library's vocabulary —
                 // then it is a claim ABOUT a dependency, and its non-discharge is a real gap (the consumer
@@ -2275,10 +2287,13 @@ pub fn bmc(module: &Module, src: &str) -> Vec<Diagnostic> {
                 let refs: Vec<&Expr> = step.iter().collect();
                 if crate::sat::satisfiable(&refs, &bnames).is_none() {
                     if kk >= 2 {
-                        out.push(Diagnostic::warning(
-                            d.span,
-                            format!("invariant `{iname}` in `{}` is SAFE (proved by {kk}-induction): no reachable state violates it, though it is not 1-inductive. It holds in every reachable state.", d.name),
-                        ));
+                        out.push(
+                            Diagnostic::info(
+                                d.span,
+                                format!("invariant `{iname}` in `{}` is SAFE (proved by {kk}-induction): no reachable state violates it, though it is not 1-inductive. It holds in every reachable state.", d.name),
+                            )
+                            .with_code("invariant-safe"),
+                        );
                     }
                     break;
                 }
@@ -3058,10 +3073,13 @@ pub fn consistency(module: &Module, src: &str) -> Vec<Diagnostic> {
             rules.iter().enumerate().filter(|(k, _)| active[*k]).map(|(_, (_, e))| e).collect()
         };
         match crate::sat::satisfiable_enum(&subset(&vec![true; rules.len()]), &bnames, &evals) {
-            Some(m) => out.push(Diagnostic::warning(
-                d.span,
-                format!("rule set in `{}` is jointly satisfiable (e.g. {}).", d.name, crate::sat::describe(&m)),
-            )),
+            Some(m) => out.push(
+                Diagnostic::info(
+                    d.span,
+                    format!("rule set in `{}` is jointly satisfiable (e.g. {}).", d.name, crate::sat::describe(&m)),
+                )
+                .with_code("rules-satisfiable"),
+            ),
             None => {
                 // Minimal UNSAT core: drop each rule; keep it only if its removal restores SAT.
                 let mut active = vec![true; rules.len()];
@@ -3251,20 +3269,26 @@ pub fn coverage(module: &Module, src: &str) -> Vec<Diagnostic> {
 
         // Disjointness verdict — one line always emitted for a detected case-split.
         if all_pairwise_contradict {
-            out.push(Diagnostic::warning(
-                d.span,
-                format!("case-split in `{}` is DISJOINT (sound: every guard pair shares a contradicting condition).", d.name),
-            ));
+            out.push(
+                Diagnostic::info(
+                    d.span,
+                    format!("case-split in `{}` is DISJOINT (sound: every guard pair shares a contradicting condition).", d.name),
+                )
+                .with_code("case-split-disjoint"),
+            );
         } else if overlaps > 0 {
             out.push(Diagnostic::warning(
                 d.span,
                 format!("case-split in `{}` is NOT disjoint: actions {} both fire in {overlaps}/{combos} condition-combinations (e.g. {}), an ambiguous classification.", d.name, over_names.join(" + "), over_eg.unwrap()),
             ).with_code("case-split-not-disjoint"));
         } else {
-            out.push(Diagnostic::warning(
-                d.span,
-                format!("case-split in `{}` is disjoint over the bounded atom space (no combination matches two guards; exact for independent boolean conditions).", d.name),
-            ));
+            out.push(
+                Diagnostic::info(
+                    d.span,
+                    format!("case-split in `{}` is disjoint over the bounded atom space (no combination matches two guards; exact for independent boolean conditions).", d.name),
+                )
+                .with_code("case-split-disjoint"),
+            );
         }
         // Exhaustiveness verdict — one line always emitted.
         if gaps > 0 {

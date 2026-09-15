@@ -452,13 +452,13 @@ pub fn objective_discharge(module: &Module, src: &str, imports: &Imports) -> Vec
                     matches!(entails_guarded_linear(&inv_exprs, &conn, &st), Some(true))
                 };
                 if connected {
-                    out.push(Diagnostic::warning(d.span, format!(
+                    out.push(Diagnostic::info(d.span, format!(
                         "objective `{g}`: measure `{m}` is a well-founded variant (numeric, bounded below by 0, decreasing by at least 1 on every action) AND the floor state satisfies the goal (`{m}` = 0 ⟹ `{g}`), so the objective is REACHED in at most `{m}` steps, DISCHARGED, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved, N6).{bound_clause}",
-                    )));
+                    )).with_code("objective-discharged"));
                 } else {
-                    out.push(Diagnostic::warning(d.span, format!(
+                    out.push(Diagnostic::info(d.span, format!(
                         "objective `{g}`: measure `{m}` is a well-founded variant (numeric, bounded below by 0, decreasing by at least 1 on every action), the component TERMINATES, reaching `{m}`'s floor in at most `{m}` steps, conditional on progress-fairness (an enabled action keeps firing; assumed, not proved, N6). Remaining for full 'goal reached': prove the floor state satisfies `{g}` (state `not {g} implies {m} >= 1`).{bound_clause}",
-                    )));
+                    )).with_code("objective-terminates"));
                 }
             }
         }
@@ -547,10 +547,13 @@ pub fn arith_preservation(module: &Module, src: &str, imports: &Imports) -> Vec<
         }
         if !assumed_relies.is_empty() {
             assumed_relies.sort();
-            out.push(Diagnostic::warning(
-                d.span,
-                format!("arithmetic preservation in `{}` is conditional on assumed rely(s): {} (assumed, trusted, not checked; not an unconditional guarantee).", d.name, assumed_relies.join(", ")),
-            ));
+            out.push(
+                Diagnostic::info(
+                    d.span,
+                    format!("arithmetic preservation in `{}` is conditional on assumed rely(s): {} (assumed, trusted, not checked; not an unconditional guarantee).", d.name, assumed_relies.join(", ")),
+                )
+                .with_code("preservation-conditional"),
+            );
         }
 
         // Base case: does `init` establish each linear invariant? If the initial arithmetic state can
@@ -1361,15 +1364,21 @@ pub fn enum_guarded_preservation(module: &Module, src: &str, imports: &Imports) 
         for (iname, _, _, _) in &guarded {
             if engaged.contains(iname) && !broken.contains(iname) {
                 if established.contains(iname) {
-                    out.push(Diagnostic::warning(
-                        d.span,
-                        format!("state-guarded invariant `{iname}` in `{}` is INDUCTIVE: established by `init` and preserved by every action wherever its guard holds.", d.name),
-                    ));
+                    out.push(
+                        Diagnostic::info(
+                            d.span,
+                            format!("state-guarded invariant `{iname}` in `{}` is INDUCTIVE: established by `init` and preserved by every action wherever its guard holds.", d.name),
+                        )
+                        .with_code("invariant-inductive"),
+                    );
                 } else {
-                    out.push(Diagnostic::warning(
-                        d.span,
-                        format!("state-guarded invariant `{iname}` in `{}` is PRESERVED: every action maintains the arithmetic bound wherever its guard holds.", d.name),
-                    ));
+                    out.push(
+                        Diagnostic::info(
+                            d.span,
+                            format!("state-guarded invariant `{iname}` in `{}` is PRESERVED: every action maintains the arithmetic bound wherever its guard holds.", d.name),
+                        )
+                        .with_code("invariant-preserved"),
+                    );
                 }
             }
         }
@@ -1834,10 +1843,13 @@ pub fn aggregate_preservation(module: &Module, src: &str, imports: &Imports) -> 
         if has_action {
             for c in &cons_invs {
                 if !broken_cons.contains(&c.name) && !skipped_cons.contains(&c.name) {
-                    out.push(Diagnostic::warning(
-                        d.span,
-                        format!("conservation invariant `{}` in `{}` is PRESERVED: every action keeps the total equal to the sum.", c.name, d.name),
-                    ));
+                    out.push(
+                        Diagnostic::info(
+                            d.span,
+                            format!("conservation invariant `{}` in `{}` is PRESERVED: every action keeps the total equal to the sum.", c.name, d.name),
+                        )
+                        .with_code("conservation-preserved"),
+                    );
                 }
             }
         }
@@ -2395,10 +2407,13 @@ fn entailment_probe(
             }
         }
         match counter {
-            None => out.push(Diagnostic::warning(
-                comp_span,
-                format!("invariant `{name}` in `{comp}` is ENTAILED by the other invariants (redundant under the bounded model)."),
-            )),
+            None => out.push(
+                Diagnostic::info(
+                    comp_span,
+                    format!("invariant `{name}` in `{comp}` is ENTAILED by the other invariants (redundant under the bounded model)."),
+                )
+                .with_code("invariant-entailed"),
+            ),
             Some(m) => {
                 // Only surface the counterexample for an inequality invariant — the
                 // interesting "what does this silently assume" case.

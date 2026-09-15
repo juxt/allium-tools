@@ -167,3 +167,15 @@ contradictory-invariants, contradictory-rules, nonlinear-not-checked, invariant-
 objective-unbounded, objective-measure-invalid, objective-design-time, objective-monitored,
 budget-monitored, action-never-enabled, enum-value-unreachable, stuck-state, contract-not-satisfied,
 case-split-not-disjoint, case-split-incomplete, coverage.
+
+## Positive-result sweep (implemented)
+
+`warning` is now reserved strictly for problems. The checker's positive and neutral verification
+results were also emitted as warnings, which read oddly (a success reported as a problem). They are
+now `info` with codes: `objective-discharged`, `objective-terminates`, `invariant-inductive`,
+`invariant-preserved`, `conservation-preserved`, `invariant-safe`, `invariant-entailed`,
+`rely-discharged`, `rules-satisfiable`, `case-split-disjoint`, and the conditional-preservation
+caveat `preservation-conditional`. The problem cases in the same code paths (an action that CAN
+break an invariant, a rely NOT discharged, a case-split NOT disjoint or incomplete) stay warnings.
+Net: a well-formed, fully-specified component produces zero warnings; its results and advice are
+info, and coverage is in the `coverage` field.
