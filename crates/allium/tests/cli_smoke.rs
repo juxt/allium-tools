@@ -345,3 +345,22 @@ fn analyse_reports_coverage_separately_and_advisories_as_info() {
         "vacuous-component should be an advisory (info), not a warning: {stdout}"
     );
 }
+
+// Exit code gates on real problems: a warning fails the run, advisories/coverage do not.
+const V4_CLEAN: &str = "-- allium: 4\ncomponent C\n  observable state n : Number\n  invariant nn means n >= 0\n  init means n = 5\n  action step\n    requires n >= 1\n    ensures n = old(n) - 1\n  objective drained within eod measure n decreasing\nend\n";
+
+#[test]
+fn v4_exit_code_gates_on_warnings_not_advisories() {
+    // A clean spec whose only output is info + coverage exits 0, on both commands.
+    for command in ["check", "analyse"] {
+        let spec = SpecFile::new(&format!("v4-clean-{command}"), V4_CLEAN);
+        let out = allium().arg(command).arg(spec.arg()).output().expect("spawn allium");
+        assert!(out.status.success(), "{command} on a clean spec (advisories/coverage only) should exit 0: {:?}", out.status);
+    }
+    // A spec with a warning (undeclared name) fails, on both commands.
+    for command in ["check", "analyse"] {
+        let spec = SpecFile::new(&format!("v4-warn-{command}"), V4_UNDECLARED);
+        let out = allium().arg(command).arg(spec.arg()).output().expect("spawn allium");
+        assert_eq!(out.status.code(), Some(1), "{command} on a spec with a warning should exit 1");
+    }
+}

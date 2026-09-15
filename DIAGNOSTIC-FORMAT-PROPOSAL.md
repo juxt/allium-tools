@@ -188,8 +188,7 @@ info, and coverage is in the `coverage` field.
   positive results / advice), not warnings. Net: a well-formed spec produces zero warnings; warnings
   that appear are genuine problems (undeclared name/entity, malformed predicate, action-can-break,
   stuck state, missing contract, CONTRADICTORY, INFEASIBLE).
-- Open decision: whether `check`/`analyse` should exit non-zero on warnings (gate semantics). Today
-  `check` exits 1 on errors only; `analyse` also on CONTRADICTORY/VACUOUSLY/INFEASIBLE. Given warnings
-  are now all genuine problems, gating on them would make the exit code mean "there is a real problem"
-  and match the check help — impact measured at 5/235 specs for `check`, 89/235 for `analyse` (all with
-  real issues, mostly rough trials specs).
+- Exit-code gate (decided: gate both). `check` and `analyse` now exit 1 on any error or warning, and 0
+  when clean or advisory-only. `Diagnostic::is_problem()` (error or warning) drives it; info and coverage
+  never fail. Help text updated to match; cli_smoke test locks it. A clean spec exits 0; a spec with a
+  real problem (undeclared name/entity, malformed predicate, action-can-break, CONTRADICTORY, ...) exits 1.

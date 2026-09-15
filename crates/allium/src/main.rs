@@ -40,10 +40,13 @@ Usage: allium check <path>...
 
 Each <path> is a .allium file or a directory. Directories are searched
 recursively for .allium files. Outputs JSON with a diagnostics array
-containing line-level structural warnings and errors.
+containing structural errors and warnings, each with a code and location.
+
+Severities: `error` blocks, `warning` is a problem to fix, `info` is an
+advisory. Advisories never fail the run.
 
 Exit codes:
-  0  No errors or warnings
+  0  No errors or warnings (advisories are allowed)
   1  One or more errors or warnings were reported
   2  No inputs provided, or no .allium files could be resolved
 ";
@@ -55,12 +58,15 @@ Usage: allium analyse <path>...
 
 Runs structural checks (same as `check`) plus process-level analysis:
 data flow tracing, edge reachability, deadlock detection, conflict
-detection, and invariant verification. Outputs JSON with both a
-diagnostics array and a findings array.
+detection, and invariant verification. Outputs JSON with a `diagnostics`
+array and a `coverage` array (what was verified, in which tier).
+
+Severities: `error` blocks, `warning` is a problem to fix, `info` is an
+advisory or a positive result. Advisories and coverage never fail the run.
 
 Exit codes:
-  0  No findings
-  1  One or more findings were produced
+  0  No errors or warnings (advisories and coverage are allowed)
+  1  One or more errors or warnings were reported
   2  No inputs provided, or no .allium files could be resolved
 ";
 
@@ -477,16 +483,11 @@ fn run_multi_file(
                 }
                 _ => allium_v4::parse(source),
             };
-            // Exit non-zero on an error, and on a semantic verdict a gate must not pass:
-            // CONTRADICTORY / VACUOUSLY / INFEASIBLE. These are warnings (so they don't lower the
-            // conformance score) but they are hard failures for CI and the elicit done-gate.
-            if result.diagnostics.iter().any(|d| {
-                d.is_error()
-                    || (command == "analyse"
-                        && (d.message.contains("CONTRADICTORY")
-                            || d.message.contains("VACUOUSLY")
-                            || d.message.contains("INFEASIBLE")))
-            }) {
+            // Exit non-zero on any real problem: an error or a warning. Advisories (`info`) and
+            // coverage never fail the gate. Warnings are now exactly the genuine problems (undeclared
+            // name/entity, malformed predicate, action-can-break, stuck state, CONTRADICTORY,
+            // INFEASIBLE), so gating on them makes the exit code mean "there is a problem to fix".
+            if result.diagnostics.iter().any(|d| d.is_problem()) {
                 any_issues = true;
             }
             // Route v4 diagnostics through the unified serializer: resolve the byte span to a

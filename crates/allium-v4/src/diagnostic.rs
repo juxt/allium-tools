@@ -55,4 +55,9 @@ impl Diagnostic {
     pub fn is_error(&self) -> bool {
         matches!(self.severity, Severity::Error)
     }
+    /// A real problem to fix: an error or a warning. Advisories (`Info`) are not problems, so they
+    /// never fail the gate. `check`/`analyse` exit non-zero when any diagnostic `is_problem()`.
+    pub fn is_problem(&self) -> bool {
+        matches!(self.severity, Severity::Error | Severity::Warning)
+    }
 }
