@@ -107,9 +107,9 @@ Usage: allium monitor <spec.allium> <trace> [--format auto|event|schedule] [--to
 Evaluates the spec's `invariant` items against a trace, one row per line. The
 trace world is auto-detected from how its rows are keyed:
 
-  event     `t=<n> entity=<id> <pred>=T ...` — boolean, temporal (old(...)) and
+  event     `t=<n> entity=<id> <pred>=T ...`: boolean, temporal (old(...)) and
             relational (quantified) invariants over entities across time.
-  schedule  `period=<i> <field>=<number> ...` — arithmetic and aggregate (sum)
+  schedule  `period=<i> <field>=<number> ...`: arithmetic and aggregate (sum)
             invariants over ordered periods, reported with a numeric residual.
 
 Each invariant is dispatched to the evaluator its form needs; anything the

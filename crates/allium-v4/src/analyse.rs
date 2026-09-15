@@ -3144,10 +3144,13 @@ pub fn feasibility(module: &Module, src: &str) -> Vec<Diagnostic> {
 
         for (rname, rexpr) in &reqs {
             match sat(rexpr, &vec![true; axioms.len()]) {
-                Some(m) => out.push(Diagnostic::warning(
-                    d.span,
-                    format!("requirement `{}` in `{}` is feasible under the contract (e.g. {}).", rname, d.name, crate::sat::describe(&m)),
-                )),
+                Some(m) => out.push(
+                    Diagnostic::info(
+                        d.span,
+                        format!("requirement `{}` in `{}` is feasible under the contract (e.g. {}).", rname, d.name, crate::sat::describe(&m)),
+                    )
+                    .with_code("requirement-feasible"),
+                ),
                 None => {
                     // Minimal blocking core: axioms whose removal restores feasibility.
                     let mut active = vec![true; axioms.len()];

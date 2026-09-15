@@ -179,3 +179,17 @@ caveat `preservation-conditional`. The problem cases in the same code paths (an 
 break an invariant, a rely NOT discharged, a case-split NOT disjoint or incomplete) stay warnings.
 Net: a well-formed, fully-specified component produces zero warnings; its results and advice are
 info, and coverage is in the `coverage` field.
+
+## Pre-demo polish
+
+- Removed em-dashes from `monitor --help` text.
+- Completed the advisory sweep: `nonlinear-not-checked`, `nonlinear-suggestion`, `invariant-independent`,
+  `invariant-not-entailed`, `arith-satisfiable`, `requirement-feasible` are now `info` (transparency /
+  positive results / advice), not warnings. Net: a well-formed spec produces zero warnings; warnings
+  that appear are genuine problems (undeclared name/entity, malformed predicate, action-can-break,
+  stuck state, missing contract, CONTRADICTORY, INFEASIBLE).
+- Open decision: whether `check`/`analyse` should exit non-zero on warnings (gate semantics). Today
+  `check` exits 1 on errors only; `analyse` also on CONTRADICTORY/VACUOUSLY/INFEASIBLE. Given warnings
+  are now all genuine problems, gating on them would make the exit code mean "there is a real problem"
+  and match the check help — impact measured at 5/235 specs for `check`, 89/235 for `analyse` (all with
+  real issues, mostly rough trials specs).

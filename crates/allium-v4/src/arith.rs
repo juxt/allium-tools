@@ -80,7 +80,7 @@ pub fn arithmetic(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnost
         entailment_probe(&d.name, d.span, &grounded, &st, &mut out);
         requirement_probe(&d.name, d.span, &grounded, &d.items, &st, src, &mut out);
         if !uniq.is_empty() {
-            out.push(Diagnostic::warning(
+            out.push(Diagnostic::info(
                 d.span,
                 format!("arithmetic tier in `{}`: {} term(s) not linearisable and NOT CHECKED (nonlinear): {}. The satisfiability verdict is PARTIAL, these constraints are outside the decidable fragment.", d.name, uniq.len(), uniq.join("; ")),
             ).with_code("nonlinear-not-checked"));
@@ -89,10 +89,13 @@ pub fn arithmetic(module: &Module, src: &str, imports: &Imports) -> Vec<Diagnost
             let mut rates: Vec<String> = rate_obs.into_iter().collect();
             rates.sort();
             for obs in rates {
-                out.push(Diagnostic::warning(
-                    d.span,
-                    format!("suggestion: `{obs}` is a per-period rate multiplied by a state, so its product is nonlinear and left unchecked. If the rate is fixed across periods, declare it as a constant (`given {obs} means <value>`), the product then becomes linear and the relation is fully checkable at that rate."),
-                ));
+                out.push(
+                    Diagnostic::info(
+                        d.span,
+                        format!("suggestion: `{obs}` is a per-period rate multiplied by a state, so its product is nonlinear and left unchecked. If the rate is fixed across periods, declare it as a constant (`given {obs} means <value>`), the product then becomes linear and the relation is fully checkable at that rate."),
+                    )
+                    .with_code("nonlinear-suggestion"),
+                );
             }
         }
     }
@@ -2352,13 +2355,16 @@ fn feasibility_probe(
         cons.push(Con::new(Lin::var("outstanding_start(p0)").sub(&Lin::var("disbursed")), Rel::Eq, "pin:opening"));
     }
     match solve(&cons) {
-        Outcome::Sat(m) => out.push(Diagnostic::warning(
-            comp_span,
-            format!(
-                "arithmetic invariants in `{comp}` are JOINTLY SATISFIABLE over {N} periods.{partial} Witness schedule: {}",
-                schedule(&m, st)
-            ),
-        )),
+        Outcome::Sat(m) => out.push(
+            Diagnostic::info(
+                comp_span,
+                format!(
+                    "arithmetic invariants in `{comp}` are JOINTLY SATISFIABLE over {N} periods.{partial} Witness schedule: {}",
+                    schedule(&m, st)
+                ),
+            )
+            .with_code("arith-satisfiable"),
+        ),
         Outcome::Unsat => {
             let core = unsat_core(&cons);
             out.push(
@@ -2418,7 +2424,7 @@ fn entailment_probe(
                 // Only surface the counterexample for an inequality invariant — the
                 // interesting "what does this silently assume" case.
                 if cons_i.iter().any(|c| c.rel != Rel::Eq) {
-                    out.push(Diagnostic::warning(
+                    out.push(Diagnostic::info(
                         comp_span,
                         format!(
                             "invariant `{name}` in `{comp}` is NOT entailed by the others: they permit `{}`, which it forbids. So it relies on an assumption not captured by the other invariants (typically a sign or ordering constraint on an input), state that assumption if it is meant to hold.",
@@ -2426,10 +2432,10 @@ fn entailment_probe(
                         ),
                     ).with_code("invariant-not-entailed"));
                 } else {
-                    out.push(Diagnostic::warning(
+                    out.push(Diagnostic::info(
                         comp_span,
                         format!("invariant `{name}` in `{comp}` is independent of the others (not derivable)."),
-                    ));
+                    ).with_code("invariant-independent"));
                 }
             }
         }
