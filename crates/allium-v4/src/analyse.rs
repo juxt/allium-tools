@@ -301,15 +301,15 @@ pub(crate) fn ceiling_without_floor(module: &Module) -> Vec<Diagnostic> {
             || has(ItemKind::Requirement);
         if acts && ceiling && !floor {
             out.push(
-                Diagnostic::warning(
+                Diagnostic::info(
                     d.span,
                     format!(
-                        "component `{}` has invariants or faults but no objective, budget or requirement. It constrains what must not happen and requires nothing to happen, so an implementation that does nothing satisfies it.",
+                        "`{}` sets invariants but no objective. It says what must not happen, but not what the component must do. Code that does nothing meets it.",
                         d.name
                     ),
                 )
                 .with_code("vacuous-component")
-                .with_fix("Add an objective naming what the component must achieve, and by when."),
+                .with_fix("Add an objective that names what the component must achieve, and by when."),
             );
         }
     }
@@ -397,23 +397,38 @@ pub(crate) fn objective_report(module: &Module, src: &str) -> Vec<Diagnostic> {
             if let Some(m) = &p.measure {
                 let head = m.split(['(', ' ']).next().unwrap_or(m);
                 if !numeric_obs.contains(head) {
-                    out.push(Diagnostic::warning(it.span, format!(
-                        "objective `{g}`: measure `{m}` is not a declared numeric observable, so it cannot witness progress."
-                    )));
+                    out.push(
+                        Diagnostic::warning(it.span, format!(
+                            "Objective `{g}` uses the measure `{m}`, which is not a declared numeric observable. The checker cannot use it to show progress."
+                        ))
+                        .with_code("objective-measure-invalid")
+                        .with_fix(format!("Declare `{m}` as a numeric observable state, or use a measure that is one.")),
+                    );
                     continue;
                 }
-                out.push(Diagnostic::warning(it.span, format!(
-                    "objective `{g}`, dischargeable at design time via measure `{m}` decreasing; parsed, NOT YET verified by the checker."
-                )));
+                out.push(
+                    Diagnostic::info(it.span, format!(
+                        "Objective `{g}` can be discharged at design time from the measure `{m}` decreasing. The checker has not verified it yet."
+                    ))
+                    .with_code("objective-design-time"),
+                );
             } else {
-                out.push(Diagnostic::warning(it.span, format!(
-                    "objective `{g}`, MONITORED (no measure supplied): the checker does not prove it, it is watched on a trace; parsed, not verified."
-                )));
+                out.push(
+                    Diagnostic::info(it.span, format!(
+                        "Objective `{g}` gives no measure. The checker watches it on a trace and does not prove it."
+                    ))
+                    .with_code("objective-monitored"),
+                );
             }
         }
         for it in d.items.iter().filter(|it| it.kind == ItemKind::Budget) {
-            out.push(Diagnostic::warning(it.span,
-                "budget is a statistical obligation over a cohort window, monitored, never proved; parsed, not verified.".to_string()));
+            out.push(
+                Diagnostic::info(
+                    it.span,
+                    "A budget is a statistical limit over a cohort window. The checker watches it on a trace and does not prove it.".to_string(),
+                )
+                .with_code("budget-monitored"),
+            );
         }
     }
     out
@@ -1827,18 +1842,22 @@ pub fn tier_report(module: &Module, src: &str) -> Vec<Diagnostic> {
         }
         let mut parts = Vec::new();
         if !boolean.is_empty() {
-            parts.push(format!("boolean tier: {}", boolean.join(", ")));
+            parts.push(format!("Boolean tier: {}", boolean.join(", ")));
         }
         if !linear.is_empty() {
-            parts.push(format!("linear-arithmetic tier: {}", linear.join(", ")));
+            parts.push(format!("Linear-arithmetic tier: {}", linear.join(", ")));
         }
         if !runtime.is_empty() {
-            parts.push(format!("NOT statically checked, verify with `monitor` against real traces: {}", runtime.join("; ")));
+            parts.push(format!("Not checked statically, use `monitor` on real traces: {}", runtime.join("; ")));
         }
-        out.push(Diagnostic::warning(
-            d.span,
-            format!("analysis coverage for `{}` ({} invariant(s)), {}.", d.name, invs.len(), parts.join(" | ")),
-        ));
+        let noun = if invs.len() == 1 { "invariant" } else { "invariants" };
+        out.push(
+            Diagnostic::info(
+                d.span,
+                format!("Checked {} {noun} in `{}`. {}.", invs.len(), d.name, parts.join(". ")),
+            )
+            .with_code("coverage"),
+        );
     }
     out
 }
@@ -3309,10 +3328,10 @@ mod tests {
     fn objective_disposition_is_reported_honestly() {
         // measure present -> dischargeable, not-yet-verified
         let m = format!("{HDR}  observable state n : Number\n  action act\n    ensures a(t)\n  objective a(t) within d\n    measure n decreasing\nend\n");
-        assert!(any(&m, "dischargeable at design time") && any(&m, "NOT YET verified"), "{:?}", msgs(&m));
+        assert!(any(&m, "can be discharged at design time") && any(&m, "has not verified it yet"), "{:?}", msgs(&m));
         // no measure -> monitored
         let mon = format!("{HDR}  action act\n    ensures a(t)\n  objective a(t) within d\nend\n");
-        assert!(any(&mon, "MONITORED"), "{:?}", msgs(&mon));
+        assert!(any(&mon, "gives no measure"), "{:?}", msgs(&mon));
         // no bound -> malformed
         let nb = format!("{HDR}  action act\n    ensures a(t)\n  objective a(t)\nend\n");
         assert!(any(&nb, "has no `within"), "{:?}", msgs(&nb));
@@ -3563,11 +3582,11 @@ mod tests {
         // report must place the first two at their tiers and name the third as not-statically-checked with
         // its reason — no silent skip.
         let src = "-- allium: 4\ncomponent C\n  entity P\n  observable state paid(P) : bool\n  observable state settled(P) : bool\n  observable state bal(P) : Money\n  observable state amt(P) : Money\n  observable state rate(P) : Rate\n  observable state interest(P) : Money\n  invariant flag_ok means every p :: settled(p) implies paid(p)\n  invariant sum_ok means every p :: bal(p) = amt(p)\n  invariant int_ok means every p :: interest(p) = rate(p) * bal(p)\nend\n";
-        let cov = msgs(src).into_iter().find(|m| m.contains("analysis coverage")).unwrap();
-        assert!(cov.contains("boolean tier: flag_ok"), "{cov}");
-        assert!(cov.contains("linear-arithmetic tier: sum_ok"), "{cov}");
+        let cov = msgs(src).into_iter().find(|m| m.starts_with("Checked ")).unwrap();
+        assert!(cov.contains("Boolean tier: flag_ok"), "{cov}");
+        assert!(cov.contains("Linear-arithmetic tier: sum_ok"), "{cov}");
         assert!(cov.contains("int_ok (a product of two unknowns"), "{cov}");
-        assert!(cov.contains("verify with `monitor`"), "{cov}");
+        assert!(cov.contains("use `monitor`"), "{cov}");
     }
 
     #[test]
@@ -3578,9 +3597,9 @@ mod tests {
         // it as not-statically-checked.
         let mixed = "-- allium: 4\ncomponent R\n  entity T\n  observable state notional : Money\n  observable state has_lei : bool\n  invariant large_needs_lei means notional > 1000000 implies has_lei = true\n  action book_large_no_lei\n    ensures notional = 2000000 and has_lei = false\nend\n";
         assert!(any(mixed, "`book_large_no_lei` in `R` can break"), "mixed rule violation must be caught: {:#?}", msgs(mixed));
-        let cov = msgs(mixed).into_iter().find(|s| s.contains("analysis coverage")).unwrap();
-        assert!(cov.contains("linear-arithmetic tier: large_needs_lei"), "mixed rule must now be tiered as checked: {cov}");
-        assert!(!cov.contains("NOT statically checked"), "mixed rule is checked, not skipped: {cov}");
+        let cov = msgs(mixed).into_iter().find(|s| s.starts_with("Checked ")).unwrap();
+        assert!(cov.contains("Linear-arithmetic tier: large_needs_lei"), "mixed rule must now be tiered as checked: {cov}");
+        assert!(!cov.contains("Not checked statically"), "mixed rule is checked, not skipped: {cov}");
 
         // A COMPLIANT spec must not false-alarm.
         let ok = "-- allium: 4\ncomponent R\n  entity T\n  observable state notional : Money\n  observable state has_lei : bool\n  invariant large_needs_lei means notional > 1000000 implies has_lei = true\n  action book_large_with_lei\n    ensures notional = 2000000 and has_lei = true\nend\n";
@@ -3589,13 +3608,13 @@ mod tests {
         // A pattern we cannot cleanly rewrite (compound arithmetic antecedent) must still be reported
         // honestly as not-statically-checked — never silently listed as covered.
         let compound = "-- allium: 4\ncomponent R\n  entity T\n  observable state a : Money\n  observable state b : Money\n  observable state flag : bool\n  invariant needs_flag means (a > 100 and b > 100) implies flag = true\nend\n";
-        let cov3 = msgs(compound).into_iter().find(|m| m.contains("analysis coverage")).unwrap();
-        assert!(cov3.contains("NOT statically checked"), "un-rewritable compound mixed rule must stay honest: {cov3}");
+        let cov3 = msgs(compound).into_iter().find(|m| m.starts_with("Checked ")).unwrap();
+        assert!(cov3.contains("Not checked statically"), "un-rewritable compound mixed rule must stay honest: {cov3}");
 
         // The reverse direction (finite guard implying an arithmetic bound) stays checked as before.
         let guarded = "-- allium: 4\ncomponent A\n  entity X\n  observable state kind : { spot | swap }\n  observable state count : Number\n  invariant swap_nonneg means kind = swap implies count >= 0\nend\n";
-        let cov2 = msgs(guarded).into_iter().find(|m| m.contains("analysis coverage")).unwrap();
-        assert!(!cov2.contains("NOT statically checked"), "enum-guard->arith must stay checked: {cov2}");
+        let cov2 = msgs(guarded).into_iter().find(|m| m.starts_with("Checked ")).unwrap();
+        assert!(!cov2.contains("Not checked statically"), "enum-guard->arith must stay checked: {cov2}");
     }
 
     #[test]
@@ -3885,7 +3904,7 @@ mod tests {
         // axiom makes `status = a` and `status = b` mutually exclusive, so preservation reasons over it.
         let ok = "-- allium: 4\ncomponent O\n  entity X\n  observable state status(X) : { created | paid | delivered }\n  init means status(x) = created\n  action pay\n    requires status(x) = created\n    ensures status(x) = paid\n  action deliver\n    requires status(x) = paid\n    ensures status(x) = delivered\n  invariant fin means old(status(x) = delivered) implies status(x) = delivered\nend\n";
         assert!(any(ok, "`fin` in `O` is INDUCTIVE"), "{:?}", msgs(ok));
-        assert!(any(ok, "boolean tier: fin"), "enum invariant should be boolean tier: {:?}", msgs(ok));
+        assert!(any(ok, "Boolean tier: fin"), "enum invariant should be boolean tier: {:?}", msgs(ok));
         let bad = "-- allium: 4\ncomponent O\n  entity X\n  observable state status(X) : { created | paid | delivered }\n  init means status(x) = created\n  action pay\n    requires status(x) = created\n    ensures status(x) = paid\n  action deliver\n    requires status(x) = paid\n    ensures status(x) = delivered\n  action reopen\n    requires status(x) = delivered\n    ensures status(x) = created\n  invariant fin means old(status(x) = delivered) implies status(x) = delivered\nend\n";
         assert!(any(bad, "`reopen` in `O` can break invariant `fin`"), "{:?}", msgs(bad));
     }

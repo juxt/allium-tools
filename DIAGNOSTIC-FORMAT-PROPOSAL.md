@@ -143,3 +143,27 @@ surfaced. Remaining "green means nothing" gaps found by probing the v4 check, ea
 
 These are checker-correctness follow-ups beyond the diagnostic-format feature; recorded here so they
 are not lost.
+
+## Advisory tier + coverage field (implemented)
+
+Several v4 `analyse` lines were informational or advisory but emitted as `Warning`, so they blended
+with real problems and read as noise. Fixed by separating signal from advice:
+
+- **New `info` severity tier.** Advisories never affect the exit code and are filterable, so
+  `warning` now means "a real problem to fix" (CONTRADICTORY, undeclared-name, malformed-predicate,
+  undeclared-entity) and `info` means "transparency or a design suggestion". Ladder: `error` blocks,
+  `warning` is a problem, `info` is advice.
+- **Coverage moved to its own `coverage` field.** "what was verified, in which tier" is run metadata,
+  not a per-problem diagnostic. `analyse` now emits it in a top-level `coverage` array, out of the
+  `diagnostics`/warning stream. It stays available as the antidote to "green means nothing".
+- **Advisories demoted to `info`** (kept, with codes, so a skill like `elicit` can still act on them):
+  `vacuous-component`, `objective-design-time`, `objective-monitored`, `budget-monitored`. The
+  invalid-measure case (`objective-measure-invalid`) stays a `warning` because it is a real defect.
+- **Messages rewritten** in plain, Simplified-Technical-English style (short active sentences,
+  present tense, no em-dashes) per the project writing guidance.
+
+Codes now assigned: undeclared-name, undeclared-entity, malformed-predicate, vacuous-component,
+contradictory-invariants, contradictory-rules, nonlinear-not-checked, invariant-not-entailed,
+objective-unbounded, objective-measure-invalid, objective-design-time, objective-monitored,
+budget-monitored, action-never-enabled, enum-value-unreachable, stuck-state, contract-not-satisfied,
+case-split-not-disjoint, case-split-incomplete, coverage.

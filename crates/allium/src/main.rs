@@ -416,17 +416,28 @@ fn run_multi_file(
             // duplicates (name resolution can report the same undeclared name twice).
             let source_map = SourceMap::new(source.as_str());
             let mut seen = HashSet::new();
-            let diagnostics: Vec<serde_json::Value> = result
+            // Coverage is run metadata ("what was verified, in which tier"), not a problem to fix, so
+            // it goes in its own `coverage` field rather than the diagnostics/warning stream.
+            let mut diagnostics: Vec<serde_json::Value> = Vec::new();
+            let mut coverage: Vec<serde_json::Value> = Vec::new();
+            for d in result
                 .diagnostics
                 .iter()
                 .filter(|d| seen.insert((d.message.clone(), d.span.start, d.span.end)))
-                .map(|d| v4_diagnostic_to_json(d, path, &source_map))
-                .collect();
+            {
+                let json = v4_diagnostic_to_json(d, path, &source_map);
+                if d.code == Some("coverage") {
+                    coverage.push(json);
+                } else {
+                    diagnostics.push(json);
+                }
+            }
             let output = serde_json::json!({
                 "command": command,
                 "spec_file": path.display().to_string(),
                 "language_version": 4,
                 "diagnostics": diagnostics,
+                "coverage": coverage,
                 "findings": [],
             });
             println!("{}", serde_json::to_string_pretty(&output).unwrap());
@@ -1052,6 +1063,7 @@ fn v4_diagnostic_to_json(
     let severity = match d.severity {
         allium_v4::diagnostic::Severity::Error => "error",
         allium_v4::diagnostic::Severity::Warning => "warning",
+        allium_v4::diagnostic::Severity::Info => "info",
     };
     let mut obj = serde_json::json!({
         "code": d.code,

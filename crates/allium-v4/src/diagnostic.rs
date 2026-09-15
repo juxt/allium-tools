@@ -11,6 +11,9 @@ use crate::span::Span;
 pub enum Severity {
     Error,
     Warning,
+    /// Advisory: coverage transparency and design suggestions. Not a problem to fix, so it never
+    /// affects the exit code. Kept out of the warning stream so real problems stand out.
+    Info,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,6 +37,10 @@ impl Diagnostic {
     }
     pub fn warning(span: Span, message: impl Into<String>) -> Self {
         Self { span, message: message.into(), severity: Severity::Warning, code: None, fix: None }
+    }
+    /// An advisory: coverage or a design suggestion. Never affects the exit code.
+    pub fn info(span: Span, message: impl Into<String>) -> Self {
+        Self { span, message: message.into(), severity: Severity::Info, code: None, fix: None }
     }
     /// Attach a stable code. Chainable: `Diagnostic::warning(s, m).with_code("undeclared-name")`.
     pub fn with_code(mut self, code: &'static str) -> Self {

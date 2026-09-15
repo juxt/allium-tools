@@ -315,3 +315,33 @@ fn model_supports_v4_and_extracts_the_domain_model() {
     assert_eq!(comp["objectives"][0]["goal"], "drained", "objective extracted: {stdout}");
     assert!(!stdout.contains("uppercase letter"), "must not emit v3-grammar errors: {stdout}");
 }
+
+// Advisories read as advisories, not warnings. `analyse` puts coverage ("what was verified, in
+// which tier") in its own `coverage` field, and design advisories like vacuous-component carry
+// `severity: info` so they never pollute the warning stream or affect the exit code.
+const V4_ADVISORY: &str = "-- allium: 4\ncomponent Account\n  observable state reserve : Number\n  invariant nn means reserve >= 0\n  action withdraw ensures reserve = old(reserve) - 1\nend\n";
+
+#[test]
+fn analyse_reports_coverage_separately_and_advisories_as_info() {
+    let spec = SpecFile::new("v4-advisory", V4_ADVISORY);
+    let out = allium().arg("analyse").arg(spec.arg()).output().expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+
+    // Coverage is its own field, not a diagnostic.
+    let coverage = json["coverage"].as_array().expect("a coverage field");
+    assert!(
+        coverage.iter().any(|c| c["code"] == "coverage" && c["severity"] == "info"),
+        "coverage should be an info entry in the coverage field: {stdout}"
+    );
+    let diags = json["diagnostics"].as_array().unwrap();
+    assert!(
+        !diags.iter().any(|d| d["code"] == "coverage"),
+        "coverage must not appear in the diagnostics stream: {stdout}"
+    );
+    // The vacuous-component advisory is info severity, not a warning.
+    assert!(
+        diags.iter().any(|d| d["code"] == "vacuous-component" && d["severity"] == "info"),
+        "vacuous-component should be an advisory (info), not a warning: {stdout}"
+    );
+}
