@@ -4084,6 +4084,67 @@ fn collect_qualified_field_refs_from_item<'a>(
     }
 }
 
+/// Fields read as `bound.field`, for names bound to an imported entity.
+///
+/// The bound-name counterpart of [`collect_qualified_field_refs`]: a rule that
+/// writes `when: t: alias/Entity.created` reads the entity as `t.field`, and the
+/// qualified spelling never appears (#107).
+fn collect_bound_field_refs<'a>(
+    expr: &'a Expr,
+    bound: &HashMap<&str, &str>,
+    out: &mut HashSet<&'a str>,
+) {
+    if let Expr::MemberAccess { object, field, .. } | Expr::OptionalAccess { object, field, .. } =
+        expr
+    {
+        if matches!(object.as_ref(), Expr::Ident(i) if bound.contains_key(i.name.as_str())) {
+            out.insert(&field.name);
+        }
+    }
+    walk_expr_children(expr, &mut |child| collect_bound_field_refs(child, bound, out));
+}
+
+fn collect_bound_field_refs_from_item<'a>(
+    kind: &'a BlockItemKind,
+    bound: &HashMap<&str, &str>,
+    out: &mut HashSet<&'a str>,
+) {
+    match kind {
+        BlockItemKind::Clause { value, .. }
+        | BlockItemKind::Assignment { value, .. }
+        | BlockItemKind::ParamAssignment { value, .. }
+        | BlockItemKind::Let { value, .. }
+        | BlockItemKind::PathAssignment { value, .. }
+        | BlockItemKind::InvariantBlock { body: value, .. }
+        | BlockItemKind::FieldWithWhen { value, .. } => {
+            collect_bound_field_refs(value, bound, out);
+        }
+        BlockItemKind::ForBlock { collection, filter, items, .. } => {
+            collect_bound_field_refs(collection, bound, out);
+            if let Some(f) = filter {
+                collect_bound_field_refs(f, bound, out);
+            }
+            for item in items {
+                collect_bound_field_refs_from_item(&item.kind, bound, out);
+            }
+        }
+        BlockItemKind::IfBlock { branches, else_items } => {
+            for b in branches {
+                collect_bound_field_refs(&b.condition, bound, out);
+                for item in &b.items {
+                    collect_bound_field_refs_from_item(&item.kind, bound, out);
+                }
+            }
+            if let Some(items) = else_items {
+                for item in items {
+                    collect_bound_field_refs_from_item(&item.kind, bound, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_accessed_fields_from_item<'a>(kind: &'a BlockItemKind, out: &mut HashSet<&'a str>) {
     match kind {
         BlockItemKind::Clause { value, .. }
@@ -4840,9 +4901,13 @@ pub fn collect_reverse_contributions<'a>(
     // does not report a field as unused when its only reference lives across the
     // boundary.
     let mut imported_field_names: HashSet<&str> = HashSet::new();
+    let mut imported_entities: HashSet<&str> = HashSet::new();
     for entity in module_blocks(imported, BlockKind::Entity)
         .chain(module_blocks(imported, BlockKind::ExternalEntity))
     {
+        if let Some(n) = &entity.name {
+            imported_entities.insert(&n.name);
+        }
         for item in &entity.items {
             if let BlockItemKind::Assignment { name, .. }
             | BlockItemKind::FieldWithWhen { name, .. } = &item.kind
@@ -4858,6 +4923,18 @@ pub fn collect_reverse_contributions<'a>(
                 for item in &b.items {
                     collect_qualified_field_refs_from_item(&item.kind, alias, &mut qualified_refs);
                 }
+            }
+        }
+        // A rule reads through the name its lifecycle trigger bound
+        // (`when: t: alias/Entity.created`, then `t.field`), where the
+        // qualified spelling never appears (#107).
+        for rule in module_blocks(importer, BlockKind::Rule) {
+            let bound = lifecycle_trigger_bindings(rule, alias, &imported_entities);
+            if bound.is_empty() {
+                continue;
+            }
+            for item in &rule.items {
+                collect_bound_field_refs_from_item(&item.kind, &bound, &mut qualified_refs);
             }
         }
         for f in qualified_refs {
@@ -5376,6 +5453,58 @@ fn collect_witnessed_transition(
             }
         }
     }
+}
+
+/// Rule bindings typed to an imported entity by a lifecycle trigger on it:
+/// `when: t: alias/Entity.created`, `t: alias/Entity.field becomes v`,
+/// `t: alias/Entity.status transitions_to s`, or a temporal
+/// `t: alias/Entity.field <= now`. Maps each binding to the entity, for any
+/// entity the imported module declares — a field read is worth crediting
+/// whatever the entity's lifecycle, so unlike [`collect_witnessed_transition`]
+/// this does not require a status field (#107).
+fn lifecycle_trigger_bindings<'a>(
+    rule: &'a BlockDecl,
+    alias: &str,
+    imported_entities: &HashSet<&'a str>,
+) -> HashMap<&'a str, &'a str> {
+    // The imported entity a trigger's `alias/Entity.member` subject names.
+    let qualified_entity = |e: &'a Expr| -> Option<&'a str> {
+        let Expr::MemberAccess { object, .. } = e else {
+            return None;
+        };
+        let Expr::QualifiedName(q) = object.as_ref() else {
+            return None;
+        };
+        if q.qualifier.as_deref() != Some(alias) {
+            return None;
+        }
+        imported_entities.get(q.name.as_str()).copied()
+    };
+    let mut bound: HashMap<&str, &str> = HashMap::new();
+    for item in &rule.items {
+        let BlockItemKind::Clause { keyword, value } = &item.kind else {
+            continue;
+        };
+        if keyword != "when" {
+            continue;
+        }
+        let Expr::Binding { name, value, .. } = value else {
+            continue;
+        };
+        let entity = match value.as_ref() {
+            Expr::Becomes { subject, .. } | Expr::TransitionsTo { subject, .. } => {
+                qualified_entity(subject)
+            }
+            Expr::Comparison { left, right, .. } => {
+                qualified_entity(left).or_else(|| qualified_entity(right))
+            }
+            created => qualified_entity(created),
+        };
+        if let Some(entity) = entity {
+            bound.insert(name.name.as_str(), entity);
+        }
+    }
+    bound
 }
 
 /// Decode a transition-trigger clause value `alias/Entity.status becomes state`
@@ -8938,6 +9067,43 @@ rule ShowsError {
         assert!(rc.referenced_fields.contains("due_at"));
         let other = collect_reverse_contributions(&importer, "other", &imported);
         assert!(!other.referenced_fields.contains("due_at"));
+    }
+
+    #[test]
+    fn reverse_contributions_credit_field_read_through_a_lifecycle_trigger_binding() {
+        let imported = module_of(
+            "entity Ticket {\n  priority: Integer\n  severity: Integer\n  owner: String\n  status: open | closed\n}\n",
+        );
+        // `ticket` is bound by a lifecycle trigger on the imported entity and
+        // `priority` is read only through it (#107). Each trigger form types
+        // the binding, so each must credit the read — for the matching alias
+        // only, and without crediting the entity's unread `owner`.
+        for trigger in [
+            "ticket: tickets/Ticket.created",
+            "ticket: tickets/Ticket.severity becomes 5",
+            "ticket: tickets/Ticket.status transitions_to closed",
+        ] {
+            let importer = module_of(&format!(
+                "use \"./t.allium\" as tickets\nrule Escalate {{\n  when: {trigger}\n  requires: ticket.priority > 3\n  ensures: Escalated(ticket: ticket)\n}}\n",
+            ));
+            let rc = collect_reverse_contributions(&importer, "tickets", &imported);
+            assert!(rc.referenced_fields.contains("priority"), "{trigger}");
+            assert!(!rc.referenced_fields.contains("owner"), "{trigger}");
+            let other = collect_reverse_contributions(&importer, "other", &imported);
+            assert!(!other.referenced_fields.contains("priority"), "{trigger}");
+        }
+    }
+
+    #[test]
+    fn reverse_contributions_ignore_lifecycle_binding_to_a_name_that_is_no_entity() {
+        let imported = module_of("entity Ticket {\n  priority: Integer\n}\n");
+        // The alias resolves, but `Ledger` is not an entity of the imported
+        // module, so the binding types nothing and the read credits nothing.
+        let importer = module_of(
+            "use \"./t.allium\" as tickets\nrule Escalate {\n  when: l: tickets/Ledger.created\n  requires: l.priority > 3\n  ensures: Escalated(ledger: l)\n}\n",
+        );
+        let rc = collect_reverse_contributions(&importer, "tickets", &imported);
+        assert!(!rc.referenced_fields.contains("priority"));
     }
 
     #[test]
