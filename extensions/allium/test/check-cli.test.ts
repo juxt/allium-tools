@@ -18,12 +18,60 @@ function writeAllium(
   return fullPath;
 }
 
+// Git exports these to hooks; in a worktree GIT_DIR and GIT_INDEX_FILE are
+// absolute, so an inherited copy makes git act on the caller's repository.
+const REPO_LOCATING_GIT_VARS = [
+  "GIT_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_PREFIX",
+];
+
+function gitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...base };
+  for (const name of REPO_LOCATING_GIT_VARS) {
+    delete env[name];
+  }
+  return env;
+}
+
+function runGit(
+  args: string[],
+  cwd: string,
+  base: NodeJS.ProcessEnv = process.env,
+): void {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: gitEnv(base),
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+  }
+}
+
+function initGitRepo(dir: string, base: NodeJS.ProcessEnv = process.env) {
+  runGit(["init"], dir, base);
+  runGit(["config", "user.email", "test@example.com"], dir, base);
+  runGit(["config", "user.name", "Test"], dir, base);
+  runGit(["add", "."], dir, base);
+  runGit(["commit", "-m", "init"], dir, base);
+}
+
 function runCheck(
   args: string[],
   cwd: string,
   timeoutMs?: number,
   input?: string,
   allowTimeout = false,
+  env?: NodeJS.ProcessEnv,
 ): { status: number | null; stdout: string; stderr: string } {
   if (!fs.existsSync(checkCliPath)) {
     throw new Error(`check.js not found at ${checkCliPath}`);
@@ -33,6 +81,7 @@ function runCheck(
     encoding: "utf8",
     timeout: timeoutMs,
     input,
+    env,
   });
   if (result.error) {
     const spawnError = result.error as NodeJS.ErrnoException;
@@ -466,25 +515,48 @@ test("autofix dryrun does not persist file edits", () => {
 test("changed checks modified allium files", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "allium-check-"));
   writeAllium(dir, "spec.allium", `rule A {\n  when: Ping()\n}\n`);
-  spawnSync("git", ["init"], { cwd: dir, encoding: "utf8" });
-  spawnSync("git", ["config", "user.email", "test@example.com"], {
-    cwd: dir,
-    encoding: "utf8",
-  });
-  spawnSync("git", ["config", "user.name", "Test"], {
-    cwd: dir,
-    encoding: "utf8",
-  });
-  spawnSync("git", ["add", "."], { cwd: dir, encoding: "utf8" });
-  spawnSync("git", ["commit", "-m", "init"], { cwd: dir, encoding: "utf8" });
+  initGitRepo(dir);
   fs.writeFileSync(
     path.join(dir, "spec.allium"),
     `rule A {\n  when: Ping()\n}\n\n`,
   );
 
-  const result = runCheck(["--changed"], dir);
+  const result = runCheck(
+    ["--changed"],
+    dir,
+    undefined,
+    undefined,
+    false,
+    gitEnv(),
+  );
   assert.equal(result.status, 1);
   assert.match(result.stdout, /allium\.rule\.missingEnsures/);
+});
+
+test("test git helpers ignore an inherited GIT_DIR and GIT_INDEX_FILE", () => {
+  // Git hooks run in a worktree inherit absolute GIT_DIR and GIT_INDEX_FILE.
+  // The helpers must still act on the temp repo, not the inherited one.
+  const decoy = fs.mkdtempSync(path.join(os.tmpdir(), "allium-decoy-"));
+  writeAllium(decoy, "decoy.txt", "decoy\n");
+  initGitRepo(decoy);
+  runGit(["config", "user.name", "Decoy"], decoy);
+  const decoyConfig = path.join(decoy, ".git", "config");
+  const decoyIndex = path.join(decoy, ".git", "index");
+  const configBefore = fs.readFileSync(decoyConfig, "utf8");
+  const indexBefore = fs.readFileSync(decoyIndex);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "allium-check-"));
+  writeAllium(dir, "spec.allium", `rule A {\n  when: Ping()\n}\n`);
+  const hookEnv = {
+    ...process.env,
+    GIT_DIR: path.join(decoy, ".git"),
+    GIT_INDEX_FILE: decoyIndex,
+  };
+  initGitRepo(dir, hookEnv);
+
+  assert.equal(fs.readFileSync(decoyConfig, "utf8"), configBefore);
+  assert.deepEqual(fs.readFileSync(decoyIndex), indexBefore);
+  assert.ok(fs.existsSync(path.join(dir, ".git", "HEAD")));
 });
 
 test("fail-on info returns failure when informational findings exist", () => {
