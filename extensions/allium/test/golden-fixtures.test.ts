@@ -8,20 +8,12 @@ import { planExtractInlineEnumToNamedEnum } from "../src/language-tools/extract-
 
 const fixturesRoot = path.resolve("test/fixtures");
 
-test("golden fixture: format basic", () => {
-  const input = fs.readFileSync(
-    path.join(fixturesRoot, "format/basic.input.allium"),
-    "utf8",
-  );
-  const expected = fs.readFileSync(
-    path.join(fixturesRoot, "format/basic.expected.allium"),
-    "utf8",
-  );
-  const actual = formatAlliumText(input);
-  assert.equal(actual, expected);
-});
+const formatFixtures = fs
+  .readdirSync(path.join(fixturesRoot, "format"))
+  .filter((file) => file.endsWith(".input.allium"))
+  .map((file) => file.slice(0, -".input.allium".length));
 
-for (const name of ["clause-entries", "call-arguments", "string-braces"]) {
+for (const name of formatFixtures) {
   test(`golden fixture: format ${name}`, () => {
     const input = fs.readFileSync(
       path.join(fixturesRoot, `format/${name}.input.allium`),

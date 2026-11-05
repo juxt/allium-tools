@@ -8,5 +8,6 @@ rule JsonOutputFormatIsSupported {
 rule VariantDeclarationRequiresVariantKeyword {
   when: TopLevelDeclarationParsed(declaration)
   requires: declaration.text.matches("<Name> : <Base> \"{")
+  requires: declaration.style = `brace{`
   ensures: Done()
 }
