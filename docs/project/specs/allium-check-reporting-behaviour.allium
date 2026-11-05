@@ -10,39 +10,39 @@ rule JsonOutputFormatIsSupported {
     requires: options.format = json
 
     ensures: StdoutPrinted(prefix: "{")
-        ensures: OutputContains(summary)
-        ensures: OutputContains(findings)
-    }
+    ensures: OutputContains(summary)
+    ensures: OutputContains(findings)
+}
 
-    rule SarifOutputFormatIsSupported {
-        when: CheckCommandInvokedWithOptions(options)
-        requires: options.format = sarif
+rule SarifOutputFormatIsSupported {
+    when: CheckCommandInvokedWithOptions(options)
+    requires: options.format = sarif
 
-        ensures: StdoutPrinted(prefix: "{")
-            ensures: OutputContains(key: runs)
-            ensures: OutputContains(key: results)
-        }
+    ensures: StdoutPrinted(prefix: "{")
+    ensures: OutputContains(key: runs)
+    ensures: OutputContains(key: results)
+}
 
-        rule BaselineCanBeWritten {
-            when: CheckCommandInvokedWithOptions(options)
-            requires: options.write_baseline_path != null
+rule BaselineCanBeWritten {
+    when: CheckCommandInvokedWithOptions(options)
+    requires: options.write_baseline_path != null
 
-            ensures: FileWritten(path: options.write_baseline_path)
-            ensures: CheckFindingFingerprint.created()
-            ensures: ProcessExit(code: 0)
-        }
+    ensures: FileWritten(path: options.write_baseline_path)
+    ensures: CheckFindingFingerprint.created()
+    ensures: ProcessExit(code: 0)
+}
 
-        rule BaselineSuppressesKnownFindings {
-            when: CheckCommandInvokedWithOptions(options)
-            requires: options.baseline_path != null
+rule BaselineSuppressesKnownFindings {
+    when: CheckCommandInvokedWithOptions(options)
+    requires: options.baseline_path != null
 
-            ensures: MatchingBaselineFindingsSuppressed()
-        }
+    ensures: MatchingBaselineFindingsSuppressed()
+}
 
-        rule SarifIncludesRuleHelpMetadata {
-            when: CheckCommandInvokedWithOptions(options)
-            requires: options.format = sarif
+rule SarifIncludesRuleHelpMetadata {
+    when: CheckCommandInvokedWithOptions(options)
+    requires: options.format = sarif
 
-            ensures: OutputContains(key: "helpUri")
-            ensures: OutputContains(key: "fullDescription")
-        }
+    ensures: OutputContains(key: "helpUri")
+    ensures: OutputContains(key: "fullDescription")
+}

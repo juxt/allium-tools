@@ -11,8 +11,8 @@ rule UnusedNamedDefinitionsEmitWarnings {
     requires: definition.has_no_references = true
 
     ensures: Finding.created(
-    code: "allium.definition.unused",
-    severity: warning
+        code: "allium.definition.unused",
+        severity: warning
     )
 }
 
@@ -25,8 +25,8 @@ rule ExternalTriggerWithoutProviderIsUnreachable {
     requires: TriggerEmittedByImportedModule(rule.trigger_name) = false
 
     ensures: Finding.created(
-    code: "allium.rule.unreachableTrigger",
-    severity: info
+        code: "allium.rule.unreachableTrigger",
+        severity: info
     )
 }
 
@@ -38,8 +38,8 @@ rule QualifiedTriggerResolvedAgainstAliasedModule {
     requires: TargetModuleNeitherProvidesNorEmits(rule)
 
     ensures: Finding.created(
-    code: "allium.rule.unreachableTrigger",
-    severity: info
+        code: "allium.rule.unreachableTrigger",
+        severity: info
     )
 }
 
@@ -48,7 +48,7 @@ rule EqualityAcrossLiteralTypesIsMismatch {
     requires: clause.compares_string_literal_with_numeric_literal_using_equality
 
     ensures: Finding.created(
-    code: "allium.expression.typeMismatch",
-    severity: error
+        code: "allium.expression.typeMismatch",
+        severity: error
     )
 }

@@ -41,8 +41,8 @@ rule DuplicateRuleBehaviorProducesWarning {
     requires: pair.has_same_when_requires_ensures = true
 
     ensures: Finding.created(
-    code: "allium.rule.duplicateBehavior",
-    severity: warning
+        code: "allium.rule.duplicateBehavior",
+        severity: warning
     )
 }
 
@@ -52,7 +52,7 @@ rule PotentiallyShadowedRuleProducesInfo {
     requires: pair.rule_b_requires_strict_superset_of_rule_a = true
 
     ensures: Finding.created(
-    code: "allium.rule.potentialShadow",
-    severity: info
+        code: "allium.rule.potentialShadow",
+        severity: info
     )
 }

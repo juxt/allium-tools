@@ -126,6 +126,18 @@ test("formatAlliumText normalizes declaration header brace spacing", () => {
   );
 });
 
+test("formatAlliumText leaves the project behaviour specs unchanged", () => {
+  const specsDir = path.resolve("../../docs/project/specs");
+  const files = fs
+    .readdirSync(specsDir)
+    .filter((name) => name.endsWith(".allium"));
+  assert.ok(files.length > 0);
+  for (const name of files) {
+    const text = fs.readFileSync(path.join(specsDir, name), "utf8");
+    assert.equal(formatAlliumText(text), text, `${name} is not formatted`);
+  }
+});
+
 test("format CLI rewrites .allium files", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "allium-format-"));
   const target = path.join(dir, "spec.allium");
