@@ -21,6 +21,21 @@ test("golden fixture: format basic", () => {
   assert.equal(actual, expected);
 });
 
+for (const name of ["clause-entries", "call-arguments", "string-braces"]) {
+  test(`golden fixture: format ${name}`, () => {
+    const input = fs.readFileSync(
+      path.join(fixturesRoot, `format/${name}.input.allium`),
+      "utf8",
+    );
+    const expected = fs.readFileSync(
+      path.join(fixturesRoot, `format/${name}.expected.allium`),
+      "utf8",
+    );
+    assert.equal(formatAlliumText(input), expected);
+    assert.equal(formatAlliumText(expected), expected);
+  });
+}
+
 test("golden fixture: extract literal refactor", () => {
   const input = fs.readFileSync(
     path.join(fixturesRoot, "refactor/extract-literal.input.allium"),

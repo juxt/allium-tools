@@ -1,0 +1,12 @@
+-- allium: 3
+rule JsonOutputFormatIsSupported {
+  when: CheckCommandInvokedWithOptions(options)
+  ensures: StdoutPrinted(prefix: "{")
+  ensures: StdoutPrinted(suffix: "}") -- closes the { object
+  ensures: OutputContains(summary)
+}
+rule VariantDeclarationRequiresVariantKeyword {
+  when: TopLevelDeclarationParsed(declaration)
+  requires: declaration.text.matches("<Name> : <Base> \"{")
+  ensures: Done()
+}

@@ -1,0 +1,12 @@
+-- allium: 3
+rule DeadTransition {
+  when: AnalyseCommandCompleted(file)
+  ensures: AnalyseFinding.created(
+  type: dead_transition,
+  data: CheckPayload(
+  file: file,
+  summary: "Transition is declared but unachievable"
+  )
+  )
+  ensures: Done()
+}

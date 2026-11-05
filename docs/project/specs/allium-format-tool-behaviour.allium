@@ -40,6 +40,12 @@ rule FormatterNormalizesText {
     ensures: file.trailing_whitespace_removed = true
     ensures: file.ends_with_single_newline = true
     ensures: file.block_indentation = normalized
+    -- A clause header that ends its line with `:` (`provides:`, `exposes:`,
+    -- a bare `ensures:`, `if ...:`) keeps its indented body one level deeper,
+    -- and a line indented under an entry of that body stays deeper still.
+    ensures: file.clause_body_entries_indented_one_level = true
+    ensures: file.multi_line_call_arguments_indented_one_level = true
+    ensures: file.brackets_in_strings_and_comments_ignored_for_indentation = true
     ensures: file.top_level_blocks_separated_by_single_blank_line = true
     ensures: file.declaration_headers_use_single_space_before_opening_brace = true
     ensures: file.pipe_delimited_literals_use_single_space_around_pipe = true

@@ -1,0 +1,23 @@
+-- allium: 3
+surface InterviewerDashboard {
+  facing viewer: Interviewer
+  exposes:
+    assignment.slot.time
+    assignment.status
+  provides:
+    InterviewerConfirmsSlot(viewer, assignment.slot)
+      when assignment.status = pending
+    InterviewerDeclinesSlot(viewer, assignment.slot)
+  contracts:
+    demands Codec
+}
+rule ProcessNode {
+  when: NodeReady(node)
+      requires: node.ready = true
+  ensures:
+    if node.kind = Branch:
+      for child in node.children: ProcessNode(child)
+    else:
+      Results.created(data: node.data)
+  -- trailing note
+}

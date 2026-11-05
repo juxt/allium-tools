@@ -114,7 +114,19 @@ export function formatAlliumText(
     .map((line) => line.replace(/[ \t]+$/g, ""));
 
   const formattedLines: string[] = [];
-  let indentLevel = 0;
+  // Depth of unclosed `{` and `(` before the current line.
+  let bracketDepth = 0;
+  // Indented blocks that have no brackets: the body of a clause header such
+  // as `provides:` or `if x:`, and continuation lines inside that body. Each
+  // entry adds one level. It records the input indentation of the line that
+  // opened it and the bracket depth it lives at; it closes at the first line
+  // at that depth that is not indented deeper than the opener.
+  const softBlocks: { openerIndent: number; bracketDepth: number }[] = [];
+  let previous: {
+    indent: number;
+    code: string;
+    bracketDepthAfter: number;
+  } | null = null;
 
   for (const rawLine of lines) {
     const trimmed = rawLine.trim();
@@ -129,8 +141,41 @@ export function formatAlliumText(
       continue;
     }
 
-    const leadingClosers = countLeadingClosers(trimmed);
-    indentLevel = Math.max(indentLevel - leadingClosers, 0);
+    const inputIndent = measureIndent(rawLine, indentWidth);
+    const code = stripStringsAndComments(trimmed);
+    const leadingClosers = countLeadingClosers(code);
+    bracketDepth = Math.max(bracketDepth - leadingClosers, 0);
+
+    while (
+      softBlocks.length > 0 &&
+      softBlocks[softBlocks.length - 1].bracketDepth > bracketDepth
+    ) {
+      softBlocks.pop();
+    }
+    while (
+      softBlocks.length > 0 &&
+      softBlocks[softBlocks.length - 1].bracketDepth === bracketDepth &&
+      inputIndent <= softBlocks[softBlocks.length - 1].openerIndent
+    ) {
+      softBlocks.pop();
+    }
+
+    if (
+      previous !== null &&
+      leadingClosers === 0 &&
+      inputIndent > previous.indent &&
+      previous.bracketDepthAfter === bracketDepth
+    ) {
+      const opensClauseBody = previous.code.trimEnd().endsWith(":");
+      const continuesSoftBlock =
+        softBlocks.length > 0 &&
+        softBlocks[softBlocks.length - 1].bracketDepth === bracketDepth;
+      if (opensClauseBody || continuesSoftBlock) {
+        softBlocks.push({ openerIndent: previous.indent, bracketDepth });
+      }
+    }
+
+    const indentLevel = bracketDepth + softBlocks.length;
 
     const isTopLevelDeclaration =
       indentLevel === 0 && isTopLevelDeclarationLine(trimmed);
@@ -152,10 +197,12 @@ export function formatAlliumText(
       `${indent}${normalizePipeSpacing(normalizeDeclarationHeaderSpacing(trimmed))}`,
     );
 
-    const openCount = countOccurrences(trimmed, "{");
-    const closeCount = countOccurrences(trimmed, "}");
+    const openCount = countOccurrences(code, "{") + countOccurrences(code, "(");
+    const closeCount =
+      countOccurrences(code, "}") + countOccurrences(code, ")");
     const trailingCloseCount = Math.max(closeCount - leadingClosers, 0);
-    indentLevel = Math.max(indentLevel + openCount - trailingCloseCount, 0);
+    bracketDepth = Math.max(bracketDepth + openCount - trailingCloseCount, 0);
+    previous = { indent: inputIndent, code, bracketDepthAfter: bracketDepth };
   }
 
   const withoutTrailingBlankLines = formattedLines
@@ -168,16 +215,62 @@ function countOccurrences(text: string, token: string): number {
   return text.split(token).length - 1;
 }
 
-function countLeadingClosers(text: string): number {
+function countLeadingClosers(code: string): number {
   let count = 0;
-  for (const char of text) {
-    if (char === "}") {
+  for (const char of code) {
+    if (char === "}" || char === ")") {
       count += 1;
+      continue;
+    }
+    if (char === " " || char === "\t") {
       continue;
     }
     break;
   }
   return count;
+}
+
+function measureIndent(line: string, tabWidth: number): number {
+  let width = 0;
+  for (const char of line) {
+    if (char === " ") {
+      width += 1;
+    } else if (char === "\t") {
+      width += tabWidth;
+    } else {
+      break;
+    }
+  }
+  return width;
+}
+
+// Returns the line with string literal contents and any `--` comment removed,
+// so brackets and colons in them do not affect indentation.
+function stripStringsAndComments(line: string): string {
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (inString) {
+      if (char === "\\") {
+        i += 1;
+      } else if (char === '"') {
+        inString = false;
+        out += char;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      out += char;
+      continue;
+    }
+    if (char === "-" && line[i + 1] === "-") {
+      break;
+    }
+    out += char;
+  }
+  return out;
 }
 
 function parseArgs(argv: string[]): ParsedArgs | null {
