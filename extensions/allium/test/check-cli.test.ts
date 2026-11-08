@@ -44,17 +44,7 @@ function runGit(
   cwd: string,
   base: NodeJS.ProcessEnv = process.env,
 ): void {
-  const result = spawnSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    env: gitEnv(base),
-  });
-  if (result.error) {
-    throw result.error;
-  }
-  if (result.status !== 0) {
-    throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
-  }
+  spawnSync("git", args, { cwd, encoding: "utf8", env: gitEnv(base) });
 }
 
 function initGitRepo(dir: string, base: NodeJS.ProcessEnv = process.env) {
