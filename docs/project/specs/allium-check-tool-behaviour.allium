@@ -611,6 +611,37 @@ rule ImporterOwnedTriggerWitnessCreditsImportedLifecycle {
     ensures: FindingNotObserved(code: "allium.status.noExit", status: source)
 }
 
+-- A field read across the boundary through a name a lifecycle trigger bound:
+-- `when: t: alias/Entity.created`, `t: alias/Entity.field becomes v`,
+-- `t: alias/Entity.status transitions_to s` or a temporal
+-- `t: alias/Entity.field <= now` (optionally with an offset), then
+-- `t.field` in the rule body. The qualified spelling alias/Entity.field never
+-- appears, yet the merged single file counts the member access as a use, so
+-- the importer's read is credited (#107). Crediting stays gated on the use edge and on the trigger naming an
+-- entity the imported module declares.
+
+rule LifecycleTriggerBindingReadCreditsImportedFieldUse {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileDeclaresEntityWithField(file_a, field)
+    requires: FileHasUseDeclarationMappingAliasTo(file_b, file_a)
+    requires: FileRuleBindsNameByQualifiedLifecycleTrigger(file_b, binding)
+    requires: FileRuleReadsFieldOffBinding(file_b, binding, field)
+
+    ensures: FindingNotObserved(code: "allium.field.unused", field: field)
+}
+
+rule LifecycleTriggerBindingReadWithoutImportEdgeDoesNotCredit {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileDeclaresEntityWithFieldReadNowhereElse(file_a, field)
+    requires: FileReadsFieldOffLifecycleBindingWithoutUseDeclarationMappingTo(file_b, field, file_a)
+
+    ensures: FindingObserved(code: "allium.field.unused", field: field, severity: info)
+}
+
 rule ImportedModuleAloneKeepsLocalLifecycleWarnings {
     when: CheckCommandInvokedWithInputs(inputs)
 
