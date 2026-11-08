@@ -7,6 +7,12 @@ import { spawn, spawnSync } from "node:child_process";
 
 const checkCliPath = path.resolve(__dirname, "../src/check.js");
 
+// Git hooks export these, as absolute paths in a worktree. Inherited, they make
+// the git commands these tests run act on the caller's repository.
+for (const name of ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"]) {
+  delete process.env[name];
+}
+
 function writeAllium(
   dir: string,
   relativePath: string,
@@ -18,50 +24,12 @@ function writeAllium(
   return fullPath;
 }
 
-// Git exports these to hooks; in a worktree GIT_DIR and GIT_INDEX_FILE are
-// absolute, so an inherited copy makes git act on the caller's repository.
-const REPO_LOCATING_GIT_VARS = [
-  "GIT_DIR",
-  "GIT_INDEX_FILE",
-  "GIT_WORK_TREE",
-  "GIT_COMMON_DIR",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_NAMESPACE",
-  "GIT_PREFIX",
-];
-
-function gitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env = { ...base };
-  for (const name of REPO_LOCATING_GIT_VARS) {
-    delete env[name];
-  }
-  return env;
-}
-
-function runGit(
-  args: string[],
-  cwd: string,
-  base: NodeJS.ProcessEnv = process.env,
-): void {
-  spawnSync("git", args, { cwd, encoding: "utf8", env: gitEnv(base) });
-}
-
-function initGitRepo(dir: string, base: NodeJS.ProcessEnv = process.env) {
-  runGit(["init"], dir, base);
-  runGit(["config", "user.email", "test@example.com"], dir, base);
-  runGit(["config", "user.name", "Test"], dir, base);
-  runGit(["add", "."], dir, base);
-  runGit(["commit", "-m", "init"], dir, base);
-}
-
 function runCheck(
   args: string[],
   cwd: string,
   timeoutMs?: number,
   input?: string,
   allowTimeout = false,
-  env?: NodeJS.ProcessEnv,
 ): { status: number | null; stdout: string; stderr: string } {
   if (!fs.existsSync(checkCliPath)) {
     throw new Error(`check.js not found at ${checkCliPath}`);
@@ -71,7 +39,6 @@ function runCheck(
     encoding: "utf8",
     timeout: timeoutMs,
     input,
-    env,
   });
   if (result.error) {
     const spawnError = result.error as NodeJS.ErrnoException;
@@ -505,48 +472,58 @@ test("autofix dryrun does not persist file edits", () => {
 test("changed checks modified allium files", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "allium-check-"));
   writeAllium(dir, "spec.allium", `rule A {\n  when: Ping()\n}\n`);
-  initGitRepo(dir);
+  spawnSync("git", ["init"], { cwd: dir, encoding: "utf8" });
+  spawnSync("git", ["config", "user.email", "test@example.com"], {
+    cwd: dir,
+    encoding: "utf8",
+  });
+  spawnSync("git", ["config", "user.name", "Test"], {
+    cwd: dir,
+    encoding: "utf8",
+  });
+  spawnSync("git", ["add", "."], { cwd: dir, encoding: "utf8" });
+  spawnSync("git", ["commit", "-m", "init"], { cwd: dir, encoding: "utf8" });
   fs.writeFileSync(
     path.join(dir, "spec.allium"),
     `rule A {\n  when: Ping()\n}\n\n`,
   );
 
-  const result = runCheck(
-    ["--changed"],
-    dir,
-    undefined,
-    undefined,
-    false,
-    gitEnv(),
-  );
+  const result = runCheck(["--changed"], dir);
   assert.equal(result.status, 1);
   assert.match(result.stdout, /allium\.rule\.missingEnsures/);
 });
 
-test("test git helpers ignore an inherited GIT_DIR and GIT_INDEX_FILE", () => {
-  // Git hooks run in a worktree inherit absolute GIT_DIR and GIT_INDEX_FILE.
-  // The helpers must still act on the temp repo, not the inherited one.
+test("changed check test leaves an inherited GIT_DIR repository untouched", () => {
+  // A pre-commit hook in a worktree exports absolute GIT_DIR and GIT_INDEX_FILE.
   const decoy = fs.mkdtempSync(path.join(os.tmpdir(), "allium-decoy-"));
-  writeAllium(decoy, "decoy.txt", "decoy\n");
-  initGitRepo(decoy);
-  runGit(["config", "user.name", "Decoy"], decoy);
+  fs.writeFileSync(path.join(decoy, "decoy.txt"), "decoy\n");
+  spawnSync("git", ["init"], { cwd: decoy });
+  spawnSync("git", ["add", "."], { cwd: decoy });
   const decoyConfig = path.join(decoy, ".git", "config");
   const decoyIndex = path.join(decoy, ".git", "index");
   const configBefore = fs.readFileSync(decoyConfig, "utf8");
   const indexBefore = fs.readFileSync(decoyIndex);
 
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "allium-check-"));
-  writeAllium(dir, "spec.allium", `rule A {\n  when: Ping()\n}\n`);
-  const hookEnv = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     GIT_DIR: path.join(decoy, ".git"),
     GIT_INDEX_FILE: decoyIndex,
   };
-  initGitRepo(dir, hookEnv);
+  // Run the child as a top-level test run, not as part of this one.
+  delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--test",
+      "--test-name-pattern=^changed checks modified allium files$",
+      __filename,
+    ],
+    { encoding: "utf8", env },
+  );
 
+  assert.equal(result.status, 0, result.stdout);
   assert.equal(fs.readFileSync(decoyConfig, "utf8"), configBefore);
   assert.deepEqual(fs.readFileSync(decoyIndex), indexBefore);
-  assert.ok(fs.existsSync(path.join(dir, ".git", "HEAD")));
 });
 
 test("fail-on info returns failure when informational findings exist", () => {
