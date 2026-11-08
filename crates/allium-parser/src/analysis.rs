@@ -4917,11 +4917,11 @@ pub fn collect_reverse_contributions<'a>(
         }
     }
     if !imported_field_names.is_empty() {
-        let mut qualified_refs: HashSet<&str> = HashSet::new();
+        let mut referenced: HashSet<&str> = HashSet::new();
         for block in &importer.declarations {
             if let Decl::Block(b) = block {
                 for item in &b.items {
-                    collect_qualified_field_refs_from_item(&item.kind, alias, &mut qualified_refs);
+                    collect_qualified_field_refs_from_item(&item.kind, alias, &mut referenced);
                 }
             }
         }
@@ -4934,10 +4934,10 @@ pub fn collect_reverse_contributions<'a>(
                 continue;
             }
             for item in &rule.items {
-                collect_bound_field_refs_from_item(&item.kind, &bound, &mut qualified_refs);
+                collect_bound_field_refs_from_item(&item.kind, &bound, &mut referenced);
             }
         }
-        for f in qualified_refs {
+        for f in referenced {
             if imported_field_names.contains(f) {
                 out.referenced_fields.insert(f.to_string());
             }
@@ -5468,29 +5468,18 @@ fn lifecycle_trigger_bindings<'a>(
     alias: &str,
     imported_entities: &HashSet<&'a str>,
 ) -> HashMap<&'a str, &'a str> {
-    // The imported entity a trigger's `alias/Entity.member` subject names.
-    let qualified_entity = |e: &'a Expr| -> Option<&'a str> {
-        let Expr::MemberAccess { object, .. } = e else {
-            return None;
-        };
-        let Expr::QualifiedName(q) = object.as_ref() else {
-            return None;
-        };
-        if q.qualifier.as_deref() != Some(alias) {
-            return None;
-        }
-        imported_entities.get(q.name.as_str()).copied()
-    };
-    // One side of a temporal comparison: the subject itself, or the subject
-    // under an offset (`alias/Entity.due_at + 48.hours <= now`).
-    fn temporal_side<'a>(
-        e: &'a Expr,
-        qualified_entity: &impl Fn(&'a Expr) -> Option<&'a str>,
-    ) -> Option<&'a str> {
+    // The entity a lifecycle trigger observes through its `alias/Entity.member`
+    // subject: directly (`.created`), under `becomes`/`transitions_to`, or on
+    // either side of a temporal comparison, also under an offset.
+    fn subject_entity<'a>(e: &'a Expr, alias: &str) -> Option<&'a str> {
         match e {
-            Expr::BinaryOp { left, right, .. } => temporal_side(left, qualified_entity)
-                .or_else(|| temporal_side(right, qualified_entity)),
-            _ => qualified_entity(e),
+            Expr::Becomes { subject, .. } | Expr::TransitionsTo { subject, .. } => {
+                subject_entity(subject, alias)
+            }
+            Expr::Comparison { left, right, .. } | Expr::BinaryOp { left, right, .. } => {
+                subject_entity(left, alias).or_else(|| subject_entity(right, alias))
+            }
+            _ => qualified_member_entity(e, alias),
         }
     }
     let mut bound: HashMap<&str, &str> = HashMap::new();
@@ -5504,21 +5493,24 @@ fn lifecycle_trigger_bindings<'a>(
         let Expr::Binding { name, value, .. } = value else {
             continue;
         };
-        let entity = match value.as_ref() {
-            Expr::Becomes { subject, .. } | Expr::TransitionsTo { subject, .. } => {
-                qualified_entity(subject)
-            }
-            Expr::Comparison { left, right, .. } => {
-                temporal_side(left, &qualified_entity)
-                    .or_else(|| temporal_side(right, &qualified_entity))
-            }
-            created => qualified_entity(created),
-        };
-        if let Some(entity) = entity {
+        if let Some(entity) =
+            subject_entity(value, alias).and_then(|n| imported_entities.get(n).copied())
+        {
             bound.insert(name.name.as_str(), entity);
         }
     }
     bound
+}
+
+/// The bare entity name of an `alias/Entity.member` access through `alias`.
+fn qualified_member_entity<'a>(e: &'a Expr, alias: &str) -> Option<&'a str> {
+    let Expr::MemberAccess { object, .. } = e else {
+        return None;
+    };
+    let Expr::QualifiedName(q) = object.as_ref() else {
+        return None;
+    };
+    (q.qualifier.as_deref() == Some(alias)).then_some(q.name.as_str())
 }
 
 /// Decode a transition-trigger clause value `alias/Entity.status becomes state`
@@ -5573,16 +5565,8 @@ fn qualified_temporal_trigger_entity<'a>(
         alias: &str,
         status_by_entity: &HashMap<&'a str, HashSet<&'a str>>,
     ) -> Option<&'a str> {
-        let Expr::MemberAccess { object, .. } = e else {
-            return None;
-        };
-        let Expr::QualifiedName(q) = object.as_ref() else {
-            return None;
-        };
-        if q.qualifier.as_deref() != Some(alias) {
-            return None;
-        }
-        status_by_entity.get_key_value(q.name.as_str()).map(|(k, _)| *k)
+        let name = qualified_member_entity(e, alias)?;
+        status_by_entity.get_key_value(name).map(|(k, _)| *k)
     }
     match expr {
         Expr::Comparison { left, right, .. } => member_entity(left, alias, status_by_entity)

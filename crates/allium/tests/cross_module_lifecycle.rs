@@ -1411,18 +1411,20 @@ const LIFECYCLE_TRIGGERS_107: [(&str, &str); 5] = [
     ("temporal-offset", "ticket: base/Ticket.due_at + 48.hours <= now"),
 ];
 
-fn consumer_107(trigger: &str) -> String {
+/// The consumer's rule, reading `priority` only through the trigger binding.
+fn rule_107(trigger: &str) -> String {
     format!(
-        "-- allium: 3\n\nuse \"./base.allium\" as base\n\n\
-         rule EscalateUrgentTicket {{\n    when: {trigger}\n    requires: ticket.priority > 3\n    ensures: ticket.escalated = true\n}}\n"
+        "rule EscalateUrgentTicket {{\n    when: {trigger}\n    requires: ticket.priority > 3\n    ensures: ticket.escalated = true\n}}\n"
     )
+}
+
+fn consumer_107(trigger: &str) -> String {
+    format!("-- allium: 3\n\nuse \"./base.allium\" as base\n\n{}", rule_107(trigger))
 }
 
 /// The equivalent single file: the consumer's rule with the alias dropped.
 fn merged_107(trigger: &str) -> String {
-    let rule = consumer_107(&trigger.replace("base/", ""));
-    let rule = rule.split("as base\n").nth(1).unwrap();
-    format!("{TICKET_107}{rule}")
+    format!("{TICKET_107}\n{}", rule_107(&trigger.replace("base/", "")))
 }
 
 fn unused_field_messages(stdout: &str) -> Vec<String> {
@@ -1433,21 +1435,6 @@ fn unused_field_messages(stdout: &str) -> Vec<String> {
         .collect();
     out.sort();
     out
-}
-
-#[test]
-fn lifecycle_trigger_binding_read_credits_imported_field() {
-    for (label, trigger) in LIFECYCLE_TRIGGERS_107 {
-        let dir = TempDir::new(&format!("lifecycle-bound-{label}"));
-        dir.write("base.allium", TICKET_107);
-        dir.write("consumer.allium", &consumer_107(trigger));
-
-        let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
-        assert!(
-            !unused_field_messages(&stdout).iter().any(|m| m.contains("Ticket.priority")),
-            "[{label}] `ticket.priority` is read off a binding typed by `{trigger}`.\n{stdout}"
-        );
-    }
 }
 
 #[test]
@@ -1464,6 +1451,10 @@ fn lifecycle_trigger_binding_read_matches_the_merged_single_file_control() {
 
         let from_pair = unused_field_messages(&pair_out);
         let from_one = unused_field_messages(&one_out);
+        assert!(
+            !from_pair.iter().any(|m| m.contains("Ticket.priority")),
+            "[{label}] `ticket.priority` is read off a binding typed by `{trigger}`.\n{pair_out}"
+        );
         assert_eq!(
             from_pair, from_one,
             "[{label}] the pair must report exactly what the equivalent one-file spec reports"
@@ -1498,7 +1489,7 @@ fn lifecycle_trigger_binding_without_import_edge_credits_nothing() {
         dir.write("base.allium", TICKET_107);
         dir.write(
             "unrelated.allium",
-            &consumer_107(&trigger.replace("base/", "")).replace("use \"./base.allium\" as base\n", ""),
+            &format!("-- allium: 3\n\n{}", rule_107(&trigger.replace("base/", ""))),
         );
 
         let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
