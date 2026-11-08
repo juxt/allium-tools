@@ -1359,10 +1359,11 @@ fn a_trigger_the_provider_never_emits_still_warns() {
 // ===========================================================================
 // #107: a field read through a lifecycle-trigger binding. An importer writes
 // `when: ticket: base/Ticket.created` (or `.field becomes v`,
-// `.status transitions_to s`, or a temporal `.field <= now`) and reads
-// `ticket.priority` in the rule body. The qualified spelling
-// `base/Ticket.priority` never appears, so the qualified pass credited nothing
-// and the imported module reported a field its only reader reads.
+// `.status transitions_to s`, or a temporal `.field <= now`, bare or with
+// an offset) and reads `ticket.priority` in the rule body. The qualified
+// spelling `base/Ticket.priority` never appears, so the qualified pass
+// credited nothing and the imported module reported a field its only reader
+// reads.
 //
 // Same oracles as above: the merged single file is the control, the imported
 // module alone keeps its warning, and crediting needs a real `use` edge.
@@ -1400,13 +1401,14 @@ surface TicketDesk {
 "#;
 
 /// The three lifecycle-trigger forms the issue names, plus the temporal form
-/// the reverse channel already types a binding from. Each reads `priority`
-/// only through the bound name.
-const LIFECYCLE_TRIGGERS_107: [(&str, &str); 4] = [
+/// the reverse channel already types a binding from, bare and with an offset.
+/// Each reads `priority` only through the bound name.
+const LIFECYCLE_TRIGGERS_107: [(&str, &str); 5] = [
     ("created", "ticket: base/Ticket.created"),
     ("becomes", "ticket: base/Ticket.severity becomes 5"),
     ("transitions", "ticket: base/Ticket.status transitions_to closed"),
     ("temporal", "ticket: base/Ticket.due_at <= now"),
+    ("temporal-offset", "ticket: base/Ticket.due_at + 48.hours <= now"),
 ];
 
 fn consumer_107(trigger: &str) -> String {

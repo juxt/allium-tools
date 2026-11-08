@@ -5458,10 +5458,11 @@ fn collect_witnessed_transition(
 /// Rule bindings typed to an imported entity by a lifecycle trigger on it:
 /// `when: t: alias/Entity.created`, `t: alias/Entity.field becomes v`,
 /// `t: alias/Entity.status transitions_to s`, or a temporal
-/// `t: alias/Entity.field <= now`. Maps each binding to the entity, for any
-/// entity the imported module declares — a field read is worth crediting
-/// whatever the entity's lifecycle, so unlike [`collect_witnessed_transition`]
-/// this does not require a status field (#107).
+/// `t: alias/Entity.field <= now` (also under an offset, `+ 48.hours`). Maps
+/// each binding to the entity, for any entity the imported module declares —
+/// a field read is worth crediting whatever the entity's lifecycle, so unlike
+/// [`collect_witnessed_transition`] this does not require a status field
+/// (#107).
 fn lifecycle_trigger_bindings<'a>(
     rule: &'a BlockDecl,
     alias: &str,
@@ -5480,6 +5481,18 @@ fn lifecycle_trigger_bindings<'a>(
         }
         imported_entities.get(q.name.as_str()).copied()
     };
+    // One side of a temporal comparison: the subject itself, or the subject
+    // under an offset (`alias/Entity.due_at + 48.hours <= now`).
+    fn temporal_side<'a>(
+        e: &'a Expr,
+        qualified_entity: &impl Fn(&'a Expr) -> Option<&'a str>,
+    ) -> Option<&'a str> {
+        match e {
+            Expr::BinaryOp { left, right, .. } => temporal_side(left, qualified_entity)
+                .or_else(|| temporal_side(right, qualified_entity)),
+            _ => qualified_entity(e),
+        }
+    }
     let mut bound: HashMap<&str, &str> = HashMap::new();
     for item in &rule.items {
         let BlockItemKind::Clause { keyword, value } = &item.kind else {
@@ -5496,7 +5509,8 @@ fn lifecycle_trigger_bindings<'a>(
                 qualified_entity(subject)
             }
             Expr::Comparison { left, right, .. } => {
-                qualified_entity(left).or_else(|| qualified_entity(right))
+                temporal_side(left, &qualified_entity)
+                    .or_else(|| temporal_side(right, &qualified_entity))
             }
             created => qualified_entity(created),
         };

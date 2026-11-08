@@ -614,10 +614,10 @@ rule ImporterOwnedTriggerWitnessCreditsImportedLifecycle {
 -- A field read across the boundary through a name a lifecycle trigger bound:
 -- `when: t: alias/Entity.created`, `t: alias/Entity.field becomes v`,
 -- `t: alias/Entity.status transitions_to s` or a temporal
--- `t: alias/Entity.field <= now`, then `t.field` in the rule body. The
--- qualified spelling alias/Entity.field never appears, yet the merged single
--- file counts the member access as a use, so the importer's read is credited
--- (#107). Crediting stays gated on the use edge and on the trigger naming an
+-- `t: alias/Entity.field <= now` (optionally with an offset), then
+-- `t.field` in the rule body. The qualified spelling alias/Entity.field never
+-- appears, yet the merged single file counts the member access as a use, so
+-- the importer's read is credited (#107). Crediting stays gated on the use edge and on the trigger naming an
 -- entity the imported module declares.
 
 rule LifecycleTriggerBindingReadCreditsImportedFieldUse {
