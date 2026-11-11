@@ -4,7 +4,7 @@ mod test_plan;
 use allium_parser::diagnostic::Severity;
 use allium_parser::lexer::SourceMap;
 use allium_parser::{AmbiguousImports, ReverseContributions};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -73,15 +73,43 @@ error-severity diagnostic (e.g. it does not parse).
 const PLAN_HELP: &str = "\
 allium plan - derive test obligations from a spec
 
-Usage: allium plan <file.allium>
+Usage: allium plan <file.allium> [--against <plan.json> | --covered-by <ids>]
+                   [--id <id>] [--id-prefix <prefix>] [--construct <name>]
+                   [--category <name>] [--ids-from <ids>] [--summary | --compact]
 
 Prints a JSON document describing the test plan implied by the spec,
-including invariants, rule pre- and post-conditions, and transitions.
+including invariants, rule pre- and post-conditions, and transitions:
+  {\"version\": n, \"obligations\": [...], \"diagnostics\": [...]}
+Each obligation carries `id`, `category`, `description`,
+`source_construct` and `source_span` {`start`, `end`} (byte offsets),
+plus `expression`, `detail` and `dependencies` where they apply.
 
 The output carries a `diagnostics` array mirroring `check`. Exits
 non-zero if the spec carries an error-severity diagnostic, so an empty
 obligation set from a spec that does not parse is not mistaken for a
 valid spec that legitimately has none.
+
+Options:
+  --against <plan.json>  Compare with an earlier output of `allium plan`
+                         and print the obligation ids that changed:
+                         {\"added\": [id], \"removed\": [id], \"changed\": [id],
+                          \"moved\": [{\"from\": id, \"to\": id}], \"diagnostics\": [...]}
+                         `moved` pairs a removed and an added id with equal
+                         content. `source_span` is ignored.
+  --covered-by <ids>     Read obligation ids, one per line (`-` for stdin),
+                         and print {\"covered\": [id], \"uncovered\": [id],
+                         \"unknown\": [id], \"diagnostics\": [...]}
+  --id <id>, --id-prefix <prefix>, --construct <name>, --category <name>,
+  --ids-from <ids>       Select obligations by id, id prefix,
+                         `source_construct` or category (e.g. rule_failure),
+                         or by the ids in a file (`-` for stdin). Each can
+                         repeat; the union is selected. An id, construct
+                         or category that is not in the plan exits 1 and
+                         names it.
+  --summary              Print {\"total\": n, \"by_category\": {category: n},
+                         \"diagnostics\": [...]} for the selected obligations.
+  --compact              Print the plan with only `id`, `category` and
+                         `source_construct` on each obligation.
 ";
 
 const MODEL_HELP: &str = "\
@@ -669,11 +697,12 @@ fn single_file_exit(diagnostics: &[allium_parser::Diagnostic]) -> ExitCode {
 /// The transformed output is an object; parse diagnostics are merged into it
 /// under a `diagnostics` key (mirroring `check`) so a consumer can tell an
 /// empty-but-valid result apart from a parse failure without a second
-/// invocation. The exit code reflects error-severity diagnostics.
+/// invocation. The exit code reflects error-severity diagnostics. An error
+/// from the transform is printed on stderr and exits 1 with no output.
 fn run_single_file(
     usage: &str,
     args: &[String],
-    transform: impl FnOnce(&allium_parser::Module, &str) -> serde_json::Value,
+    transform: impl FnOnce(&allium_parser::Module, &str) -> Result<serde_json::Value, String>,
 ) -> ExitCode {
     if args.len() != 1 {
         eprintln!("Usage: {usage}");
@@ -697,7 +726,13 @@ fn run_single_file(
         .map(|d| diagnostic_to_json(d, path, &source_map))
         .collect();
 
-    let mut output = transform(&result.module, &source);
+    let mut output = match transform(&result.module, &source) {
+        Ok(output) => output,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(1);
+        }
+    };
     if let serde_json::Value::Object(map) = &mut output {
         map.insert("diagnostics".to_string(), serde_json::Value::Array(diagnostics));
     }
@@ -729,16 +764,187 @@ fn cmd_parse(args: &[String]) -> ExitCode {
 }
 
 fn cmd_plan(args: &[String]) -> ExitCode {
-    run_single_file("allium plan <file.allium>", args, |module, source| {
-        let plan = test_plan::generate_test_plan(module, source);
-        serde_json::to_value(plan).unwrap()
+    let usage = "allium plan <file.allium> [--against <plan.json> | --covered-by <ids>] \
+                 [--id <id>] [--id-prefix <prefix>] [--construct <name>] [--category <name>] [--ids-from <ids>] \
+                 [--summary | --compact]";
+    let mut files = Vec::new();
+    let mut output_flags = Vec::new();
+    let mut opts: HashMap<&str, Vec<&String>> = HashMap::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--against" | "--covered-by" | "--id" | "--id-prefix" | "--construct" | "--category" | "--ids-from" => {
+                let Some(value) = rest.next() else {
+                    eprintln!("Usage: {usage}");
+                    return ExitCode::from(2);
+                };
+                opts.entry(arg.as_str()).or_default().push(value);
+            }
+            "--summary" | "--compact" => output_flags.push(arg.as_str()),
+            _ => files.push(arg.clone()),
+        }
+    }
+    let opt = |name: &str| opts.get(name).cloned().unwrap_or_default();
+    let (against, covered_by, ids_from) = (opt("--against"), opt("--covered-by"), opt("--ids-from"));
+    let (prefixes, constructs, categories) = (opt("--id-prefix"), opt("--construct"), opt("--category"));
+    let stdin_reads = covered_by.iter().chain(&ids_from).filter(|v| v.as_str() == "-").count();
+    if files.len() != 1
+        || against.len() > 1
+        || covered_by.len() > 1
+        || (!against.is_empty() && !covered_by.is_empty())
+        || stdin_reads > 1
+        || output_flags.len() > 1
+        || (!output_flags.is_empty() && !(against.is_empty() && covered_by.is_empty()))
+    {
+        eprintln!("Usage: {usage}");
+        return ExitCode::from(2);
+    }
+
+    let read = |path: &str| {
+        let text = if path == "-" {
+            std::io::read_to_string(std::io::stdin())
+        } else {
+            std::fs::read_to_string(path)
+        };
+        text.map_err(|e| format!("{path}: {e}"))
+    };
+    let read_ids = |path: &str| {
+        read(path).map(|s| s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect::<Vec<_>>())
+    };
+    let inputs = (|| -> Result<_, String> {
+        let old = match against.first() {
+            None => None,
+            Some(path) => {
+                let plan = serde_json::from_str(&read(path)?).map_err(|e| format!("{path}: {e}"))?;
+                Some(obligations_by_id(&plan).ok_or_else(|| {
+                    format!("{path}: not a plan: expected an `obligations` array of objects with an `id`")
+                })?)
+            }
+        };
+        let mut ids: Vec<String> = opt("--id").into_iter().cloned().collect();
+        for path in &ids_from {
+            ids.extend(read_ids(path)?);
+        }
+        let covered = covered_by.first().map(|path| read_ids(path)).transpose()?;
+        Ok((old, ids, covered))
+    })();
+    let (mut old, ids, covered) = match inputs {
+        Ok(inputs) => inputs,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let selecting = !(opt("--id").is_empty()
+        && ids_from.is_empty()
+        && prefixes.is_empty()
+        && constructs.is_empty()
+        && categories.is_empty());
+    let field = |o: &serde_json::Value, key: &str| o[key].as_str().unwrap_or_default().to_string();
+    let is_selected = |o: &serde_json::Value| {
+        let id = field(o, "id");
+        !selecting
+            || ids.contains(&id)
+            || prefixes.iter().any(|p| id.starts_with(p.as_str()))
+            || constructs.iter().any(|c| **c == field(o, "source_construct"))
+            || categories.iter().any(|c| **c == field(o, "category"))
+    };
+    if let Some(old) = &mut old {
+        old.retain(|_, o| is_selected(o));
+    }
+
+    run_single_file(usage, &files, |module, source| {
+        let mut plan = serde_json::to_value(test_plan::generate_test_plan(module, source)).unwrap();
+        let obligations = plan["obligations"].as_array_mut().unwrap();
+        let known = |key: &str| obligations.iter().map(|o| field(o, key)).collect::<HashSet<String>>();
+        let (plan_ids, plan_constructs, plan_categories) = (known("id"), known("source_construct"), known("category"));
+        let unknown: Vec<String> = ids
+            .iter()
+            .filter(|id| !plan_ids.contains(*id))
+            .map(|id| format!("--id {id}"))
+            .chain(constructs.iter().filter(|c| !plan_constructs.contains(**c)).map(|c| format!("--construct {c}")))
+            .chain(categories.iter().filter(|c| !plan_categories.contains(**c)).map(|c| format!("--category {c}")))
+            .collect();
+        if !unknown.is_empty() {
+            return Err(format!("unknown selector values: {}", unknown.join(", ")));
+        }
+        obligations.retain(|o| is_selected(o));
+
+        Ok(match (&old, &covered) {
+            (Some(old), _) => plan_diff(old, &obligations_by_id(&plan).unwrap()),
+            (None, Some(covered)) => {
+                let selected: BTreeSet<String> = plan["obligations"].as_array().unwrap().iter().map(|o| field(o, "id")).collect();
+                let listed: BTreeSet<String> = covered.iter().cloned().collect();
+                serde_json::json!({
+                    "covered": listed.intersection(&selected).collect::<Vec<_>>(),
+                    "uncovered": selected.difference(&listed).collect::<Vec<_>>(),
+                    "unknown": listed.iter().filter(|id| !plan_ids.contains(*id)).collect::<Vec<_>>(),
+                })
+            }
+            (None, None) => match output_flags.first() {
+                Some(&"--summary") => {
+                    let obligations = plan["obligations"].as_array().unwrap();
+                    let mut by_category = BTreeMap::new();
+                    for o in obligations {
+                        *by_category.entry(field(o, "category")).or_insert(0) += 1;
+                    }
+                    serde_json::json!({"total": obligations.len(), "by_category": by_category})
+                }
+                Some(_) => {
+                    for o in plan["obligations"].as_array_mut().unwrap() {
+                        o.as_object_mut().unwrap().retain(|k, _| matches!(k.as_str(), "id" | "category" | "source_construct"));
+                    }
+                    plan
+                }
+                None => plan,
+            },
+        })
     })
+}
+
+type ObligationsById = std::collections::BTreeMap<String, serde_json::Value>;
+
+/// The obligations of a plan keyed by id, without `source_span`.
+fn obligations_by_id(plan: &serde_json::Value) -> Option<ObligationsById> {
+    plan.get("obligations")?
+        .as_array()?
+        .iter()
+        .map(|o| {
+            let mut o = o.as_object()?.clone();
+            o.remove("source_span");
+            Some((o.get("id")?.as_str()?.to_string(), serde_json::Value::Object(o)))
+        })
+        .collect()
+}
+
+fn plan_diff(old: &ObligationsById, new: &ObligationsById) -> serde_json::Value {
+    let without_id = |o: &serde_json::Value| {
+        let mut o = o.clone();
+        o.as_object_mut().unwrap().remove("id");
+        o
+    };
+    let changed: Vec<&String> =
+        old.iter().filter(|(id, o)| new.get(*id).is_some_and(|n| n != *o)).map(|(id, _)| id).collect();
+    let mut added: Vec<(&String, serde_json::Value)> =
+        new.iter().filter(|(id, _)| !old.contains_key(*id)).map(|(id, o)| (id, without_id(o))).collect();
+    let mut moved = Vec::new();
+    let mut removed = Vec::new();
+    for (id, o) in old.iter().filter(|(id, _)| !new.contains_key(*id)) {
+        let content = without_id(o);
+        match added.iter().position(|(_, n)| *n == content) {
+            Some(i) => moved.push(serde_json::json!({"from": id, "to": added.remove(i).0})),
+            None => removed.push(id),
+        }
+    }
+    let added: Vec<&String> = added.into_iter().map(|(id, _)| id).collect();
+    serde_json::json!({"added": added, "removed": removed, "changed": changed, "moved": moved})
 }
 
 fn cmd_model(args: &[String]) -> ExitCode {
     run_single_file("allium model <file.allium>", args, |module, source| {
         let model = domain_model::extract_domain_model(module, source);
-        serde_json::to_value(model).unwrap()
+        Ok(serde_json::to_value(model).unwrap())
     })
 }
 
