@@ -403,3 +403,84 @@ fn plan_unreadable_id_lists_exit_one() {
         assert!(!out.stderr.is_empty(), "{option}");
     }
 }
+
+#[test]
+fn plan_summary_counts_the_selected_obligations_per_category() {
+    let spec = SpecFile::new("plan-summary", VALID);
+    let out = plan_with(&[&spec.arg(), "--summary"], None);
+    assert!(out.status.success(), "expected exit 0, got {:?}", out.status);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "total": 9,
+            "by_category": {
+                "entity_fields": 1,
+                "rule_entity_creation": 1,
+                "rule_success": 2,
+                "surface_actor": 1,
+                "surface_provides": 1,
+                "transition_edge": 1,
+                "transition_rejected": 1,
+                "transition_terminal": 1
+            },
+            "diagnostics": []
+        })
+    );
+    let out = plan_with(&["--summary", &spec.arg(), "--id-prefix", "rule-"], None);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["total"], 3);
+    assert_eq!(json["by_category"], serde_json::json!({"rule_entity_creation": 1, "rule_success": 2}));
+}
+
+#[test]
+fn plan_compact_keeps_the_shape_with_three_keys_per_obligation() {
+    let spec = SpecFile::new("plan-compact", VALID);
+    let out = plan_with(&[&spec.arg(), "--compact"], None);
+    assert!(out.status.success(), "expected exit 0, got {:?}", out.status);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let mut keys: Vec<&String> = json.as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["diagnostics", "obligations", "version"]);
+    let full = plan_json(&spec);
+    assert_eq!(json["obligations"].as_array().unwrap().len(), full["obligations"].as_array().unwrap().len());
+    for o in json["obligations"].as_array().unwrap() {
+        let mut keys: Vec<&String> = o.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["category", "id", "source_construct"]);
+    }
+    let out = plan_with(&[&spec.arg(), "--compact", "--construct", "Finish"], None);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        json["obligations"],
+        serde_json::json!([{"id": "rule-success.Finish", "category": "rule_success", "source_construct": "Finish"}])
+    );
+}
+
+#[test]
+fn plan_summary_and_compact_usage_errors_exit_two() {
+    let spec = SpecFile::new("plan-output-usage", VALID);
+    let ids = SpecFile::new("plan-output-usage-ids", "rule-success.Finish\n");
+    let s = spec.arg();
+    let i = ids.arg();
+    for args in [
+        vec![s.as_str(), "--summary", "--compact"],
+        vec![s.as_str(), "--summary", "--against", i.as_str()],
+        vec![s.as_str(), "--summary", "--covered-by", i.as_str()],
+        vec![s.as_str(), "--compact", "--against", i.as_str()],
+        vec![s.as_str(), "--compact", "--covered-by", i.as_str()],
+    ] {
+        let out = plan_with(&args, None);
+        assert_eq!(out.status.code(), Some(2), "args {args:?}");
+        assert!(out.stdout.is_empty(), "args {args:?}");
+    }
+}
+
+#[test]
+fn plan_help_describes_the_output_shape() {
+    let out = allium().args(["plan", "--help"]).output().expect("spawn allium");
+    let help = String::from_utf8_lossy(&out.stdout);
+    for word in ["version", "obligations", "diagnostics", "source_construct", "source_span", "--summary", "--compact"] {
+        assert!(help.contains(word), "plan --help should mention {word}: {help}");
+    }
+}

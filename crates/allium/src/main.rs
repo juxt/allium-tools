@@ -75,10 +75,14 @@ allium plan - derive test obligations from a spec
 
 Usage: allium plan <file.allium> [--against <plan.json> | --covered-by <ids>]
                    [--id <id>] [--id-prefix <prefix>] [--construct <name>]
-                   [--category <name>] [--ids-from <ids>]
+                   [--category <name>] [--ids-from <ids>] [--summary | --compact]
 
 Prints a JSON document describing the test plan implied by the spec,
-including invariants, rule pre- and post-conditions, and transitions.
+including invariants, rule pre- and post-conditions, and transitions:
+  {\"version\": n, \"obligations\": [...], \"diagnostics\": [...]}
+Each obligation carries `id`, `category`, `description`,
+`source_construct` and `source_span` {`start`, `end`} (byte offsets),
+plus `expression`, `detail` and `dependencies` where they apply.
 
 The output carries a `diagnostics` array mirroring `check`. Exits
 non-zero if the spec carries an error-severity diagnostic, so an empty
@@ -102,6 +106,10 @@ Options:
                          repeat; the union is selected. An id, construct
                          or category that is not in the plan exits 1 and
                          names it.
+  --summary              Print {\"total\": n, \"by_category\": {category: n},
+                         \"diagnostics\": [...]} for the selected obligations.
+  --compact              Print the plan with only `id`, `category` and
+                         `source_construct` on each obligation.
 ";
 
 const MODEL_HELP: &str = "\
@@ -757,8 +765,10 @@ fn cmd_parse(args: &[String]) -> ExitCode {
 
 fn cmd_plan(args: &[String]) -> ExitCode {
     let usage = "allium plan <file.allium> [--against <plan.json> | --covered-by <ids>] \
-                 [--id <id>] [--id-prefix <prefix>] [--construct <name>] [--category <name>] [--ids-from <ids>]";
+                 [--id <id>] [--id-prefix <prefix>] [--construct <name>] [--category <name>] [--ids-from <ids>] \
+                 [--summary | --compact]";
     let mut files = Vec::new();
+    let mut output_flags = Vec::new();
     let mut opts: HashMap<&str, Vec<&String>> = HashMap::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -770,6 +780,7 @@ fn cmd_plan(args: &[String]) -> ExitCode {
                 };
                 opts.entry(arg.as_str()).or_default().push(value);
             }
+            "--summary" | "--compact" => output_flags.push(arg.as_str()),
             _ => files.push(arg.clone()),
         }
     }
@@ -782,6 +793,8 @@ fn cmd_plan(args: &[String]) -> ExitCode {
         || covered_by.len() > 1
         || (!against.is_empty() && !covered_by.is_empty())
         || stdin_reads > 1
+        || output_flags.len() > 1
+        || (!output_flags.is_empty() && !(against.is_empty() && covered_by.is_empty()))
     {
         eprintln!("Usage: {usage}");
         return ExitCode::from(2);
@@ -869,7 +882,23 @@ fn cmd_plan(args: &[String]) -> ExitCode {
                     "unknown": listed.iter().filter(|id| !plan_ids.contains(*id)).collect::<Vec<_>>(),
                 })
             }
-            (None, None) => plan,
+            (None, None) => match output_flags.first() {
+                Some(&"--summary") => {
+                    let obligations = plan["obligations"].as_array().unwrap();
+                    let mut by_category = BTreeMap::new();
+                    for o in obligations {
+                        *by_category.entry(field(o, "category")).or_insert(0) += 1;
+                    }
+                    serde_json::json!({"total": obligations.len(), "by_category": by_category})
+                }
+                Some(_) => {
+                    for o in plan["obligations"].as_array_mut().unwrap() {
+                        o.as_object_mut().unwrap().retain(|k, _| matches!(k.as_str(), "id" | "category" | "source_construct"));
+                    }
+                    plan
+                }
+                None => plan,
+            },
         })
     })
 }

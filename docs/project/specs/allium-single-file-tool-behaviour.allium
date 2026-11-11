@@ -8,6 +8,7 @@
 --   - Exit code behavior with respect to parse diagnostics
 --   - The comparison output of `plan --against <path>`
 --   - Obligation selection and the coverage output of `plan --covered-by <path>`
+--   - The reduced outputs of `plan --summary` and `plan --compact`
 -- Excludes:
 --   - The multi-file commands `check` and `analyse` (see their own specs)
 --   - The shape of the command-specific payload (obligations, domain model, AST)
@@ -23,6 +24,8 @@ entity SingleFileRun {
     covered_by: String?
     -- the selector option values given to `plan`; empty when none is given
     selectors: Set<String>
+    summary: Boolean
+    compact: Boolean
 }
 
 -- The single-file commands' external stimuli. Declared so each listener
@@ -54,15 +57,18 @@ rule WrongArityIsRejected {
 -- `plan` accepts `<file>` plus any of the options `--against <path>`,
 -- `--covered-by <path>`, `--id <id>`, `--id-prefix <prefix>`,
 -- `--construct <name>`, `--category <name>` and `--ids-from <path>`, in any
--- order, each followed by exactly one value. Only the selector options (all
--- but `--against` and `--covered-by`) may repeat. Every other shape is a
--- usage error, among them: an option without a value, a second `--against`
--- or `--covered-by`, `--covered-by` together with `--against`, and `-` as
--- the value of both `--covered-by` and `--ids-from`.
+-- order, each followed by exactly one value, and the flags `--summary` and
+-- `--compact`, which take no value. Only the selector options (all but
+-- `--against` and `--covered-by`) may repeat. Every other shape is a usage
+-- error, among them: an option without a value, a second `--against` or
+-- `--covered-by`, `--covered-by` together with `--against`, `-` as the value
+-- of both `--covered-by` and `--ids-from`, and any two of `--against`,
+-- `--covered-by`, `--summary` and `--compact` together.
 rule PlanArgumentShapeIsRejected {
     when: SingleFileCommandInvoked(command, arguments)
     requires: command = plan
-    requires: IsPlanArgumentShape(arguments) = false
+    requires: IsPlanArgumentShape(arguments: arguments, flags: ["--summary", "--compact"],
+        mutually_exclusive: ["--against", "--covered-by", "--summary", "--compact"]) = false
 
     ensures: UsagePrinted()
     ensures: ProcessExit(code: 2)
@@ -158,6 +164,33 @@ rule CoverageReplacesPlan {
     ensures: UnknownAreListedIdsNotInPlan(list: run.covered_by, plan: run.input)
     ensures: IdListsSorted()
     ensures: IdListsFreeOfDuplicates()
+}
+
+-- `--summary` and `--compact` reduce the output to the selected obligations.
+-- Without them, every output of `plan`, including the full plan with its
+-- keys `version`, `obligations` and `diagnostics`, is unchanged.
+-- `by_category` is keyed by serialized category name (for example
+-- `rule_failure`) and lists only categories with a selected obligation.
+rule SummaryReplacesPlan {
+    when: SingleFileRunCompleted(run)
+    requires: run.command = plan
+    requires: run.summary = true
+
+    ensures: JsonKeysEmitted(keys: ["total", "by_category", "diagnostics"])
+    ensures: TotalIsSelectedObligationCount(plan: run.input, selectors: run.selectors)
+    ensures: ByCategoryCountsSelectedObligationsPerCategory(plan: run.input, selectors: run.selectors)
+    ensures: ByCategoryKeysSorted()
+}
+
+-- With `--compact`, the plan keeps its usual keys and each selected
+-- obligation carries only its `id`, `category` and `source_construct`.
+rule CompactReducesObligations {
+    when: SingleFileRunCompleted(run)
+    requires: run.command = plan
+    requires: run.compact = true
+
+    ensures: JsonKeysEmitted(keys: ["version", "obligations", "diagnostics"])
+    ensures: ObligationsCarryOnlyKeys(keys: ["id", "category", "source_construct"])
 }
 
 rule OutputCarriesDiagnostics {
