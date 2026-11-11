@@ -222,3 +222,184 @@ fn plan_against_without_a_path_is_a_usage_error() {
     let out = allium().args(["plan", &spec.arg(), "--against"]).output().expect("spawn allium");
     assert_eq!(out.status.code(), Some(2));
 }
+
+fn plan_with(args: &[&str], stdin: Option<&str>) -> std::process::Output {
+    use std::io::Write;
+    let mut child = allium()
+        .arg("plan")
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn allium");
+    child.stdin.take().unwrap().write_all(stdin.unwrap_or("").as_bytes()).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+fn ids_of(json: &serde_json::Value) -> Vec<&str> {
+    json["obligations"].as_array().unwrap().iter().map(|o| o["id"].as_str().unwrap()).collect()
+}
+
+#[test]
+fn plan_selectors_select_the_union_and_keep_the_shape() {
+    let spec = SpecFile::new("plan-select", VALID);
+    let out = plan_with(
+        &[
+            &spec.arg(),
+            "--id", "rule-success.Finish",
+            "--id-prefix", "transition-",
+            "--construct", "JobIntake",
+            "--category", "entity_fields",
+        ],
+        None,
+    );
+    assert!(out.status.success(), "expected exit 0, got {:?}", out.status);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let mut ids = ids_of(&json);
+    ids.sort();
+    assert_eq!(
+        ids,
+        [
+            "entity-fields.Job",
+            "rule-success.Finish",
+            "surface-actor.JobIntake",
+            "surface-provides.JobIntake",
+            "transition-edge.Job.pending.done",
+            "transition-rejected.Job.status",
+            "transition-terminal.Job.status",
+        ]
+    );
+    assert!(json.get("version").is_some() && json["diagnostics"] == serde_json::json!([]));
+}
+
+#[test]
+fn plan_ids_from_reads_a_file_or_stdin() {
+    let spec = SpecFile::new("plan-ids-from", VALID);
+    let list = "  rule-success.Finish \n\nentity-fields.Job\n";
+    let ids_file = SpecFile::new("plan-ids-from-list", list);
+    for (path, stdin) in [(ids_file.arg(), None), ("-".to_string(), Some(list))] {
+        let out = plan_with(&[&spec.arg(), "--ids-from", &path], stdin);
+        assert!(out.status.success(), "expected exit 0, got {:?}", out.status);
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(ids_of(&json), ["entity-fields.Job", "rule-success.Finish"]);
+    }
+}
+
+#[test]
+fn plan_names_every_unknown_selector_value() {
+    let spec = SpecFile::new("plan-unknown", VALID);
+    let out = plan_with(
+        &[
+            &spec.arg(),
+            "--id", "no-such-id",
+            "--construct", "Ghost",
+            "--category", "bogus",
+            "--category", "invariant",
+            "--id-prefix", "zzz",
+        ],
+        None,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // `invariant` is a category name, but no obligation of this plan carries it.
+    for value in ["no-such-id", "Ghost", "bogus", "invariant"] {
+        assert!(stderr.contains(value), "stderr should name {value}: {stderr}");
+    }
+    assert!(!stderr.contains("zzz"), "a prefix that matches nothing is no error: {stderr}");
+}
+
+#[test]
+fn plan_covered_by_reports_covered_uncovered_and_unknown_ids() {
+    let spec = SpecFile::new("plan-covered", VALID);
+    let list = "rule-success.Finish\n  ghost.id\n\nrule-success.Finish\n";
+    let ids_file = SpecFile::new("plan-covered-list", list);
+    for (path, stdin) in [(ids_file.arg(), None), ("-".to_string(), Some(list))] {
+        let out = plan_with(&[&spec.arg(), "--covered-by", &path], stdin);
+        assert!(out.status.success(), "expected exit 0, got {:?}", out.status);
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "covered": ["rule-success.Finish"],
+                "uncovered": [
+                    "entity-fields.Job",
+                    "rule-entity-creation.CreateJob.1",
+                    "rule-success.CreateJob",
+                    "surface-actor.JobIntake",
+                    "surface-provides.JobIntake",
+                    "transition-edge.Job.pending.done",
+                    "transition-rejected.Job.status",
+                    "transition-terminal.Job.status"
+                ],
+                "unknown": ["ghost.id"],
+                "diagnostics": []
+            })
+        );
+    }
+    // A selector limits `uncovered` to the selected obligations.
+    let out = plan_with(&[&spec.arg(), "--covered-by", &ids_file.arg(), "--construct", "CreateJob"], None);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["covered"], serde_json::json!([]));
+    assert_eq!(
+        json["uncovered"],
+        serde_json::json!(["rule-entity-creation.CreateJob.1", "rule-success.CreateJob"])
+    );
+    assert_eq!(json["unknown"], serde_json::json!(["ghost.id"]));
+}
+
+#[test]
+fn plan_selection_filters_both_plans_of_a_comparison() {
+    let spec = SpecFile::new("plan-select-against", VALID);
+    let mut old = plan_json(&spec);
+    let obligations = old["obligations"].as_array_mut().unwrap();
+    obligations.retain(|o| o["id"] != "surface-provides.JobIntake");
+    for o in obligations.iter_mut() {
+        if o["id"] == "rule-success.Finish" {
+            o["description"] = "an older description".into();
+        }
+        if o["id"] == "entity-fields.Job" {
+            o["description"] = "an older description".into();
+        }
+    }
+    let against = SpecFile::new("plan-select-against-old", &old.to_string());
+    let out = plan_with(&[&spec.arg(), "--against", &against.arg(), "--id-prefix", "rule-"], None);
+    assert!(out.status.success(), "expected exit 0, got {:?}", out.status);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "added": [], "removed": [], "changed": ["rule-success.Finish"], "moved": [], "diagnostics": []
+        })
+    );
+}
+
+#[test]
+fn plan_selection_and_coverage_usage_errors_exit_two() {
+    let spec = SpecFile::new("plan-select-usage", VALID);
+    let ids = SpecFile::new("plan-select-usage-ids", "rule-success.Finish\n");
+    let s = spec.arg();
+    let i = ids.arg();
+    for args in [
+        vec![s.as_str(), "--id"],
+        vec![s.as_str(), "--covered-by", i.as_str(), "--against", i.as_str()],
+        vec![s.as_str(), "--covered-by", i.as_str(), "--covered-by", i.as_str()],
+        vec![s.as_str(), "--covered-by", "-", "--ids-from", "-"],
+    ] {
+        let out = plan_with(&args, None);
+        assert_eq!(out.status.code(), Some(2), "args {args:?}");
+        assert!(out.stdout.is_empty(), "args {args:?}");
+    }
+}
+
+#[test]
+fn plan_unreadable_id_lists_exit_one() {
+    let spec = SpecFile::new("plan-select-unreadable", VALID);
+    for option in ["--covered-by", "--ids-from"] {
+        let out = plan_with(&[&spec.arg(), option, "/nonexistent/ids.txt"], None);
+        assert_eq!(out.status.code(), Some(1), "{option}");
+        assert!(out.stdout.is_empty(), "{option}");
+        assert!(!out.stderr.is_empty(), "{option}");
+    }
+}

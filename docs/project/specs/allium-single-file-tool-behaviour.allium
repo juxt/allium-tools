@@ -7,6 +7,7 @@
 --   - The diagnostics channel carried in the JSON output
 --   - Exit code behavior with respect to parse diagnostics
 --   - The comparison output of `plan --against <path>`
+--   - Obligation selection and the coverage output of `plan --covered-by <path>`
 -- Excludes:
 --   - The multi-file commands `check` and `analyse` (see their own specs)
 --   - The shape of the command-specific payload (obligations, domain model, AST)
@@ -19,6 +20,9 @@ entity SingleFileRun {
     command: SingleFileCommand
     input: String
     against: String?
+    covered_by: String?
+    -- the selector option values given to `plan`; empty when none is given
+    selectors: Set<String>
 }
 
 -- The single-file commands' external stimuli. Declared so each listener
@@ -28,6 +32,8 @@ surface SingleFileCli {
         SingleFileCommandInvoked(command, arguments)
         SingleFileCommandInvokedWithInput(input)
         PlanComparisonRequested(against)
+        PlanIdListRequested(path)
+        PlanSelectorsGiven(input, selectors)
         SingleFileRunCompleted(run: SingleFileRun)
 }
 
@@ -45,13 +51,18 @@ rule WrongArityIsRejected {
     ensures: ProcessExit(code: 2)
 }
 
--- `plan` accepts `<file>` alone, or `<file>` with one `--against <path>`
--- pair placed before or after it. Every other shape is a usage error.
+-- `plan` accepts `<file>` plus any of the options `--against <path>`,
+-- `--covered-by <path>`, `--id <id>`, `--id-prefix <prefix>`,
+-- `--construct <name>`, `--category <name>` and `--ids-from <path>`, in any
+-- order, each followed by exactly one value. Only the selector options (all
+-- but `--against` and `--covered-by`) may repeat. Every other shape is a
+-- usage error, among them: an option without a value, a second `--against`
+-- or `--covered-by`, `--covered-by` together with `--against`, and `-` as
+-- the value of both `--covered-by` and `--ids-from`.
 rule PlanArgumentShapeIsRejected {
     when: SingleFileCommandInvoked(command, arguments)
     requires: command = plan
-    requires: arguments.count != 1
-    requires: IsFileWithAgainstOption(arguments) = false
+    requires: IsPlanArgumentShape(arguments) = false
 
     ensures: UsagePrinted()
     ensures: ProcessExit(code: 2)
@@ -73,9 +84,9 @@ rule BadComparisonInputIsReported {
     ensures: ProcessExit(code: 1)
 }
 
--- Without `--against`, `plan` prints its plan unchanged. With it, the plan
--- of `run.input` (new) is compared to the plan in `run.against` (old),
--- keyed by obligation `id`, ignoring every `source_span`. `moved` pairs an
+-- With `--against`, the plan of `run.input` (new) is compared to the plan in
+-- `run.against` (old), keyed by obligation `id`, ignoring every
+-- `source_span`. `moved` pairs an
 -- old-only id with a new-only id as `{from, to}` when their content is equal
 -- apart from `id` and `source_span`; each id pairs at most once and then
 -- leaves `removed` and `added`.
@@ -90,6 +101,63 @@ rule ComparisonReplacesPlan {
     ensures: ChangedAreSharedIdsWithDifferentContent(old: run.against, new: run.input)
     ensures: MovedArePairsFromOldOnlyIdToNewOnlyId(old: run.against, new: run.input)
     ensures: IdListsSorted()
+}
+
+-- `--covered-by` and `--ids-from` name a file of obligation ids, one per
+-- line. Empty lines and surrounding whitespace are ignored; `-` reads stdin.
+rule BadIdListInputIsReported {
+    when: PlanIdListRequested(path)
+    requires: ReadFile(path).ok = false
+
+    ensures: IdListInputErrorPrintedTo(stream: stderr)
+    ensures: ProcessExit(code: 1)
+}
+
+-- A selector value is unknown when it is an `--id` or `--ids-from` id that
+-- is no obligation id of the plan of `input`, a `--construct` that no
+-- obligation of that plan names as `source_construct`, or a `--category`
+-- that no obligation of that plan carries. The plan of `--against` plays
+-- no part. An `--id-prefix` that matches nothing is not an error.
+rule UnknownSelectorValueIsReported {
+    when: PlanSelectorsGiven(input, selectors)
+    requires: UnknownSelectorValues(input: input, selectors: selectors).count > 0
+
+    ensures: UnknownValuesPrintedTo(stream: stderr, values: UnknownSelectorValues(input: input, selectors: selectors))
+    ensures: NothingPrintedTo(stream: stdout)
+    ensures: ProcessExit(code: 1)
+}
+
+-- An obligation is selected when it matches any selector: its id equals an
+-- `--id` or an `--ids-from` line, its id starts with an `--id-prefix`, its
+-- `source_construct` equals a `--construct`, or its serialized category name
+-- (for example `rule_failure`) equals a `--category`. Without a selector,
+-- every obligation is selected. Selection filters the obligations before any
+-- output: the plain output keeps its keys `version`, `obligations` and
+-- `diagnostics`, and with `--against` both plans are filtered before the
+-- comparison. Without any new option, the output of `plan` and of
+-- `plan --against` is unchanged.
+rule SelectionFiltersObligations {
+    when: SingleFileRunCompleted(run)
+    requires: run.command = plan
+
+    ensures: ObligationsFilteredBeforeOutput(run: run, selectors: run.selectors)
+}
+
+-- `covered` holds the ids of `run.covered_by` that are selected obligation
+-- ids of the plan of `run.input`; `uncovered` the selected obligation ids
+-- missing from the file; `unknown` the ids of the file that are no
+-- obligation id of that plan at all.
+rule CoverageReplacesPlan {
+    when: SingleFileRunCompleted(run)
+    requires: run.command = plan
+    requires: run.covered_by != null
+
+    ensures: JsonKeysEmitted(keys: ["covered", "uncovered", "unknown", "diagnostics"])
+    ensures: CoveredAreListedIdsThatAreSelected(list: run.covered_by, plan: run.input, selectors: run.selectors)
+    ensures: UncoveredAreSelectedIdsNotListed(list: run.covered_by, plan: run.input, selectors: run.selectors)
+    ensures: UnknownAreListedIdsNotInPlan(list: run.covered_by, plan: run.input)
+    ensures: IdListsSorted()
+    ensures: IdListsFreeOfDuplicates()
 }
 
 rule OutputCarriesDiagnostics {

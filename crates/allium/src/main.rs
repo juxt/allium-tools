@@ -4,7 +4,7 @@ mod test_plan;
 use allium_parser::diagnostic::Severity;
 use allium_parser::lexer::SourceMap;
 use allium_parser::{AmbiguousImports, ReverseContributions};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -73,7 +73,9 @@ error-severity diagnostic (e.g. it does not parse).
 const PLAN_HELP: &str = "\
 allium plan - derive test obligations from a spec
 
-Usage: allium plan <file.allium> [--against <plan.json>]
+Usage: allium plan <file.allium> [--against <plan.json> | --covered-by <ids>]
+                   [--id <id>] [--id-prefix <prefix>] [--construct <name>]
+                   [--category <name>] [--ids-from <ids>]
 
 Prints a JSON document describing the test plan implied by the spec,
 including invariants, rule pre- and post-conditions, and transitions.
@@ -90,6 +92,16 @@ Options:
                           \"moved\": [{\"from\": id, \"to\": id}], \"diagnostics\": [...]}
                          `moved` pairs a removed and an added id with equal
                          content. `source_span` is ignored.
+  --covered-by <ids>     Read obligation ids, one per line (`-` for stdin),
+                         and print {\"covered\": [id], \"uncovered\": [id],
+                         \"unknown\": [id], \"diagnostics\": [...]}
+  --id <id>, --id-prefix <prefix>, --construct <name>, --category <name>,
+  --ids-from <ids>       Select obligations by id, id prefix,
+                         `source_construct` or category (e.g. rule_failure),
+                         or by the ids in a file (`-` for stdin). Each can
+                         repeat; the union is selected. An id, construct
+                         or category that is not in the plan exits 1 and
+                         names it.
 ";
 
 const MODEL_HELP: &str = "\
@@ -677,11 +689,12 @@ fn single_file_exit(diagnostics: &[allium_parser::Diagnostic]) -> ExitCode {
 /// The transformed output is an object; parse diagnostics are merged into it
 /// under a `diagnostics` key (mirroring `check`) so a consumer can tell an
 /// empty-but-valid result apart from a parse failure without a second
-/// invocation. The exit code reflects error-severity diagnostics.
+/// invocation. The exit code reflects error-severity diagnostics. An error
+/// from the transform is printed on stderr and exits 1 with no output.
 fn run_single_file(
     usage: &str,
     args: &[String],
-    transform: impl FnOnce(&allium_parser::Module, &str) -> serde_json::Value,
+    transform: impl FnOnce(&allium_parser::Module, &str) -> Result<serde_json::Value, String>,
 ) -> ExitCode {
     if args.len() != 1 {
         eprintln!("Usage: {usage}");
@@ -705,7 +718,13 @@ fn run_single_file(
         .map(|d| diagnostic_to_json(d, path, &source_map))
         .collect();
 
-    let mut output = transform(&result.module, &source);
+    let mut output = match transform(&result.module, &source) {
+        Ok(output) => output,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(1);
+        }
+    };
     if let serde_json::Value::Object(map) = &mut output {
         map.insert("diagnostics".to_string(), serde_json::Value::Array(diagnostics));
     }
@@ -737,45 +756,121 @@ fn cmd_parse(args: &[String]) -> ExitCode {
 }
 
 fn cmd_plan(args: &[String]) -> ExitCode {
-    let usage = "allium plan <file.allium> [--against <plan.json>]";
-    let mut rest = args.to_vec();
-    let against = match rest.iter().position(|a| a == "--against") {
-        Some(i) if i + 1 < rest.len() => {
-            rest.remove(i);
-            Some(rest.remove(i))
+    let usage = "allium plan <file.allium> [--against <plan.json> | --covered-by <ids>] \
+                 [--id <id>] [--id-prefix <prefix>] [--construct <name>] [--category <name>] [--ids-from <ids>]";
+    let mut files = Vec::new();
+    let mut opts: HashMap<&str, Vec<&String>> = HashMap::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--against" | "--covered-by" | "--id" | "--id-prefix" | "--construct" | "--category" | "--ids-from" => {
+                let Some(value) = rest.next() else {
+                    eprintln!("Usage: {usage}");
+                    return ExitCode::from(2);
+                };
+                opts.entry(arg.as_str()).or_default().push(value);
+            }
+            _ => files.push(arg.clone()),
         }
-        Some(_) => {
-            eprintln!("Usage: {usage}");
-            return ExitCode::from(2);
-        }
-        None => None,
-    };
-    if rest.len() != 1 {
+    }
+    let opt = |name: &str| opts.get(name).cloned().unwrap_or_default();
+    let (against, covered_by, ids_from) = (opt("--against"), opt("--covered-by"), opt("--ids-from"));
+    let (prefixes, constructs, categories) = (opt("--id-prefix"), opt("--construct"), opt("--category"));
+    let stdin_reads = covered_by.iter().chain(&ids_from).filter(|v| v.as_str() == "-").count();
+    if files.len() != 1
+        || against.len() > 1
+        || covered_by.len() > 1
+        || (!against.is_empty() && !covered_by.is_empty())
+        || stdin_reads > 1
+    {
         eprintln!("Usage: {usage}");
         return ExitCode::from(2);
     }
-    let old = match &against {
-        None => None,
-        Some(path) => match std::fs::read_to_string(path)
-            .map_err(|e| e.to_string())
-            .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
-            .and_then(|v| {
-                obligations_by_id(&v)
-                    .ok_or_else(|| "not a plan: expected an `obligations` array of objects with an `id`".to_string())
-            }) {
-            Ok(old) => Some(old),
-            Err(e) => {
-                eprintln!("{path}: {e}");
-                return ExitCode::from(1);
-            }
-        },
+
+    let read = |path: &str| {
+        let text = if path == "-" {
+            std::io::read_to_string(std::io::stdin())
+        } else {
+            std::fs::read_to_string(path)
+        };
+        text.map_err(|e| format!("{path}: {e}"))
     };
-    run_single_file(usage, &rest, |module, source| {
-        let plan = serde_json::to_value(test_plan::generate_test_plan(module, source)).unwrap();
-        match &old {
-            None => plan,
-            Some(old) => plan_diff(old, &obligations_by_id(&plan).unwrap()),
+    let read_ids = |path: &str| {
+        read(path).map(|s| s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect::<Vec<_>>())
+    };
+    let inputs = (|| -> Result<_, String> {
+        let old = match against.first() {
+            None => None,
+            Some(path) => {
+                let plan = serde_json::from_str(&read(path)?).map_err(|e| format!("{path}: {e}"))?;
+                Some(obligations_by_id(&plan).ok_or_else(|| {
+                    format!("{path}: not a plan: expected an `obligations` array of objects with an `id`")
+                })?)
+            }
+        };
+        let mut ids: Vec<String> = opt("--id").into_iter().cloned().collect();
+        for path in &ids_from {
+            ids.extend(read_ids(path)?);
         }
+        let covered = covered_by.first().map(|path| read_ids(path)).transpose()?;
+        Ok((old, ids, covered))
+    })();
+    let (mut old, ids, covered) = match inputs {
+        Ok(inputs) => inputs,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let selecting = !(opt("--id").is_empty()
+        && ids_from.is_empty()
+        && prefixes.is_empty()
+        && constructs.is_empty()
+        && categories.is_empty());
+    let field = |o: &serde_json::Value, key: &str| o[key].as_str().unwrap_or_default().to_string();
+    let is_selected = |o: &serde_json::Value| {
+        let id = field(o, "id");
+        !selecting
+            || ids.contains(&id)
+            || prefixes.iter().any(|p| id.starts_with(p.as_str()))
+            || constructs.iter().any(|c| **c == field(o, "source_construct"))
+            || categories.iter().any(|c| **c == field(o, "category"))
+    };
+    if let Some(old) = &mut old {
+        old.retain(|_, o| is_selected(o));
+    }
+
+    run_single_file(usage, &files, |module, source| {
+        let mut plan = serde_json::to_value(test_plan::generate_test_plan(module, source)).unwrap();
+        let obligations = plan["obligations"].as_array_mut().unwrap();
+        let known = |key: &str| obligations.iter().map(|o| field(o, key)).collect::<HashSet<String>>();
+        let (plan_ids, plan_constructs, plan_categories) = (known("id"), known("source_construct"), known("category"));
+        let unknown: Vec<String> = ids
+            .iter()
+            .filter(|id| !plan_ids.contains(*id))
+            .map(|id| format!("--id {id}"))
+            .chain(constructs.iter().filter(|c| !plan_constructs.contains(**c)).map(|c| format!("--construct {c}")))
+            .chain(categories.iter().filter(|c| !plan_categories.contains(**c)).map(|c| format!("--category {c}")))
+            .collect();
+        if !unknown.is_empty() {
+            return Err(format!("unknown selector values: {}", unknown.join(", ")));
+        }
+        obligations.retain(|o| is_selected(o));
+
+        Ok(match (&old, &covered) {
+            (Some(old), _) => plan_diff(old, &obligations_by_id(&plan).unwrap()),
+            (None, Some(covered)) => {
+                let selected: BTreeSet<String> = plan["obligations"].as_array().unwrap().iter().map(|o| field(o, "id")).collect();
+                let listed: BTreeSet<String> = covered.iter().cloned().collect();
+                serde_json::json!({
+                    "covered": listed.intersection(&selected).collect::<Vec<_>>(),
+                    "uncovered": selected.difference(&listed).collect::<Vec<_>>(),
+                    "unknown": listed.iter().filter(|id| !plan_ids.contains(*id)).collect::<Vec<_>>(),
+                })
+            }
+            (None, None) => plan,
+        })
     })
 }
 
@@ -820,7 +915,7 @@ fn plan_diff(old: &ObligationsById, new: &ObligationsById) -> serde_json::Value 
 fn cmd_model(args: &[String]) -> ExitCode {
     run_single_file("allium model <file.allium>", args, |module, source| {
         let model = domain_model::extract_domain_model(module, source);
-        serde_json::to_value(model).unwrap()
+        Ok(serde_json::to_value(model).unwrap())
     })
 }
 
