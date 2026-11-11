@@ -6,6 +6,7 @@
 --   - Argument arity and input resolution
 --   - The diagnostics channel carried in the JSON output
 --   - Exit code behavior with respect to parse diagnostics
+--   - The comparison output of `plan --against <path>`
 -- Excludes:
 --   - The multi-file commands `check` and `analyse` (see their own specs)
 --   - The shape of the command-specific payload (obligations, domain model, AST)
@@ -17,14 +18,16 @@ value SingleFileCommand {
 entity SingleFileRun {
     command: SingleFileCommand
     input: String
+    against: String?
 }
 
 -- The single-file commands' external stimuli. Declared so each listener
 -- resolves its trigger, and the run it completes carries the run entity.
 surface SingleFileCli {
     provides:
-        SingleFileCommandInvoked(argument_count)
+        SingleFileCommandInvoked(command, arguments)
         SingleFileCommandInvokedWithInput(input)
+        PlanComparisonRequested(against)
         SingleFileRunCompleted(run: SingleFileRun)
 }
 
@@ -34,8 +37,21 @@ surface SingleFileCli {
 -- parse failure from a spec that legitimately has nothing to report.
 
 rule WrongArityIsRejected {
-    when: SingleFileCommandInvoked(argument_count)
-    requires: argument_count != 1
+    when: SingleFileCommandInvoked(command, arguments)
+    requires: command in [model, parse]
+    requires: arguments.count != 1
+
+    ensures: UsagePrinted()
+    ensures: ProcessExit(code: 2)
+}
+
+-- `plan` accepts `<file>` alone, or `<file>` with one `--against <path>`
+-- pair placed before or after it. Every other shape is a usage error.
+rule PlanArgumentShapeIsRejected {
+    when: SingleFileCommandInvoked(command, arguments)
+    requires: command = plan
+    requires: arguments.count != 1
+    requires: IsFileWithAgainstOption(arguments) = false
 
     ensures: UsagePrinted()
     ensures: ProcessExit(code: 2)
@@ -47,6 +63,33 @@ rule MissingInputFileIsReported {
 
     ensures: UserInformed(message: "<path>: <io-error>")
     ensures: ProcessExit(code: 1)
+}
+
+rule BadComparisonInputIsReported {
+    when: PlanComparisonRequested(against)
+    requires: ReadFile(against).ok = false or IsJsonWithObligationIds(ReadFile(against).content) = false
+
+    ensures: ComparisonInputErrorPrintedTo(stream: stderr)
+    ensures: ProcessExit(code: 1)
+}
+
+-- Without `--against`, `plan` prints its plan unchanged. With it, the plan
+-- of `run.input` (new) is compared to the plan in `run.against` (old),
+-- keyed by obligation `id`, ignoring every `source_span`. `moved` pairs an
+-- old-only id with a new-only id as `{from, to}` when their content is equal
+-- apart from `id` and `source_span`; each id pairs at most once and then
+-- leaves `removed` and `added`.
+rule ComparisonReplacesPlan {
+    when: SingleFileRunCompleted(run)
+    requires: run.command = plan
+    requires: run.against != null
+
+    ensures: JsonKeysEmitted(keys: ["added", "removed", "changed", "moved", "diagnostics"])
+    ensures: RemovedAreIdsOnlyInOldPlan(old: run.against, new: run.input)
+    ensures: AddedAreIdsOnlyInNewPlan(old: run.against, new: run.input)
+    ensures: ChangedAreSharedIdsWithDifferentContent(old: run.against, new: run.input)
+    ensures: MovedArePairsFromOldOnlyIdToNewOnlyId(old: run.against, new: run.input)
+    ensures: IdListsSorted()
 }
 
 rule OutputCarriesDiagnostics {

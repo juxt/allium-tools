@@ -73,7 +73,7 @@ error-severity diagnostic (e.g. it does not parse).
 const PLAN_HELP: &str = "\
 allium plan - derive test obligations from a spec
 
-Usage: allium plan <file.allium>
+Usage: allium plan <file.allium> [--against <plan.json>]
 
 Prints a JSON document describing the test plan implied by the spec,
 including invariants, rule pre- and post-conditions, and transitions.
@@ -82,6 +82,14 @@ The output carries a `diagnostics` array mirroring `check`. Exits
 non-zero if the spec carries an error-severity diagnostic, so an empty
 obligation set from a spec that does not parse is not mistaken for a
 valid spec that legitimately has none.
+
+Options:
+  --against <plan.json>  Compare with an earlier output of `allium plan`
+                         and print the obligation ids that changed:
+                         {\"added\": [id], \"removed\": [id], \"changed\": [id],
+                          \"moved\": [{\"from\": id, \"to\": id}], \"diagnostics\": [...]}
+                         `moved` pairs a removed and an added id with equal
+                         content. `source_span` is ignored.
 ";
 
 const MODEL_HELP: &str = "\
@@ -729,10 +737,84 @@ fn cmd_parse(args: &[String]) -> ExitCode {
 }
 
 fn cmd_plan(args: &[String]) -> ExitCode {
-    run_single_file("allium plan <file.allium>", args, |module, source| {
-        let plan = test_plan::generate_test_plan(module, source);
-        serde_json::to_value(plan).unwrap()
+    let usage = "allium plan <file.allium> [--against <plan.json>]";
+    let mut rest = args.to_vec();
+    let against = match rest.iter().position(|a| a == "--against") {
+        Some(i) if i + 1 < rest.len() => {
+            rest.remove(i);
+            Some(rest.remove(i))
+        }
+        Some(_) => {
+            eprintln!("Usage: {usage}");
+            return ExitCode::from(2);
+        }
+        None => None,
+    };
+    if rest.len() != 1 {
+        eprintln!("Usage: {usage}");
+        return ExitCode::from(2);
+    }
+    let old = match &against {
+        None => None,
+        Some(path) => match std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
+            .and_then(|v| {
+                obligations_by_id(&v)
+                    .ok_or_else(|| "not a plan: expected an `obligations` array of objects with an `id`".to_string())
+            }) {
+            Ok(old) => Some(old),
+            Err(e) => {
+                eprintln!("{path}: {e}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    run_single_file(usage, &rest, |module, source| {
+        let plan = serde_json::to_value(test_plan::generate_test_plan(module, source)).unwrap();
+        match &old {
+            None => plan,
+            Some(old) => plan_diff(old, &obligations_by_id(&plan).unwrap()),
+        }
     })
+}
+
+type ObligationsById = std::collections::BTreeMap<String, serde_json::Value>;
+
+/// The obligations of a plan keyed by id, without `source_span`.
+fn obligations_by_id(plan: &serde_json::Value) -> Option<ObligationsById> {
+    plan.get("obligations")?
+        .as_array()?
+        .iter()
+        .map(|o| {
+            let mut o = o.as_object()?.clone();
+            o.remove("source_span");
+            Some((o.get("id")?.as_str()?.to_string(), serde_json::Value::Object(o)))
+        })
+        .collect()
+}
+
+fn plan_diff(old: &ObligationsById, new: &ObligationsById) -> serde_json::Value {
+    let without_id = |o: &serde_json::Value| {
+        let mut o = o.clone();
+        o.as_object_mut().unwrap().remove("id");
+        o
+    };
+    let changed: Vec<&String> =
+        old.iter().filter(|(id, o)| new.get(*id).is_some_and(|n| n != *o)).map(|(id, _)| id).collect();
+    let mut added: Vec<(&String, serde_json::Value)> =
+        new.iter().filter(|(id, _)| !old.contains_key(*id)).map(|(id, o)| (id, without_id(o))).collect();
+    let mut moved = Vec::new();
+    let mut removed = Vec::new();
+    for (id, o) in old.iter().filter(|(id, _)| !new.contains_key(*id)) {
+        let content = without_id(o);
+        match added.iter().position(|(_, n)| *n == content) {
+            Some(i) => moved.push(serde_json::json!({"from": id, "to": added.remove(i).0})),
+            None => removed.push(id),
+        }
+    }
+    let added: Vec<&String> = added.into_iter().map(|(id, _)| id).collect();
+    serde_json::json!({"added": added, "removed": removed, "changed": changed, "moved": moved})
 }
 
 fn cmd_model(args: &[String]) -> ExitCode {

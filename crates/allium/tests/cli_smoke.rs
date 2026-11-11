@@ -139,3 +139,86 @@ fn plan_valid_spec_exits_zero_with_empty_diagnostics() {
         "a valid spec should carry an empty diagnostics array: {stdout}"
     );
 }
+
+fn plan_json(spec: &SpecFile) -> serde_json::Value {
+    let out = allium().arg("plan").arg(spec.arg()).output().expect("spawn allium");
+    serde_json::from_slice(&out.stdout).expect("plan stdout should be valid JSON")
+}
+
+#[test]
+fn plan_against_reports_added_removed_changed_and_moved_ids() {
+    let spec = SpecFile::new("plan-against", VALID);
+    let mut old = plan_json(&spec);
+    let obligations = old["obligations"].as_array_mut().unwrap();
+    let find = |obs: &mut Vec<serde_json::Value>, id: &str| {
+        obs.iter().position(|o| o["id"] == id).unwrap()
+    };
+    // Only in the new plan: added.
+    let i = find(obligations, "surface-provides.JobIntake");
+    obligations.remove(i);
+    // Same id, different content: changed.
+    let i = find(obligations, "rule-success.Finish");
+    obligations[i]["description"] = "an older description".into();
+    // Same content under another positional id: moved.
+    let i = find(obligations, "rule-entity-creation.CreateJob.1");
+    obligations[i]["id"] = "rule-entity-creation.CreateJob.2".into();
+    // Only the span differs: not changed.
+    let i = find(obligations, "entity-fields.Job");
+    obligations[i]["source_span"] = serde_json::json!({"start": 0, "end": 1});
+    // Only in the old plan, with content no new obligation has: removed.
+    let i = find(obligations, "surface-actor.JobIntake");
+    let mut gone = obligations[i].clone();
+    gone["id"] = "surface-actor.Gone".into();
+    gone["source_construct"] = "Gone".into();
+    obligations.push(gone);
+    let against = SpecFile::new("plan-against-old", &old.to_string());
+
+    for args in [
+        [spec.arg(), "--against".into(), against.arg()],
+        ["--against".into(), against.arg(), spec.arg()],
+    ] {
+        let out = allium().arg("plan").args(&args).output().expect("spawn allium");
+        assert!(out.status.success(), "expected exit 0, got {:?}", out.status);
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "added": ["surface-provides.JobIntake"],
+                "removed": ["surface-actor.Gone"],
+                "changed": ["rule-success.Finish"],
+                "moved": [{
+                    "from": "rule-entity-creation.CreateJob.2",
+                    "to": "rule-entity-creation.CreateJob.1"
+                }],
+                "diagnostics": []
+            })
+        );
+    }
+}
+
+#[test]
+fn plan_against_an_unreadable_or_invalid_plan_exits_one() {
+    let spec = SpecFile::new("plan-against-bad", VALID);
+    let not_json = SpecFile::new("plan-against-not-json", "not json");
+    let no_obligations = SpecFile::new("plan-against-no-obligations", "{\"version\": 3}");
+    for against in [
+        "/nonexistent/plan.json".to_string(),
+        not_json.arg(),
+        no_obligations.arg(),
+    ] {
+        let out = allium()
+            .args(["plan", &spec.arg(), "--against", &against])
+            .output()
+            .expect("spawn allium");
+        assert_eq!(out.status.code(), Some(1), "--against {against}");
+        assert!(out.stdout.is_empty(), "no plan output expected for --against {against}");
+        assert!(!out.stderr.is_empty(), "expected a message on stderr for --against {against}");
+    }
+}
+
+#[test]
+fn plan_against_without_a_path_is_a_usage_error() {
+    let spec = SpecFile::new("plan-against-missing", VALID);
+    let out = allium().args(["plan", &spec.arg(), "--against"]).output().expect("spawn allium");
+    assert_eq!(out.status.code(), Some(2));
+}
