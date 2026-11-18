@@ -2867,7 +2867,6 @@ function findFieldNavigationIssues(
     return findings;
   }
 
-  const typeBlocks: AstNode[] = [];
   const schemas: TypeSchema = new Map();
   const hasVariants = new Set<string>();
   for (const decl of declarations) {
@@ -2906,13 +2905,37 @@ function findFieldNavigationIssues(
       }
     }
     schemas.set(typeName, fields);
-    typeBlocks.push(block);
   }
 
-  for (const block of typeBlocks) {
-    const owner = (block.name as AstNode).name as string;
+  // Entity collections (`Slots` for `Slot`), named by regular plurals.
+  const plurals = new Set<string>();
+  const roots: { owner: string | undefined; items: unknown[] }[] = [];
+  for (const decl of declarations) {
+    const block = (decl as AstNode)?.Block as AstNode | undefined;
+    const invariant = (decl as AstNode)?.Invariant as AstNode | undefined;
+    if (invariant) {
+      roots.push({ owner: undefined, items: [{ kind: { Clause: { value: invariant.body } } }] });
+    }
+    if (!block) continue;
+    const name = (block.name as AstNode | undefined)?.name;
+    if (
+      typeof name === "string" &&
+      (block.kind === "Entity" || block.kind === "ExternalEntity")
+    ) {
+      entityCollectionNames(name).forEach((p) => plurals.add(p));
+    }
+    const isType =
+      block.kind === "Entity" ||
+      block.kind === "ExternalEntity" ||
+      block.kind === "Value";
+    roots.push({
+      owner: isType && typeof name === "string" ? name : undefined,
+      items: (block.items as unknown[]) ?? [],
+    });
+  }
+
+  for (const { owner, items } of roots) {
     const bound: string[] = [];
-    const items = (block.items as unknown[]) ?? [];
     for (const item of items) {
       const letItem = ((item as AstNode)?.kind as AstNode | undefined)?.Let as
         | AstNode
@@ -2923,14 +2946,13 @@ function findFieldNavigationIssues(
       }
     }
 
-    const resolve = (expr: unknown): string | undefined => {
+    // The name and declared type of the field a chain ends at.
+    const fieldDecl = (expr: unknown): [string, AstNode] | undefined => {
       const variant = nodeVariant(expr);
       const body = (expr as AstNode)?.[variant ?? ""] as AstNode | undefined;
       let from: string | undefined;
       let field: string | undefined;
-      if (variant === "This") {
-        return owner;
-      } else if (variant === "Ident") {
+      if (variant === "Ident") {
         const name = body?.name as string | undefined;
         if (!name || bound.includes(name)) {
           return undefined;
@@ -2944,8 +2966,29 @@ function findFieldNavigationIssues(
       if (!from || !field) {
         return undefined;
       }
-      const target = baseTypeName(schemas.get(from)?.get(field));
+      const type = schemas.get(from)?.get(field);
+      return type ? [field, type] : undefined;
+    };
+    const resolve = (expr: unknown): string | undefined => {
+      if (nodeVariant(expr) === "This") {
+        return owner;
+      }
+      const target = baseTypeName(fieldDecl(expr)?.[1]);
       return target && schemas.has(target) ? target : undefined;
+    };
+    // Rule 14a's receiver: certainly a collection.
+    const isCollection = (expr: unknown): boolean => {
+      const variant = nodeVariant(expr);
+      if (variant === "Where") return true;
+      const decl = fieldDecl(expr);
+      if (variant === "Ident" && !decl) {
+        const name = ((expr as AstNode).Ident as AstNode)?.name as string;
+        return !bound.includes(name) && plurals.has(name);
+      }
+      return (
+        !!decl &&
+        (isCollectionType(decl[1]) || isPluralRelationship(decl[0], decl[1]))
+      );
     };
 
     const visit = (node: unknown): void => {
@@ -2959,19 +3002,35 @@ function findFieldNavigationIssues(
       const variant = nodeVariant(node);
       const body = (node as AstNode)[variant ?? ""] as AstNode | undefined;
       if (variant === "MemberAccess" || variant === "OptionalAccess") {
-        const type = resolve(body?.object);
         const fieldNode = body?.field as AstNode | undefined;
         const fieldName = fieldNode?.name as string | undefined;
+        const span = (fieldNode?.span ?? { start: 0, end: 0 }) as {
+          start: number;
+          end: number;
+        };
+        if (
+          fieldName &&
+          !BUILTIN_COLLECTION_METHODS.has(fieldName) &&
+          isCollection(body?.object)
+        ) {
+          findings.push(
+            rangeFinding(
+              lineStarts,
+              span.start,
+              span.end,
+              "allium.collection.unknownMethod",
+              `'.${fieldName}' is not a built-in collection method. Use a black box function instead, such as ${fieldName}(collection, ...).`,
+              "error",
+            ),
+          );
+        }
+        const type = resolve(body?.object);
         if (
           type &&
           fieldName &&
           !hasVariants.has(type) &&
           !schemas.get(type)!.has(fieldName)
         ) {
-          const span = (fieldNode?.span ?? { start: 0, end: 0 }) as {
-            start: number;
-            end: number;
-          };
           findings.push(
             rangeFinding(
               lineStarts,
@@ -2993,7 +3052,7 @@ function findFieldNavigationIssues(
         bound.length = mark;
         return;
       }
-      if (variant === "For") {
+      if (variant === "For" || variant === "ForBlock") {
         visit(body?.collection);
         const mark = bound.length;
         const binding = body?.binding as AstNode | undefined;
@@ -3010,6 +3069,7 @@ function findFieldNavigationIssues(
         }
         visit(body?.filter);
         visit(body?.body);
+        visit(body?.items);
         bound.length = mark;
         return;
       }
@@ -3032,19 +3092,55 @@ function findFieldNavigationIssues(
 
     for (const item of items) {
       const kind = (item as AstNode)?.kind as AstNode | undefined;
-      const entry = (kind?.Assignment ?? kind?.FieldWithWhen ?? kind?.Let) as
-        | AstNode
-        | undefined;
-      if (entry) {
-        visit(entry.value);
-      }
-      const invariant = kind?.InvariantBlock as AstNode | undefined;
-      if (invariant) {
-        visit(invariant.body);
-      }
+      if (!kind || kind.TransitionsBlock || kind.EnumVariant) continue;
+      visit(kind);
     }
   }
   return findings;
+}
+
+const BUILTIN_COLLECTION_METHODS = new Set([
+  "count",
+  "any",
+  "all",
+  "first",
+  "last",
+  "unique",
+  "add",
+  "remove",
+]);
+
+/** Regular English plurals of a name (`Users`, `Addresses`, `Candidacies`). */
+function entityCollectionNames(name: string): string[] {
+  const out = [`${name}s`, `${name}es`];
+  if (/[^aeiouAEIOU]y$/.test(name)) {
+    out.push(`${name.slice(0, -1)}ies`);
+  }
+  return out;
+}
+
+function isCollectionType(typeExpr: unknown): boolean {
+  const variant = nodeVariant(typeExpr);
+  const body = (typeExpr as AstNode)?.[variant ?? ""] as AstNode | undefined;
+  if (variant === "GenericType") {
+    const name = ((body?.name as AstNode | undefined)?.Ident as AstNode | undefined)
+      ?.name;
+    return name === "Set" || name === "List";
+  }
+  if (variant === "TypeOptional") return isCollectionType(body?.inner);
+  return variant === "Where";
+}
+
+/** A relationship whose name is a regular plural of its target is one-to-many. */
+function isPluralRelationship(name: string, typeExpr: unknown): boolean {
+  const withBody = (typeExpr as AstNode)?.With as AstNode | undefined;
+  const target = ((withBody?.source as AstNode | undefined)?.Ident as
+    | AstNode
+    | undefined)?.name;
+  if (typeof target !== "string") return false;
+  const snake = target.replace(/(?!^)([A-Z])/g, "_$1").toLowerCase();
+  const last = snake.split("_").pop() ?? snake;
+  return [snake, last].some((base) => entityCollectionNames(base).includes(name));
 }
 
 function collectParamNames(param: unknown, out: string[]): void {

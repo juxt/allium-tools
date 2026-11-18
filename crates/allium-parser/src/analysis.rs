@@ -6598,38 +6598,63 @@ impl Ctx<'_> {
                 has_variants.insert(b);
             }
         }
+        // Entity collections (`Slots` for `Slot`), named by regular plurals.
+        let plurals: HashSet<String> = self
+            .module
+            .declarations
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Block(b) if matches!(b.kind, BlockKind::Entity | BlockKind::ExternalEntity) => {
+                    b.name.as_ref()
+                }
+                _ => None,
+            })
+            .flat_map(|n| entity_collection_names(&n.name))
+            .collect();
         let mut diagnostics = Vec::new();
         for d in &self.module.declarations {
-            let Decl::Block(b) = d else { continue };
-            if !matches!(
-                b.kind,
-                BlockKind::Entity | BlockKind::ExternalEntity | BlockKind::Value
-            ) {
-                continue;
-            }
-            let Some(owner) = b.name.as_ref().map(|n| n.name.as_str()) else { continue };
-            let mut nav = FieldNavigation {
-                owner,
-                schemas: &schemas,
-                has_variants: &has_variants,
-                bound: b
-                    .items
-                    .iter()
-                    .filter_map(|i| match &i.kind {
-                        BlockItemKind::Let { name, .. } => Some(name.name.as_str()),
+            match d {
+                Decl::Block(b) => {
+                    // Field chains resolve inside entity and value blocks; in
+                    // other blocks only collections that are certain by their
+                    // form (entity collections, projections) are recognised.
+                    let owner = match b.kind {
+                        BlockKind::Entity | BlockKind::ExternalEntity | BlockKind::Value => {
+                            b.name.as_ref().map(|n| n.name.as_str())
+                        }
                         _ => None,
-                    })
-                    .collect(),
-                out: &mut diagnostics,
-            };
-            for item in &b.items {
-                match &item.kind {
-                    BlockItemKind::Assignment { value, .. }
-                    | BlockItemKind::FieldWithWhen { value, .. }
-                    | BlockItemKind::Let { value, .. }
-                    | BlockItemKind::InvariantBlock { body: value, .. } => nav.visit(value),
-                    _ => {}
+                    };
+                    let mut nav = FieldNavigation {
+                        owner,
+                        schemas: &schemas,
+                        has_variants: &has_variants,
+                        plurals: &plurals,
+                        bound: b
+                            .items
+                            .iter()
+                            .filter_map(|i| match &i.kind {
+                                BlockItemKind::Let { name, .. } => Some(name.name.as_str()),
+                                _ => None,
+                            })
+                            .collect(),
+                        out: &mut diagnostics,
+                    };
+                    for item in &b.items {
+                        nav.visit_item(&item.kind);
+                    }
                 }
+                Decl::Invariant(inv) => {
+                    let mut nav = FieldNavigation {
+                        owner: None,
+                        schemas: &schemas,
+                        has_variants: &has_variants,
+                        plurals: &plurals,
+                        bound: Vec::new(),
+                        out: &mut diagnostics,
+                    };
+                    nav.visit(&inv.body);
+                }
+                _ => {}
             }
         }
         for diag in diagnostics {
@@ -6639,9 +6664,11 @@ impl Ctx<'_> {
 }
 
 struct FieldNavigation<'a, 'o> {
-    owner: &'a str,
+    /// The entity or value type whose block is being walked, if any.
+    owner: Option<&'a str>,
     schemas: &'o HashMap<&'a str, HashMap<&'a str, &'a Expr>>,
     has_variants: &'o HashSet<&'a str>,
+    plurals: &'o HashSet<String>,
     /// Names that shadow the owner's fields in the current scope.
     bound: Vec<&'a str>,
     out: &'o mut Vec<Diagnostic>,
@@ -6650,13 +6677,25 @@ struct FieldNavigation<'a, 'o> {
 impl<'a> FieldNavigation<'a, '_> {
     /// The declared type a chain reaches, while it is certain.
     fn resolve(&self, expr: &'a Expr) -> Option<&'a str> {
+        if let Expr::This { .. } = expr {
+            return self.owner;
+        }
+        base_type_name(self.field_type(expr)?).filter(|t| self.schemas.contains_key(t))
+    }
+
+    /// The declared type expression of the field a chain ends at.
+    fn field_type(&self, expr: &'a Expr) -> Option<&'a Expr> {
+        self.field_decl(expr).map(|(_, ty)| ty)
+    }
+
+    /// The name and declared type expression of the field a chain ends at.
+    fn field_decl(&self, expr: &'a Expr) -> Option<(&'a str, &'a Expr)> {
         let (from, field) = match expr {
-            Expr::This { .. } => return Some(self.owner),
             Expr::Ident(id) => {
                 if self.bound.contains(&id.name.as_str()) {
                     return None;
                 }
-                (self.owner, id.name.as_str())
+                (self.owner?, id.name.as_str())
             }
             Expr::MemberAccess { object, field, .. }
             | Expr::OptionalAccess { object, field, .. } => {
@@ -6664,14 +6703,91 @@ impl<'a> FieldNavigation<'a, '_> {
             }
             _ => return None,
         };
-        let field_type = self.schemas.get(from)?.get(field)?;
-        base_type_name(field_type).filter(|t| self.schemas.contains_key(t))
+        let (name, ty) = self.schemas.get(from)?.get_key_value(field)?;
+        Some((name, ty))
+    }
+
+    /// Whether an expression is certainly a collection: a projection, an
+    /// entity collection, or a field declared as `Set<T>`, `List<T>` or a
+    /// projection, or a relationship whose name is the plural of its target.
+    fn is_collection(&self, expr: &'a Expr) -> bool {
+        match expr {
+            Expr::Where { .. } => true,
+            Expr::Ident(id)
+                if !self.bound.contains(&id.name.as_str())
+                    && self.plurals.contains(id.name.as_str())
+                    && self.field_type(expr).is_none() =>
+            {
+                true
+            }
+            _ => self
+                .field_decl(expr)
+                .is_some_and(|(name, ty)| is_collection_type(ty) || is_plural_relationship(name, ty)),
+        }
+    }
+
+    fn visit_item(&mut self, kind: &'a BlockItemKind) {
+        match kind {
+            BlockItemKind::Clause { value, .. }
+            | BlockItemKind::Assignment { value, .. }
+            | BlockItemKind::ParamAssignment { value, .. }
+            | BlockItemKind::PathAssignment { value, .. }
+            | BlockItemKind::FieldWithWhen { value, .. }
+            | BlockItemKind::Let { value, .. }
+            | BlockItemKind::InvariantBlock { body: value, .. } => self.visit(value),
+            BlockItemKind::ForBlock { binding, collection, filter, items, .. } => {
+                self.visit(collection);
+                let mark = self.bound.len();
+                self.bind(binding);
+                if let Some(f) = filter {
+                    self.visit(f);
+                }
+                for item in items {
+                    self.visit_item(&item.kind);
+                }
+                self.bound.truncate(mark);
+            }
+            BlockItemKind::IfBlock { branches, else_items } => {
+                for b in branches {
+                    self.visit(&b.condition);
+                    for item in &b.items {
+                        self.visit_item(&item.kind);
+                    }
+                }
+                for item in else_items.iter().flatten() {
+                    self.visit_item(&item.kind);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn bind(&mut self, binding: &'a ForBinding) {
+        match binding {
+            ForBinding::Single(id) => self.bound.push(&id.name),
+            ForBinding::Destructured(ids, _) => {
+                self.bound.extend(ids.iter().map(|i| i.name.as_str()))
+            }
+        }
     }
 
     fn visit(&mut self, expr: &'a Expr) {
         match expr {
             Expr::MemberAccess { object, field, .. }
             | Expr::OptionalAccess { object, field, .. } => {
+                // Rule 14a: only the built-in dot-methods exist on a collection.
+                let name = field.name.as_str();
+                if !BUILTIN_COLLECTION_METHODS.contains(&name) && self.is_collection(object) {
+                    self.out.push(
+                        Diagnostic::error(
+                            field.span,
+                            format!(
+                                "'.{name}' is not a built-in collection method. Use a black box function instead, such as {name}(collection, ...).",
+                            ),
+                        )
+                        .with_code("allium.collection.unknownMethod"),
+                    );
+                }
                 if let Some(ty) = self.resolve(object) {
                     if !self.has_variants.contains(ty)
                         && !self.schemas[ty].contains_key(field.name.as_str())
@@ -6699,12 +6815,7 @@ impl<'a> FieldNavigation<'a, '_> {
             Expr::For { binding, collection, filter, body, .. } => {
                 self.visit(collection);
                 let mark = self.bound.len();
-                match binding {
-                    ForBinding::Single(id) => self.bound.push(&id.name),
-                    ForBinding::Destructured(ids, _) => {
-                        self.bound.extend(ids.iter().map(|i| i.name.as_str()))
-                    }
-                }
+                self.bind(binding);
                 if let Some(f) = filter {
                     self.visit(f);
                 }
@@ -6725,6 +6836,49 @@ impl<'a> FieldNavigation<'a, '_> {
             other => walk_expr_children(other, &mut |child| self.visit(child)),
         }
     }
+}
+
+/// Whether a declared field type is certainly a collection: `Set<T>`,
+/// `List<T>`, or a projection (`xs where ...`).
+fn is_collection_type(expr: &Expr) -> bool {
+    match expr {
+        Expr::GenericType { name, .. } => {
+            matches!(name.as_ref(), Expr::Ident(id) if id.name == "Set" || id.name == "List")
+        }
+        Expr::TypeOptional { inner, .. } => is_collection_type(inner),
+        Expr::Where { .. } => true,
+        _ => false,
+    }
+}
+
+/// Whether a relationship field (`name: Target with ...`) is one-to-many. The
+/// language reference makes the field name decide: a plural name is a
+/// collection. Only names that are a regular plural of the target's snake_case
+/// name, or of its last word, are recognised (`sections: Section`,
+/// `slots: InterviewSlot`); anything else is left undecided.
+fn is_plural_relationship(name: &str, ty: &Expr) -> bool {
+    let Expr::With { source, .. } = ty else { return false };
+    let Some(target) = expr_as_ident(source) else { return false };
+    let snake = to_snake_case(target);
+    let last = snake.rsplit('_').next().unwrap_or(&snake).to_string();
+    [snake, last]
+        .iter()
+        .any(|base| entity_collection_names(base).iter().any(|p| p == name))
+}
+
+fn to_snake_case(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn collect_param_names<'a>(param: &'a Expr, out: &mut Vec<&'a str>) {
@@ -9082,6 +9236,65 @@ rule ShowsError {
              transitions stage {\n    draft -> final\n    terminal: final\n  }\n}\n",
         );
         assert!(unwitnessed(&ds).is_empty(), "{ds:?}");
+    }
+
+    fn unknown_methods(ds: &[Diagnostic]) -> Vec<&str> {
+        ds.iter()
+            .filter(|d| d.code == Some("allium.collection.unknownMethod"))
+            .map(|d| d.message.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn unknown_dot_methods_on_collections_are_errors() {
+        let ds = analyze_src(
+            "entity Slot {\n  open: Boolean\n  label: String\n}\n\n\
+             entity Board {\n  slots: List<Slot>\n  labels: Set<String>\n  \
+             a: slots.exists(s => s.open)\n  b: slots.where(s => s.open)\n  \
+             c: labels.contains(\"x\")\n  d: slots.map(s => s.label)\n  \
+             e: slots.is_empty()\n  f: slots.filter(s => s.open)\n}\n",
+        );
+        assert_eq!(unknown_methods(&ds).len(), 6, "{ds:?}");
+        assert!(ds.iter().any(|d| d.code == Some("allium.collection.unknownMethod")
+            && d.severity == Severity::Error));
+    }
+
+    #[test]
+    fn built_in_collection_methods_are_clean() {
+        let ds = analyze_src(
+            "entity Slot {\n  open: Boolean\n}\n\n\
+             entity Board {\n  slots: List<Slot>\n  \
+             a: slots.count\n  b: slots.any(s => s.open)\n  c: slots.all(s => s.open)\n  \
+             d: slots.first\n  e: slots.last\n  f: slots.unique\n}\n",
+        );
+        assert!(unknown_methods(&ds).is_empty(), "{ds:?}");
+    }
+
+    #[test]
+    fn collections_are_recognised_by_projection_relationship_and_entity_collection() {
+        let ds = analyze_src(
+            "entity Section {\n  document: Document\n  words: Integer\n  active: Boolean\n}\n\n\
+             entity Document {\n  sections: Section with document = this\n  \
+             live: sections where active = true\n  \
+             a: sections.sum(s => s.words)\n  b: live.max(s => s.words)\n}\n\n\
+             invariant Bounded {\n  Sections.exists(s => s.words > 0)\n}\n",
+        );
+        assert_eq!(unknown_methods(&ds).len(), 3, "{ds:?}");
+    }
+
+    #[test]
+    fn uncertain_receivers_are_left_alone() {
+        // A one-to-one relationship, a derived value with parameters on an
+        // entity, a lambda binding and a field of a primitive type are not
+        // known to be collections.
+        let ds = analyze_src(
+            "entity Invitation {\n  candidacy: Candidacy\n  expires_at: Timestamp\n}\n\n\
+             entity Candidacy {\n  invitation: Invitation with candidacy = this\n  \
+             replies: Invitation with candidacy = this\n  label: String\n  \
+             a: invitation.expires_at\n  b: replies.whatever\n  \
+             c: label.length\n}\n",
+        );
+        assert!(unknown_methods(&ds).is_empty(), "{ds:?}");
     }
 
     #[test]

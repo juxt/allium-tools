@@ -1411,6 +1411,22 @@ test("warns on a declared status edge no rule produces (#105)", () => {
   );
 });
 
+test("rejects unknown dot-methods on collections (#110)", () => {
+  const bad = analyzeAllium(
+    "entity Section {\n  document: Document\n  words: Integer\n  open: Boolean\n}\nentity Document {\n  sections: Section with document = this\n  tags: Set<String>\n  live: sections where open = true\n  a: sections.sum(s => s.words)\n  b: tags.contains(\"x\")\n  c: live.map(s => s.words)\n}\ninvariant I {\n  Sections.exists(s => s.open)\n}",
+  ).filter((f) => f.code === "allium.collection.unknownMethod");
+  assert.equal(bad.length, 4);
+  assert.equal(bad[0].severity, "error");
+
+  const ok = analyzeAllium(
+    "entity Invitation {\n  candidacy: Candidacy\n  expires_at: Timestamp\n}\nentity Candidacy {\n  invitation: Invitation with candidacy = this\n  slots: List<Invitation>\n  a: invitation.expires_at\n  b: slots.count\n  c: slots.any(s => s.expires_at <= now)\n}",
+  );
+  assert.equal(
+    ok.some((f) => f.code === "allium.collection.unknownMethod"),
+    false,
+  );
+});
+
 test("rule 14c: empty list literal must target a List<T> field", () => {
   const bad = analyzeAllium(
     `entity E {\n  id: String\n}\ndefault E e = { id: [] }`,

@@ -228,6 +228,7 @@ double-firing on the body.
 | `allium.default.unknownField` | error | Yes | Yes |
 | `allium.created.unknownField` | warning | Yes | Yes |
 | `allium.navigation.unknownField` | warning | Yes | Yes |
+| `allium.collection.unknownMethod` | error | Yes | Yes |
 | `allium.surface.unusedPath` | info | Disabled | Yes |
 
 Two language features were added for juxt/allium#43:

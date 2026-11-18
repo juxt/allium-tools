@@ -4,6 +4,8 @@ Behaviour changes worth knowing before you upgrade. Releases ship from a single 
 
 ## Unreleased
 
+A dot-method on a collection that is not one of the built-ins (`.count`, `.any()`, `.all()`, `.first`, `.last`, `.unique`, `.add()`, `.remove()`) is now an error, `allium.collection.unknownMethod`, as language reference rule 14a requires. Write domain operations as black box functions instead: `sum(sections, s => s.words)`, not `sections.sum(...)`. The check fires only where the receiver is certainly a collection: a `Set<T>` or `List<T>` field, a projection, a relationship whose name is the plural of its target, or an entity collection. Specs that use other dot-methods on these will now fail the check. The repo's copy of the language reference gains rule 14a, which it was missing (#110).
+
 A declared edge in a status transition graph that no rule produces is now reported as `allium.status.unwitnessedTransition` (warning), as language reference rule 7c requires. A rule that assigns a status without a guard on the start state counts as producing every edge into that status. Because `check` exits 1 on warnings, a spec with an unwitnessed edge now fails the check (#105).
 
 The dotted form `alias.Name` is no longer treated as a cross-module reference. The language has only ever written these as `alias/Name`. When the name before the dot is a `use` alias, `allium check` now reports `allium.reference.dottedAlias` (error) and points to the slash form, and the dotted form no longer stops the imported declaration being reported unused. Member access through any other name, such as `properties.Status` on a field, is ordinary member access and no longer draws `allium.reference.undefinedImportedAlias` (#97).
