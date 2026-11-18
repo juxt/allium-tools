@@ -4343,6 +4343,21 @@ fn collect_accessed_fields_from_expr<'a>(expr: &'a Expr, out: &mut HashSet<&'a s
 // 9. Unused entities
 // ---------------------------------------------------------------------------
 
+/// The regular English plurals an entity collection may take (`Users`,
+/// `Addresses`, `Candidacies`). Irregular plurals (`People`) are not modelled,
+/// so an entity referenced only through one is still reported unused.
+fn entity_collection_names(entity: &str) -> Vec<String> {
+    let mut out = vec![format!("{entity}s"), format!("{entity}es")];
+    let mut chars = entity.chars().rev();
+    if let (Some('y'), Some(prev)) = (chars.next(), chars.next()) {
+        if !"aeiouAEIOU".contains(prev) {
+            out.push(format!("{}ies", &entity[..entity.len() - 1]));
+        }
+    }
+    out
+}
+
+
 impl Ctx<'_> {
     fn check_unused_entities(&mut self) {
         let mut all_idents = self.collect_all_referenced_idents();
@@ -4381,7 +4396,13 @@ impl Ctx<'_> {
                 Some(n) => n,
                 None => continue,
             };
-            if !all_idents.contains(name.name.as_str()) {
+            // An entity iterated only through its collection (`for s in
+            // Sequences`) is referenced by its plural (#111).
+            let referenced = all_idents.contains(name.name.as_str())
+                || entity_collection_names(&name.name)
+                    .iter()
+                    .any(|plural| all_idents.contains(plural.as_str()));
+            if !referenced {
                 findings.push(
                     Diagnostic::warning(
                         name.span,
@@ -8542,6 +8563,38 @@ rule ShowsError {
     fn unused_entity_reported() {
         let ds = analyze_src("entity Orphan {\n  x: String\n}\n");
         assert!(has_code(&ds, "allium.entity.unused"));
+    }
+
+    #[test]
+    fn entity_referenced_through_its_collection_is_used() {
+        for (entity, collection) in [
+            ("Sequence", "Sequences"),
+            ("Address", "Addresses"),
+            ("Candidacy", "Candidacies"),
+            ("Survey", "Surveys"),
+        ] {
+            let ds = analyze_src(&format!(
+                "entity {entity} {{\n  n: Integer\n}}\n\n\
+                 invariant Positive {{\n  for s in {collection}:\n    s.n > 0\n}}\n"
+            ));
+            assert!(!has_code(&ds, "allium.entity.unused"), "{entity}/{collection}: {ds:?}");
+        }
+    }
+
+    #[test]
+    fn unrelated_plural_does_not_credit_an_entity() {
+        let ds = analyze_src(
+            "entity Sequence {\n  n: Integer\n}\n\n\
+             invariant Positive {\n  for s in Sequencers:\n    s.n > 0\n}\n",
+        );
+        assert!(has_code(&ds, "allium.entity.unused"));
+    }
+
+    #[test]
+    fn entity_collection_names_cover_regular_plurals() {
+        assert_eq!(entity_collection_names("User"), ["Users", "Useres"]);
+        assert!(entity_collection_names("Candidacy").contains(&"Candidacies".to_string()));
+        assert!(!entity_collection_names("Survey").contains(&"Surveies".to_string()));
     }
 
     #[test]
