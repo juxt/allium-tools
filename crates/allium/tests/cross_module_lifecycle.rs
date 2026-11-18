@@ -448,6 +448,56 @@ fn t63_qualified_provides_credits_triggers_in_pair() {
     assert!(ok, "analyse on the pair should exit 0 once the provides are credited.\n{stdout}");
 }
 
+// #109 — qualified `ensures: alias/Trigger(...)` emissions credit reachability
+// the same way a qualified `provides:` does.
+const EMITTER_109: &str = r#"-- allium: 3
+
+use "./ticket.allium" as ticket
+
+rule Escalate {
+    when: Escalated(ticket_ref)
+    ensures: ticket/OpenTicket()
+}
+
+surface Desk {
+    facing _: Actor
+    provides:
+        Escalated(ticket_ref)
+}
+"#;
+
+#[test]
+fn t109_qualified_emission_credits_imported_listener() {
+    let dir = TempDir::new("109-pair");
+    dir.write("ticket.allium", TICKET_63);
+    dir.write("emitter.allium", EMITTER_109);
+
+    let (_ok, stdout) = run("analyse", &[dir.path().to_str().unwrap()]);
+    let unreachable: Vec<String> = parse_diagnostics(&stdout)
+        .into_iter()
+        .filter(|d| d.code == "allium.rule.unreachableTrigger")
+        .map(|d| d.message)
+        .collect();
+    assert!(
+        !unreachable.iter().any(|m| m.contains("CreateTicket")),
+        "the emitter emits ticket/OpenTicket, so CreateTicket is reachable.\n{unreachable:?}"
+    );
+    // Don't overcorrect: CloseTicket is neither provided nor emitted anywhere.
+    assert!(
+        unreachable.iter().any(|m| m.contains("CloseOpenTicket")),
+        "CloseTicket has no source, so CloseOpenTicket stays unreachable.\n{unreachable:?}"
+    );
+    let findings: Vec<String> = parse_findings(&stdout)
+        .into_iter()
+        .filter(|f| f.kind == "unreachable_trigger")
+        .map(|f| f.summary)
+        .collect();
+    assert!(
+        !findings.iter().any(|f| f.contains("'OpenTicket'")),
+        "no unreachable_trigger finding for OpenTicket expected.\n{findings:?}"
+    );
+}
+
 #[test]
 fn t63_triggers_unreachable_when_ticket_analysed_alone() {
     let dir = TempDir::new("63-alone");

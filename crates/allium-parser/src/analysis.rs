@@ -59,6 +59,10 @@ pub struct ReverseContributions {
     /// Trigger names an importer provides via `provides: alias/Trigger(...)`.
     /// Makes the imported module's rules that listen for them reachable (#63).
     pub provided_triggers: HashSet<String>,
+    /// Trigger names an importer's rules emit via `ensures: alias/Trigger(...)`.
+    /// Makes the imported module's rules that listen for them reachable, as a
+    /// local emission would (#109).
+    pub emitted_triggers: HashSet<String>,
     /// Imported entity name → status values an importer assigns, whether via
     /// `alias/Entity.created(status: X)` (#62) or as the target of a witnessed
     /// transition (#64).
@@ -78,6 +82,7 @@ impl ReverseContributions {
     /// True when there is nothing to contribute.
     pub fn is_empty(&self) -> bool {
         self.provided_triggers.is_empty()
+            && self.emitted_triggers.is_empty()
             && self.assigned_statuses.is_empty()
             && self.witnessed_transitions.is_empty()
             && self.referenced_fields.is_empty()
@@ -86,6 +91,7 @@ impl ReverseContributions {
     /// Fold another importer's contributions into this aggregate.
     pub fn merge(&mut self, other: ReverseContributions) {
         self.provided_triggers.extend(other.provided_triggers);
+        self.emitted_triggers.extend(other.emitted_triggers);
         for (entity, statuses) in other.assigned_statuses {
             self.assigned_statuses.entry(entity).or_default().extend(statuses);
         }
@@ -1199,6 +1205,12 @@ impl Ctx<'_> {
         for rule in self.blocks(BlockKind::Rule) {
             for item in &rule.items {
                 collect_emitted_trigger_from_item(&item.kind, &mut emitted_triggers);
+            }
+        }
+        // Triggers an importer emits by qualified name count as emitted here (#109).
+        if let Some(rev) = self.reverse_contributions {
+            for t in &rev.emitted_triggers {
+                emitted_triggers.insert(t.as_str());
             }
         }
 
@@ -3492,6 +3504,12 @@ impl Ctx<'_> {
                 collect_emitted_trigger_from_item(&item.kind, &mut emitted);
             }
         }
+        // Triggers an importer emits by qualified name count as emitted here (#109).
+        if let Some(rev) = self.reverse_contributions {
+            for t in &rev.emitted_triggers {
+                emitted.insert(t.as_str());
+            }
+        }
 
         for rule in self.blocks(BlockKind::Rule) {
             let rule_name = match &rule.name {
@@ -4897,7 +4915,7 @@ pub fn collect_reverse_contributions<'a>(
         for item in &b.items {
             if let BlockItemKind::Clause { keyword, value } = &item.kind {
                 if keyword == "provides" {
-                    collect_qualified_provides(value, alias, &mut out.provided_triggers);
+                    collect_qualified_trigger_calls(value, alias, &mut out.provided_triggers);
                 }
             }
         }
@@ -4910,6 +4928,7 @@ pub fn collect_reverse_contributions<'a>(
         for_each_rule_clause(&rule.items, &mut |keyword, value| {
             if keyword == "ensures" {
                 collect_qualified_created(value, alias, &status_by_entity, &mut out.assigned_statuses);
+                collect_qualified_trigger_calls(value, alias, &mut out.emitted_triggers);
             }
         });
         collect_witnessed_transition(
@@ -5018,13 +5037,10 @@ fn module_blocks(module: &Module, kind: BlockKind) -> impl Iterator<Item = &Bloc
     })
 }
 
-/// Collect trigger names provided by qualified `alias/Trigger(...)` calls.
-///
-/// NOTE (known gap): mirrors `collect_call_names` in not walking `for` bodies in
-/// `provides:` (issue #61). A qualified trigger provided only inside a `for`
-/// block is therefore not collected; the general `for`-in-`provides` fix (Group
-/// A) should cover both the local and qualified collectors together.
-fn collect_qualified_provides(expr: &Expr, alias: &str, out: &mut HashSet<String>) {
+/// Collect trigger names named by qualified `alias/Trigger(...)` calls in an
+/// importer's surface `provides:` or rule `ensures:`, descending into blocks,
+/// guards, conditionals and `for` bodies.
+fn collect_qualified_trigger_calls(expr: &Expr, alias: &str, out: &mut HashSet<String>) {
     match expr {
         Expr::Call { function, .. } => {
             if let Expr::QualifiedName(q) = function.as_ref() {
@@ -5035,19 +5051,19 @@ fn collect_qualified_provides(expr: &Expr, alias: &str, out: &mut HashSet<String
         }
         Expr::Block { items, .. } => {
             for item in items {
-                collect_qualified_provides(item, alias, out);
+                collect_qualified_trigger_calls(item, alias, out);
             }
         }
-        Expr::WhenGuard { action, .. } => collect_qualified_provides(action, alias, out),
+        Expr::WhenGuard { action, .. } => collect_qualified_trigger_calls(action, alias, out),
         Expr::Conditional { branches, else_body, .. } => {
             for b in branches {
-                collect_qualified_provides(&b.body, alias, out);
+                collect_qualified_trigger_calls(&b.body, alias, out);
             }
             if let Some(body) = else_body {
-                collect_qualified_provides(body, alias, out);
+                collect_qualified_trigger_calls(body, alias, out);
             }
         }
-        Expr::For { body, .. } => collect_qualified_provides(body, alias, out),
+        Expr::For { body, .. } => collect_qualified_trigger_calls(body, alias, out),
         _ => {}
     }
 }
