@@ -407,6 +407,20 @@ rule CreatedArgumentNamesUndeclaredField {
     ensures: FindingObserved(code: "allium.created.unknownField", severity: warning)
 }
 
+-- Language reference rule 7c: every declared edge of a status transition graph
+-- is witnessed by a rule whose requires/ensures pair can produce it. A rule
+-- that assigns a status with no known start state witnesses every edge into
+-- that status. An entity some rule assigns a non-literal status is skipped,
+-- since that rule could produce any edge (#105).
+rule DeclaredEdgeWithoutWitnessingRuleWarns {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: EntityDeclaresStatusGraphEdge(entity, from, to)
+    requires: NoRuleProducesTransition(entity, from, to)
+
+    ensures: FindingObserved(code: "allium.status.unwitnessedTransition", severity: warning)
+}
+
 -- A member chain in an entity or value block (an invariant or a derived value)
 -- that starts from a field of the enclosing type or this must name, at each
 -- step, a field the type reached so far declares. The chain is followed only

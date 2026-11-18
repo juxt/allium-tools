@@ -210,6 +210,7 @@ double-firing on the body.
 | `allium.surface.unusedBinding` | warning | Yes | Yes |
 | `allium.status.unreachableValue` | warning | Yes | Yes |
 | `allium.status.noExit` | warning | Yes | Yes |
+| `allium.status.unwitnessedTransition` | warning | Yes | Yes |
 | `allium.externalEntity.missingSourceHint` | warning/info | Yes | Yes |
 | `allium.type.undefinedReference` | error | Yes | Yes |
 | `allium.rule.undefinedTypeReference` | error | Yes | Yes |
