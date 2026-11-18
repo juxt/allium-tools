@@ -2,7 +2,7 @@
 
 Behaviour changes worth knowing before you upgrade. Releases ship from a single version tag, see `docs/releasing.md`.
 
-## Unreleased
+## 3.7.1
 
 3.7.0 reached crates.io but not GitHub releases, the VS Code extension or Homebrew: the extension failed to package because a stale npm override pinned the packaging tool's `minimatch` to an incompatible version. 3.7.1 is the same release with the override removed.
 
