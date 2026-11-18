@@ -393,6 +393,20 @@ rule QualifiedNameParsesAsOneOperand {
     ensures: FindingNotObserved(code: "allium.config.undefinedReference", name: name)
 }
 
+-- A named argument of a local Entity.created(...) call in a rule must name a
+-- field the entity declares (for a variant, the variant's or its base's). It is
+-- the creation counterpart of allium.default.unknownField, reported as a
+-- warning because the language reference states no rule for it. Qualified
+-- creations are not checked (#75).
+rule CreatedArgumentNamesUndeclaredField {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: RuleCreatesLocalEntityWithNamedArgument(entity, argument)
+    requires: EntityDeclaresNoFieldNamed(entity, argument)
+
+    ensures: FindingObserved(code: "allium.created.unknownField", severity: warning)
+}
+
 rule UnresolvedUsePathWarnsInMultiFileMode {
     when: CheckCommandInvokedWithInputs(inputs)
 

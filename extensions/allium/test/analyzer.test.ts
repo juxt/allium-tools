@@ -1338,6 +1338,42 @@ test("does not flag known fields, or fields on a qualified (imported) default", 
   );
 });
 
+test("warns on a .created() argument the entity does not declare (#75)", () => {
+  const payment = `entity Payment {\n  amount: Integer\n  payer: String\n}\n`;
+  const typo = analyzeAllium(
+    `${payment}rule Pay {\n  when: Paid(p, a)\n  ensures: Payment.created(amount: a, payerz: p)\n}`,
+  );
+  const found = typo.filter((f) => f.code === "allium.created.unknownField");
+  assert.equal(found.length, 1);
+  assert.equal(found[0].severity, "warning");
+  assert.ok(found[0].message.includes("'payerz'"));
+
+  const ok = analyzeAllium(
+    `${payment}rule Pay {\n  when: Paid(p, a)\n  ensures: Payment.created(amount: a, payer: p)\n}`,
+  );
+  assert.equal(
+    ok.some((f) => f.code === "allium.created.unknownField"),
+    false,
+  );
+
+  const variant = analyzeAllium(
+    `entity Note {\n  to: String\n  kind: Email | Sms\n}\nvariant Email : Note {\n  subject: String\n}\nvariant Sms : Note {\n  number: String\n}\nrule N {\n  when: Send(t)\n  ensures: Email.created(to: t, subject: "s", numbr: "1")\n}`,
+  );
+  const variantFound = variant.filter(
+    (f) => f.code === "allium.created.unknownField",
+  );
+  assert.equal(variantFound.length, 1);
+  assert.ok(variantFound[0].message.includes("'numbr'"));
+
+  const qualified = analyzeAllium(
+    `use "./b.allium" as b\n\nrule M {\n  when: Go()\n  ensures: b/Thing.created(anything: 1)\n}`,
+  );
+  assert.equal(
+    qualified.some((f) => f.code === "allium.created.unknownField"),
+    false,
+  );
+});
+
 test("rule 14c: empty list literal must target a List<T> field", () => {
   const bad = analyzeAllium(
     `entity E {\n  id: String\n}\ndefault E e = { id: [] }`,
