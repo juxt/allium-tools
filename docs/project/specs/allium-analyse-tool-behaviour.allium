@@ -242,6 +242,15 @@ rule QualifiedProvidesFromImporterSatisfiesListeners {
     ensures: AnalyseFindingNotObserved(type: unreachable_trigger, trigger: trigger_name)
 }
 
+-- The same holds for a trigger an importer's rule emits by qualified name
+-- (ensures: alias/Trigger(...)) (#109).
+rule QualifiedEmissionFromImporterSatisfiesListeners {
+    when: TriggerAnalysed(trigger_name, listening_rules, surface_names)
+    requires: ImporterEmitsTriggerQualifiedViaUseAlias(trigger_name)
+
+    ensures: AnalyseFindingNotObserved(type: unreachable_trigger, trigger: trigger_name)
+}
+
 -- Conflict finding
 
 rule ConflictDetected {

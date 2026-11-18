@@ -357,6 +357,42 @@ rule CrossModuleReferenceSuppressesUnusedWarning {
     ensures: FindingNotObserved(code: "allium.definition.unused", definition: entity_or_value)
 }
 
+-- An entity iterated only through its collection (for s in Sequences) is used.
+-- Regular English plurals are recognised (Users, Addresses, Candidacies);
+-- irregular ones (People) are not modelled (#111).
+rule EntityReferencedThroughItsCollectionIsUsed {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: FileDeclares(file, entity)
+    requires: FileReferencesRegularPluralOf(file, entity)
+
+    ensures: FindingNotObserved(code: "allium.entity.unused", entity: entity)
+}
+
+-- A .created(status: value) call counts as assigning value wherever an ensures
+-- block may create an entity: a bare statement, an if/else branch, a for body,
+-- or the value of a let binding (#103).
+rule CreationInsideForOrLetAssignsStatus {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: RuleCreatesEntityWithStatusInsideForOrLet(entity, value)
+
+    ensures: FindingNotObserved(code: "allium.status.unreachableValue", status: value)
+}
+
+-- A qualified name binds tighter than any operator: x * alias/config.param
+-- multiplies by the imported config value rather than dividing x * alias by
+-- config.param (#102).
+rule QualifiedNameParsesAsOneOperand {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: ExpressionUsesQualifiedNameAsRightOperand(alias, name)
+    requires: UseDeclarationBindsAliasToFileInCheckSet(alias)
+    requires: AliasedModuleOffersName(alias, name)
+
+    ensures: FindingNotObserved(code: "allium.config.undefinedReference", name: name)
+}
+
 rule UnresolvedUsePathWarnsInMultiFileMode {
     when: CheckCommandInvokedWithInputs(inputs)
 
@@ -480,6 +516,19 @@ rule QualifiedProvidesCreditsImportedTriggerReachability {
     requires: FileRuleListensForTrigger(file_a, trigger)
     requires: FileHasUseDeclarationMappingAliasTo(file_b, file_a)
     requires: FileSurfaceProvidesTriggerQualifiedViaAlias(file_b, trigger)
+
+    ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
+}
+
+-- A qualified emission (ensures: alias/Trigger(...)) reaches the imported
+-- module's listeners the same way a qualified provides does (#109).
+rule QualifiedEmissionCreditsImportedTriggerReachability {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileRuleListensForTrigger(file_a, trigger)
+    requires: FileHasUseDeclarationMappingAliasTo(file_b, file_a)
+    requires: FileRuleEmitsTriggerQualifiedViaAlias(file_b, trigger)
 
     ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
 }
