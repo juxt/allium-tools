@@ -45,6 +45,20 @@ rule FormatterNormalizesText {
     ensures: file.pipe_delimited_literals_use_single_space_around_pipe = true
 }
 
+-- Block indentation follows brace nesting. Within a brace block, the author's
+-- relative indentation is kept and re-expressed in indent_width steps, because
+-- clause bodies (provides:, ensures:, for ...:, if ...:) and multi-line call
+-- arguments are marked only by being indented further. Braces inside string
+-- and backtick literals and in -- comments do not change the nesting (#114).
+rule FormatterKeepsRelativeIndentationWithinBlocks {
+    when: FileFormatted(file)
+
+    ensures: file.clause_bodies_indented_one_level_below_header = true
+    ensures: file.multi_line_call_arguments_indented_one_level_below_call = true
+    ensures: file.braces_in_strings_and_comments_ignored_for_nesting = true
+    ensures: file.formatting_is_idempotent = true
+}
+
 rule CheckModeFailsIfFormattingNeeded {
     when: FormatRunCompleted(run)
     requires: run.mode = check_only

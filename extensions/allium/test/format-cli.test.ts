@@ -126,6 +126,33 @@ test("formatAlliumText normalizes declaration header brace spacing", () => {
   );
 });
 
+test("formatAlliumText keeps entries under a bare clause header indented (#114)", () => {
+  const input =
+    "surface CheckerCli {\n    provides:\n        CheckCommandInvoked(mode: CheckMode)\n        CheckCommandInvokedWithInput(input: CheckInput)\n    exposes:\n        cli.version\n}\n";
+  assert.equal(formatAlliumText(input), input);
+});
+
+test("formatAlliumText keeps multi-line call arguments indented (#114)", () => {
+  const input =
+    'rule R {\n    when: Go()\n    ensures: AnalyseFinding.created(\n        type: dead_transition,\n        summary: "Transition is declared but unachievable"\n    )\n}\n';
+  assert.equal(formatAlliumText(input), input);
+});
+
+test("formatAlliumText re-expresses nested clause bodies at the configured width (#114)", () => {
+  const input =
+    "rule R {\n  when: Go(items)\n  for i in items:\n    if i.ready:\n      ensures: Done(i)\n  ensures: Finished()\n}\n";
+  assert.equal(
+    formatAlliumText(input),
+    "rule R {\n    when: Go(items)\n    for i in items:\n        if i.ready:\n            ensures: Done(i)\n    ensures: Finished()\n}\n",
+  );
+});
+
+test("formatAlliumText ignores braces in strings and comments (#114)", () => {
+  const input =
+    'rule A {\n    ensures: StdoutPrinted(prefix: "{")\n    -- a stray } in a comment\n    ensures: Logged(text: "}}")\n}\n\nrule B {\n    when: Go()\n}\n';
+  assert.equal(formatAlliumText(input), input);
+});
+
 test("format CLI rewrites .allium files", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "allium-format-"));
   const target = path.join(dir, "spec.allium");
