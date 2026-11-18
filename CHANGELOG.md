@@ -2,6 +2,10 @@
 
 Behaviour changes worth knowing before you upgrade. Releases ship from a single version tag, see `docs/releasing.md`.
 
+## Unreleased
+
+3.7.0 reached crates.io but not GitHub releases, the VS Code extension or Homebrew: the extension failed to package because a stale npm override pinned the packaging tool's `minimatch` to an incompatible version. 3.7.1 is the same release with the override removed.
+
 ## 3.7.0
 
 `allium plan --format tsv` prints one obligation per line, with id, category, source construct, description and expression as tab-separated columns, so `grep`, `cut`, `sort` and `comm` can select, count and compare obligations. JSON stays the default. The positional obligations now carry the text they test as `expression`, so two from the same rule can be told apart: the `requires` clause for `rule-failure.<Rule>.<n>`, and the `.created(...)` calls for `rule-entity-creation.<Rule>.<n>`. Comments are dropped and whitespace is collapsed, so editing a comment or re-indenting leaves the text unchanged.
