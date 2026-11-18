@@ -124,6 +124,7 @@ export function analyzeAllium(
   findings.push(...findListLiteralHomogeneityIssues(text, lineStarts));
   findings.push(...findDefaultFieldSchemaIssues(text, lineStarts));
   findings.push(...findCreatedFieldNameIssues(text, lineStarts));
+  findings.push(...findFieldNavigationIssues(text, lineStarts));
 
   findings.push(...findDuplicateConfigKeys(maskedText, lineStarts, blocks));
   findings.push(...findDuplicateDefaultNames(maskedText, lineStarts));
@@ -2762,6 +2763,226 @@ function baseTypeName(typeExpr: unknown): string | undefined {
     return baseTypeName(body?.inner);
   }
   return undefined;
+}
+
+/**
+ * Warns when a member chain in an entity or value block (an invariant or a
+ * derived value) that starts from a field of the enclosing type or `this`
+ * names a field the type reached so far does not declare
+ * (`allium.navigation.unknownField`). Mirrors the Rust
+ * `check_field_navigation`: a chain is followed only while its type is
+ * certain, stopping at collections, relationships, primitives, imported
+ * types, names bound by a lambda, `for` or `let`, and types with variants.
+ */
+function findFieldNavigationIssues(
+  text: string,
+  lineStarts: number[],
+): Finding[] {
+  const findings: Finding[] = [];
+  let declarations: unknown;
+  try {
+    declarations = (parseAllium(text).module as unknown as AstNode).declarations;
+  } catch {
+    return findings;
+  }
+  if (!Array.isArray(declarations)) {
+    return findings;
+  }
+
+  const typeBlocks: AstNode[] = [];
+  const schemas: TypeSchema = new Map();
+  const hasVariants = new Set<string>();
+  for (const decl of declarations) {
+    const variant = (decl as AstNode)?.Variant as AstNode | undefined;
+    if (variant) {
+      const base = variant.base as AstNode | undefined;
+      const join = base?.JoinLookup as AstNode | undefined;
+      const baseName = baseTypeName(join ? join.entity : base);
+      if (baseName) {
+        hasVariants.add(baseName);
+      }
+      continue;
+    }
+    const block = (decl as AstNode)?.Block as AstNode | undefined;
+    if (
+      !block ||
+      (block.kind !== "Entity" &&
+        block.kind !== "ExternalEntity" &&
+        block.kind !== "Value")
+    ) {
+      continue;
+    }
+    const typeName = (block.name as AstNode | undefined)?.name;
+    if (typeof typeName !== "string") {
+      continue;
+    }
+    const fields = new Map<string, AstNode>();
+    for (const item of (block.items as unknown[]) ?? []) {
+      const kind = (item as AstNode)?.kind as AstNode | undefined;
+      const assignment = (kind?.Assignment ?? kind?.FieldWithWhen) as
+        | AstNode
+        | undefined;
+      const fname = (assignment?.name as AstNode | undefined)?.name;
+      if (typeof fname === "string") {
+        fields.set(fname, assignment!.value as AstNode);
+      }
+    }
+    schemas.set(typeName, fields);
+    typeBlocks.push(block);
+  }
+
+  for (const block of typeBlocks) {
+    const owner = (block.name as AstNode).name as string;
+    const bound: string[] = [];
+    const items = (block.items as unknown[]) ?? [];
+    for (const item of items) {
+      const letItem = ((item as AstNode)?.kind as AstNode | undefined)?.Let as
+        | AstNode
+        | undefined;
+      const name = (letItem?.name as AstNode | undefined)?.name;
+      if (typeof name === "string") {
+        bound.push(name);
+      }
+    }
+
+    const resolve = (expr: unknown): string | undefined => {
+      const variant = nodeVariant(expr);
+      const body = (expr as AstNode)?.[variant ?? ""] as AstNode | undefined;
+      let from: string | undefined;
+      let field: string | undefined;
+      if (variant === "This") {
+        return owner;
+      } else if (variant === "Ident") {
+        const name = body?.name as string | undefined;
+        if (!name || bound.includes(name)) {
+          return undefined;
+        }
+        from = owner;
+        field = name;
+      } else if (variant === "MemberAccess" || variant === "OptionalAccess") {
+        from = resolve(body?.object);
+        field = (body?.field as AstNode | undefined)?.name as string | undefined;
+      }
+      if (!from || !field) {
+        return undefined;
+      }
+      const target = baseTypeName(schemas.get(from)?.get(field));
+      return target && schemas.has(target) ? target : undefined;
+    };
+
+    const visit = (node: unknown): void => {
+      if (Array.isArray(node)) {
+        node.forEach(visit);
+        return;
+      }
+      if (!node || typeof node !== "object") {
+        return;
+      }
+      const variant = nodeVariant(node);
+      const body = (node as AstNode)[variant ?? ""] as AstNode | undefined;
+      if (variant === "MemberAccess" || variant === "OptionalAccess") {
+        const type = resolve(body?.object);
+        const fieldNode = body?.field as AstNode | undefined;
+        const fieldName = fieldNode?.name as string | undefined;
+        if (
+          type &&
+          fieldName &&
+          !hasVariants.has(type) &&
+          !schemas.get(type)!.has(fieldName)
+        ) {
+          const span = (fieldNode?.span ?? { start: 0, end: 0 }) as {
+            start: number;
+            end: number;
+          };
+          findings.push(
+            rangeFinding(
+              lineStarts,
+              span.start,
+              span.end,
+              "allium.navigation.unknownField",
+              `'${fieldName}' is not a field of '${type}'.`,
+              "warning",
+            ),
+          );
+        }
+        visit(body?.object);
+        return;
+      }
+      if (variant === "Lambda") {
+        const mark = bound.length;
+        collectParamNames(body?.param, bound);
+        visit(body?.body);
+        bound.length = mark;
+        return;
+      }
+      if (variant === "For") {
+        visit(body?.collection);
+        const mark = bound.length;
+        const binding = body?.binding as AstNode | undefined;
+        const single = (binding?.Single as AstNode | undefined)?.name;
+        if (typeof single === "string") {
+          bound.push(single);
+        }
+        const destructured = binding?.Destructured as unknown[] | undefined;
+        for (const id of (destructured?.[0] as unknown[]) ?? []) {
+          const name = (id as AstNode)?.name;
+          if (typeof name === "string") {
+            bound.push(name);
+          }
+        }
+        visit(body?.filter);
+        visit(body?.body);
+        bound.length = mark;
+        return;
+      }
+      if (variant === "Block") {
+        const mark = bound.length;
+        visit(body?.items);
+        bound.length = mark;
+        return;
+      }
+      if (variant === "LetExpr") {
+        visit(body?.value);
+        const name = (body?.name as AstNode | undefined)?.name;
+        if (typeof name === "string") {
+          bound.push(name);
+        }
+        return;
+      }
+      Object.values(node as AstNode).forEach(visit);
+    };
+
+    for (const item of items) {
+      const kind = (item as AstNode)?.kind as AstNode | undefined;
+      const entry = (kind?.Assignment ?? kind?.FieldWithWhen ?? kind?.Let) as
+        | AstNode
+        | undefined;
+      if (entry) {
+        visit(entry.value);
+      }
+      const invariant = kind?.InvariantBlock as AstNode | undefined;
+      if (invariant) {
+        visit(invariant.body);
+      }
+    }
+  }
+  return findings;
+}
+
+function collectParamNames(param: unknown, out: string[]): void {
+  if (Array.isArray(param)) {
+    param.forEach((p) => collectParamNames(p, out));
+    return;
+  }
+  if (!param || typeof param !== "object") {
+    return;
+  }
+  const ident = (param as AstNode).Ident as AstNode | undefined;
+  if (typeof ident?.name === "string") {
+    out.push(ident.name);
+    return;
+  }
+  Object.values(param as AstNode).forEach((v) => collectParamNames(v, out));
 }
 
 /**

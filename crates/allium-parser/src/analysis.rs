@@ -163,6 +163,7 @@ fn run_checks(mut ctx: Ctx<'_>, source: &str) -> Vec<Diagnostic> {
     ctx.check_undefined_import_aliases();
     ctx.check_default_field_schemas();
     ctx.check_created_field_names();
+    ctx.check_field_navigation();
 
     let mut diagnostics = apply_suppressions(ctx.diagnostics, source);
     // Deterministic ordering: the analysis passes iterate `HashMap`s, whose
@@ -6499,6 +6500,162 @@ impl Ctx<'_> {
     }
 }
 
+impl Ctx<'_> {
+    /// Checks member chains in entity and value blocks (invariants and derived
+    /// values) that start from a field of the enclosing type or `this`: each
+    /// step must name a field the type reached so far declares (#75's second
+    /// case, `order.total.centz`). A chain is followed only while its type is
+    /// certain: it stops at collections, relationships, primitives, imported
+    /// types, names bound by a lambda, `for` or `let`, and types that have
+    /// variants, since a variant's fields are reachable after narrowing.
+    fn check_field_navigation(&mut self) {
+        let schemas = collect_local_type_schemas(self.module);
+        let mut has_variants: HashSet<&str> = HashSet::new();
+        for v in self.variants() {
+            let base = match &v.base {
+                Expr::JoinLookup { entity, .. } => expr_as_ident(entity),
+                other => expr_as_ident(other),
+            };
+            if let Some(b) = base {
+                has_variants.insert(b);
+            }
+        }
+        let mut diagnostics = Vec::new();
+        for d in &self.module.declarations {
+            let Decl::Block(b) = d else { continue };
+            if !matches!(
+                b.kind,
+                BlockKind::Entity | BlockKind::ExternalEntity | BlockKind::Value
+            ) {
+                continue;
+            }
+            let Some(owner) = b.name.as_ref().map(|n| n.name.as_str()) else { continue };
+            let mut nav = FieldNavigation {
+                owner,
+                schemas: &schemas,
+                has_variants: &has_variants,
+                bound: b
+                    .items
+                    .iter()
+                    .filter_map(|i| match &i.kind {
+                        BlockItemKind::Let { name, .. } => Some(name.name.as_str()),
+                        _ => None,
+                    })
+                    .collect(),
+                out: &mut diagnostics,
+            };
+            for item in &b.items {
+                match &item.kind {
+                    BlockItemKind::Assignment { value, .. }
+                    | BlockItemKind::FieldWithWhen { value, .. }
+                    | BlockItemKind::Let { value, .. }
+                    | BlockItemKind::InvariantBlock { body: value, .. } => nav.visit(value),
+                    _ => {}
+                }
+            }
+        }
+        for diag in diagnostics {
+            self.push(diag);
+        }
+    }
+}
+
+struct FieldNavigation<'a, 'o> {
+    owner: &'a str,
+    schemas: &'o HashMap<&'a str, HashMap<&'a str, &'a Expr>>,
+    has_variants: &'o HashSet<&'a str>,
+    /// Names that shadow the owner's fields in the current scope.
+    bound: Vec<&'a str>,
+    out: &'o mut Vec<Diagnostic>,
+}
+
+impl<'a> FieldNavigation<'a, '_> {
+    /// The declared type a chain reaches, while it is certain.
+    fn resolve(&self, expr: &'a Expr) -> Option<&'a str> {
+        let (from, field) = match expr {
+            Expr::This { .. } => return Some(self.owner),
+            Expr::Ident(id) => {
+                if self.bound.contains(&id.name.as_str()) {
+                    return None;
+                }
+                (self.owner, id.name.as_str())
+            }
+            Expr::MemberAccess { object, field, .. }
+            | Expr::OptionalAccess { object, field, .. } => {
+                (self.resolve(object)?, field.name.as_str())
+            }
+            _ => return None,
+        };
+        let field_type = self.schemas.get(from)?.get(field)?;
+        base_type_name(field_type).filter(|t| self.schemas.contains_key(t))
+    }
+
+    fn visit(&mut self, expr: &'a Expr) {
+        match expr {
+            Expr::MemberAccess { object, field, .. }
+            | Expr::OptionalAccess { object, field, .. } => {
+                if let Some(ty) = self.resolve(object) {
+                    if !self.has_variants.contains(ty)
+                        && !self.schemas[ty].contains_key(field.name.as_str())
+                    {
+                        self.out.push(
+                            Diagnostic::warning(
+                                field.span,
+                                format!(
+                                    "'{}' is not a field of '{ty}'.",
+                                    field.name
+                                ),
+                            )
+                            .with_code("allium.navigation.unknownField"),
+                        );
+                    }
+                }
+                self.visit(object);
+            }
+            Expr::Lambda { param, body, .. } => {
+                let mark = self.bound.len();
+                collect_param_names(param, &mut self.bound);
+                self.visit(body);
+                self.bound.truncate(mark);
+            }
+            Expr::For { binding, collection, filter, body, .. } => {
+                self.visit(collection);
+                let mark = self.bound.len();
+                match binding {
+                    ForBinding::Single(id) => self.bound.push(&id.name),
+                    ForBinding::Destructured(ids, _) => {
+                        self.bound.extend(ids.iter().map(|i| i.name.as_str()))
+                    }
+                }
+                if let Some(f) = filter {
+                    self.visit(f);
+                }
+                self.visit(body);
+                self.bound.truncate(mark);
+            }
+            Expr::Block { items, .. } => {
+                let mark = self.bound.len();
+                for item in items {
+                    self.visit(item);
+                }
+                self.bound.truncate(mark);
+            }
+            Expr::LetExpr { name, value, .. } => {
+                self.visit(value);
+                self.bound.push(&name.name);
+            }
+            other => walk_expr_children(other, &mut |child| self.visit(child)),
+        }
+    }
+}
+
+fn collect_param_names<'a>(param: &'a Expr, out: &mut Vec<&'a str>) {
+    match param {
+        Expr::Ident(id) => out.push(&id.name),
+        other => walk_expr_children(other, &mut |child| collect_param_names(child, out)),
+    }
+}
+
 fn visit_created_field_names(
     expr: &Expr,
     schemas: &HashMap<&str, HashSet<&str>>,
@@ -8699,6 +8856,80 @@ rule ShowsError {
              b/Thing.created(anything: 1)\n    Missing.created(whatever: 2)\n}\n",
         );
         assert!(created_unknown_fields(&ds).is_empty(), "{ds:?}");
+    }
+
+    const MONEY_75: &str = "value Money {\n  cents: Integer\n  currency: String\n}\n\n\
+        entity Order {\n  total: Money\n  refund: Money?\n  lines: Set<Line>\n}\n\n\
+        entity Line {\n  price: Money\n}\n\n";
+
+    fn navigation_issues(ds: &[Diagnostic]) -> Vec<&str> {
+        ds.iter()
+            .filter(|d| d.code == Some("allium.navigation.unknownField"))
+            .map(|d| d.message.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn navigation_typo_through_value_field_warns() {
+        let ds = analyze_src(&format!(
+            "{MONEY_75}entity Payment {{\n  order: Order\n  amount: Money\n\n  \
+             invariant PaymentWithinTotal {{\n    amount.cents <= order.total.centz\n  }}\n}}\n"
+        ));
+        assert_eq!(navigation_issues(&ds), ["'centz' is not a field of 'Money'."], "{ds:?}");
+    }
+
+    #[test]
+    fn navigation_through_declared_fields_is_clean() {
+        let ds = analyze_src(&format!(
+            "{MONEY_75}entity Payment {{\n  order: Order\n  amount: Money\n  \
+             over: amount.cents > order.total.cents\n  \
+             refunded: this.order.refund?.cents\n\n  \
+             invariant PaymentWithinTotal {{\n    amount.cents <= order.total.cents\n  }}\n}}\n"
+        ));
+        assert!(navigation_issues(&ds).is_empty(), "{ds:?}");
+    }
+
+    #[test]
+    fn navigation_checks_derived_values_optionals_and_this() {
+        let ds = analyze_src(&format!(
+            "{MONEY_75}entity Payment {{\n  order: Order\n  \
+             a: order.totl\n  b: order.refund.centz\n  c: this.ordr\n}}\n"
+        ));
+        assert_eq!(navigation_issues(&ds).len(), 3, "{ds:?}");
+    }
+
+    #[test]
+    fn navigation_stops_at_collections_bindings_and_unknown_types() {
+        // `lines` is a collection, `l` is a lambda binding that shadows
+        // nothing known, `x` is a field of a primitive type, and `ext` is a
+        // type this module does not declare.
+        let ds = analyze_src(&format!(
+            "{MONEY_75}entity Payment {{\n  order: Order\n  x: Integer\n  ext: Elsewhere\n  \
+             n: order.lines.count\n  m: order.lines.any(l => l.price.cents > 0)\n  \
+             p: x.whatever\n  q: ext.anything\n}}\n"
+        ));
+        assert!(navigation_issues(&ds).is_empty(), "{ds:?}");
+    }
+
+    #[test]
+    fn navigation_does_not_resolve_a_shadowed_field_name() {
+        let ds = analyze_src(&format!(
+            "{MONEY_75}entity Payment {{\n  order: Order\n  \
+             orders: Set<Order>\n  \
+             ok: orders.all(order => order.anything)\n}}\n"
+        ));
+        assert!(navigation_issues(&ds).is_empty(), "{ds:?}");
+    }
+
+    #[test]
+    fn navigation_skips_types_with_variants() {
+        let ds = analyze_src(
+            "entity Note {\n  to: String\n  kind: Email | Sms\n}\n\n\
+             variant Email : Note {\n  subject: String\n}\n\n\
+             variant Sms : Note {\n  number: String\n}\n\n\
+             entity Outbox {\n  last: Note\n  s: last.subject\n}\n",
+        );
+        assert!(navigation_issues(&ds).is_empty(), "{ds:?}");
     }
 
     #[test]

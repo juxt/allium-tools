@@ -407,6 +407,22 @@ rule CreatedArgumentNamesUndeclaredField {
     ensures: FindingObserved(code: "allium.created.unknownField", severity: warning)
 }
 
+-- A member chain in an entity or value block (an invariant or a derived value)
+-- that starts from a field of the enclosing type or this must name, at each
+-- step, a field the type reached so far declares. The chain is followed only
+-- while its type is certain: it stops at collections, relationships,
+-- primitives, imported types, names bound by a lambda, for or let, and types
+-- that have variants (#75).
+rule MemberChainNamesUndeclaredField {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: EntityOrValueBlockNavigatesChainToLocalType(chain, type)
+    requires: TypeHasNoVariants(type)
+    requires: TypeDeclaresNoFieldNamed(type, member)
+
+    ensures: FindingObserved(code: "allium.navigation.unknownField", severity: warning)
+}
+
 rule UnresolvedUsePathWarnsInMultiFileMode {
     when: CheckCommandInvokedWithInputs(inputs)
 
