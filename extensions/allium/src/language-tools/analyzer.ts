@@ -412,6 +412,9 @@ function findStatusStateMachineIssues(
 
   const fieldEntityTypes = collectFieldEntityTypes(text, statusByEntity);
   const declaredEdges = collectDeclaredEdges(text);
+  // Targets a rule assigns with no known start state: such a rule can move
+  // the entity from any state, so it witnesses every edge into them.
+  const unguardedTargets = new Map<string, Set<string>>();
 
   const ruleBlocks = blocks.filter((block) => block.kind === "rule");
   for (const rule of ruleBlocks) {
@@ -524,7 +527,10 @@ function findStatusStateMachineIssues(
       }
 
       const sources = requiresByBinding.get(binding);
-      if (!sources) {
+      if (!sources || sources.size === 0) {
+        const unguarded = unguardedTargets.get(entityName) ?? new Set<string>();
+        unguarded.add(target);
+        unguardedTargets.set(entityName, unguarded);
         continue;
       }
       const entityTransitions =
@@ -661,6 +667,33 @@ function findStatusStateMachineIssues(
           "warning",
         ),
       );
+    }
+  }
+
+  // Rule 7c: every declared edge on `status` must be witnessed by a rule that
+  // can produce it. Mirrors the Rust `allium.status.unwitnessedTransition`.
+  for (const [entityName, edges] of collectStatusGraphEdges(text)) {
+    const values = statusByEntity.get(entityName);
+    if (!values) continue;
+    const assigned = assignedByEntity.get(entityName) ?? new Set<string>();
+    if ([...assigned].some((v) => !values.has(v))) continue;
+    const produced = transitionsByEntity.get(entityName);
+    const unguarded = unguardedTargets.get(entityName);
+    for (const edge of edges) {
+      const witnessed =
+        produced?.get(edge.from)?.has(edge.to) || unguarded?.has(edge.to);
+      if (!witnessed) {
+        findings.push(
+          rangeFinding(
+            lineStarts,
+            edge.start,
+            edge.end,
+            "allium.status.unwitnessedTransition",
+            `Declared transition '${edge.from}' → '${edge.to}' on entity '${entityName}' is not produced by any rule.`,
+            "warning",
+          ),
+        );
+      }
     }
   }
 
@@ -1325,6 +1358,51 @@ function collectFieldEntityTypes(
 }
 
 /** Collect declared transition graph edges for edge validation. */
+/** The edges of each entity's `transitions status { ... }` graph, with offsets. */
+function collectStatusGraphEdges(
+  text: string,
+): Map<string, { from: string; to: string; start: number; end: number }[]> {
+  const result = new Map<
+    string,
+    { from: string; to: string; start: number; end: number }[]
+  >();
+  const entityPattern =
+    /^\s*entity\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/gm;
+  for (
+    let entity = entityPattern.exec(text);
+    entity;
+    entity = entityPattern.exec(text)
+  ) {
+    const open = text.indexOf("{", entity.index);
+    const close = open < 0 ? -1 : findMatchingBrace(text, open);
+    if (close < 0) continue;
+    const graph = /\btransitions\s+status\s*\{/g;
+    graph.lastIndex = open + 1;
+    const gm = graph.exec(text);
+    if (!gm || gm.index > close) continue;
+    const gOpen = gm.index + gm[0].length - 1;
+    const gClose = findMatchingBrace(text, gOpen);
+    if (gClose < 0) continue;
+    const edges: { from: string; to: string; start: number; end: number }[] = [];
+    const edgePattern = /([a-z_][a-z0-9_]*)\s*->\s*([a-z_][a-z0-9_]*)/g;
+    edgePattern.lastIndex = gOpen + 1;
+    for (
+      let em = edgePattern.exec(text);
+      em && em.index < gClose;
+      em = edgePattern.exec(text)
+    ) {
+      edges.push({
+        from: em[1],
+        to: em[2],
+        start: em.index,
+        end: em.index + em[0].length,
+      });
+    }
+    result.set(entity[1], edges);
+  }
+  return result;
+}
+
 function collectDeclaredEdges(
   text: string,
 ): Map<string, Set<string>> {

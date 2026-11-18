@@ -1393,6 +1393,24 @@ test("warns on a member chain naming an undeclared field (#75)", () => {
   );
 });
 
+test("warns on a declared status edge no rule produces (#105)", () => {
+  const ticket =
+    "entity Ticket {\n  status: open | review | closed\n\n  transitions status {\n    open -> review\n    open -> closed\n    review -> closed\n    terminal: closed\n  }\n}\n\nrule Open {\n  when: OpenRequested()\n  ensures: Ticket.created(status: open)\n}\n\nrule Submit {\n  when: SubmitRequested(ticket)\n  requires: ticket.status = open\n  ensures: ticket.status = review\n}\n\n";
+  const missing = analyzeAllium(
+    `${ticket}rule Close {\n  when: CloseRequested(ticket)\n  requires: ticket.status = review\n  ensures: ticket.status = closed\n}\n`,
+  ).filter((f) => f.code === "allium.status.unwitnessedTransition");
+  assert.equal(missing.length, 1);
+  assert.ok(missing[0].message.includes("'open' → 'closed'"));
+
+  const unguarded = analyzeAllium(
+    `${ticket}rule ForceClose {\n  when: ForceClose(ticket)\n  ensures: ticket.status = closed\n}\n`,
+  );
+  assert.equal(
+    unguarded.some((f) => f.code === "allium.status.unwitnessedTransition"),
+    false,
+  );
+});
+
 test("rule 14c: empty list literal must target a List<T> field", () => {
   const bad = analyzeAllium(
     `entity E {\n  id: String\n}\ndefault E e = { id: [] }`,

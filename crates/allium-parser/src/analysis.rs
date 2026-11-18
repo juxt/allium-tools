@@ -882,6 +882,9 @@ impl Ctx<'_> {
         let mut terminal_by_entity: HashMap<&str, HashSet<&str>> = HashMap::new();
         let mut has_transitions: HashSet<&str> = HashSet::new();
         let mut declared_edges: HashMap<&str, HashSet<(&str, &str)>> = HashMap::new();
+        // The edges of a graph on `status`, the field whose transitions rules
+        // are tracked for, kept with their spans to anchor unwitnessed edges.
+        let mut status_graph_edges: HashMap<&str, &[TransitionEdge]> = HashMap::new();
         let mut field_entity_types: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
         for entity in self.blocks(BlockKind::Entity) {
             let entity_name = match &entity.name {
@@ -925,6 +928,9 @@ impl Ctx<'_> {
                             .map(|e| (e.from.name.as_str(), e.to.name.as_str()))
                             .collect();
                         declared_edges.insert(entity_name, edges);
+                        if graph.field.name == "status" {
+                            status_graph_edges.insert(entity_name, &graph.edges);
+                        }
                     }
                     _ => {}
                 }
@@ -956,6 +962,9 @@ impl Ctx<'_> {
         }
 
         let mut assigned_by_entity: HashMap<&str, HashSet<&str>> = HashMap::new();
+        // Targets a rule assigns with no known start state: such a rule can
+        // move the entity from any state, so it witnesses every edge into them.
+        let mut unguarded_targets: HashMap<&str, HashSet<&str>> = HashMap::new();
         let mut transitions_by_entity: HashMap<&str, HashMap<&str, HashSet<&str>>> =
             HashMap::new();
         let mut created_issues: Vec<Diagnostic> = Vec::new();
@@ -1016,14 +1025,19 @@ impl Ctx<'_> {
                             .or_default()
                             .insert(target);
 
-                        if let Some(sources) = requires_by_binding.get(binding) {
-                            let entity_transitions =
-                                transitions_by_entity.entry(entity).or_default();
-                            for source in sources {
-                                entity_transitions
-                                    .entry(source)
-                                    .or_default()
-                                    .insert(target);
+                        match requires_by_binding.get(binding) {
+                            Some(sources) if !sources.is_empty() => {
+                                let entity_transitions =
+                                    transitions_by_entity.entry(entity).or_default();
+                                for source in sources {
+                                    entity_transitions
+                                        .entry(source)
+                                        .or_default()
+                                        .insert(target);
+                                }
+                            }
+                            _ => {
+                                unguarded_targets.entry(entity).or_default().insert(target);
                             }
                         }
                     },
@@ -1125,6 +1139,43 @@ impl Ctx<'_> {
                     )
                     .with_code("allium.status.noExit"),
                 );
+            }
+        }
+
+        // Rule 7c: every declared edge must be witnessed by a rule that can
+        // produce it (#105). Skipped for an entity that some rule assigns a
+        // non-literal status, since that rule could produce any edge.
+        let mut entities: Vec<&&str> = status_graph_edges.keys().collect();
+        entities.sort();
+        for entity_name in entities {
+            let Some((_, values)) = status_by_entity.get(*entity_name) else {
+                continue;
+            };
+            if assigned_by_entity
+                .get(*entity_name)
+                .is_some_and(|a| a.iter().any(|v| !values.contains(v)))
+            {
+                continue;
+            }
+            let produced = transitions_by_entity.get(*entity_name);
+            let unguarded = unguarded_targets.get(*entity_name);
+            for edge in status_graph_edges[*entity_name] {
+                let (from, to) = (edge.from.name.as_str(), edge.to.name.as_str());
+                let witnessed = produced
+                    .and_then(|m| m.get(from))
+                    .is_some_and(|targets| targets.contains(to))
+                    || unguarded.is_some_and(|t| t.contains(to));
+                if !witnessed {
+                    self.push(
+                        Diagnostic::warning(
+                            edge.span,
+                            format!(
+                                "Declared transition '{from}' → '{to}' on entity '{entity_name}' is not produced by any rule.",
+                            ),
+                        )
+                        .with_code("allium.status.unwitnessedTransition"),
+                    );
+                }
             }
         }
 
@@ -8957,6 +9008,80 @@ rule ShowsError {
              entity Outbox {\n  last: Note\n  s: last.subject\n}\n",
         );
         assert!(navigation_issues(&ds).is_empty(), "{ds:?}");
+    }
+
+    const TICKET_105: &str = "entity Ticket {\n  status: open | review | closed\n\n  \
+        transitions status {\n    open -> review\n    open -> closed\n    review -> closed\n    \
+        terminal: closed\n  }\n}\n\n\
+        rule Open {\n  when: OpenRequested()\n  ensures: Ticket.created(status: open)\n}\n\n\
+        rule Submit {\n  when: SubmitRequested(ticket)\n  requires: ticket.status = open\n  \
+        ensures: ticket.status = review\n}\n\n";
+
+    fn unwitnessed(ds: &[Diagnostic]) -> Vec<&str> {
+        ds.iter()
+            .filter(|d| d.code == Some("allium.status.unwitnessedTransition"))
+            .map(|d| d.message.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn declared_edge_with_no_producing_rule_warns() {
+        let ds = analyze_src(&format!(
+            "{TICKET_105}rule Close {{\n  when: CloseRequested(ticket)\n  \
+             requires: ticket.status = review\n  ensures: ticket.status = closed\n}}\n"
+        ));
+        assert_eq!(
+            unwitnessed(&ds),
+            ["Declared transition 'open' → 'closed' on entity 'Ticket' is not produced by any rule."],
+            "{ds:?}"
+        );
+    }
+
+    #[test]
+    fn guard_set_witnesses_each_of_its_edges() {
+        let ds = analyze_src(&format!(
+            "{TICKET_105}rule Close {{\n  when: CloseRequested(ticket)\n  \
+             requires: ticket.status in {{open, review}}\n  ensures: ticket.status = closed\n}}\n"
+        ));
+        assert!(unwitnessed(&ds).is_empty(), "{ds:?}");
+    }
+
+    #[test]
+    fn unguarded_assignment_witnesses_every_edge_into_its_target() {
+        let ds = analyze_src(&format!(
+            "{TICKET_105}rule ForceClose {{\n  when: ForceClose(ticket)\n  \
+             ensures: ticket.status = closed\n}}\n"
+        ));
+        assert!(unwitnessed(&ds).is_empty(), "{ds:?}");
+    }
+
+    #[test]
+    fn becomes_trigger_supplies_the_start_state() {
+        let ds = analyze_src(&format!(
+            "{TICKET_105}rule FastTrack {{\n  when: ticket: Ticket.status becomes open\n  \
+             ensures: ticket.status = closed\n}}\n\n\
+             rule Close {{\n  when: CloseRequested(ticket)\n  \
+             requires: ticket.status = review\n  ensures: ticket.status = closed\n}}\n"
+        ));
+        assert!(unwitnessed(&ds).is_empty(), "{ds:?}");
+    }
+
+    #[test]
+    fn non_literal_status_assignment_skips_the_entity() {
+        let ds = analyze_src(&format!(
+            "{TICKET_105}rule SetStatus {{\n  when: StatusSet(ticket, next)\n  \
+             requires: ticket.status = review\n  ensures: ticket.status = next\n}}\n"
+        ));
+        assert!(unwitnessed(&ds).is_empty(), "{ds:?}");
+    }
+
+    #[test]
+    fn graph_on_another_field_is_not_checked_here() {
+        let ds = analyze_src(
+            "entity Job {\n  status: queued | done\n  stage: draft | final\n\n  \
+             transitions stage {\n    draft -> final\n    terminal: final\n  }\n}\n",
+        );
+        assert!(unwitnessed(&ds).is_empty(), "{ds:?}");
     }
 
     #[test]
