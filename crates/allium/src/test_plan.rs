@@ -157,7 +157,7 @@ pub fn generate_test_plan(module: &Module, source: &str) -> TestPlan {
                     emit_enum_obligations(&mut plan, block);
                 }
                 BlockKind::Rule => {
-                    emit_rule_obligations(&mut plan, block, &ctx);
+                    emit_rule_obligations(&mut plan, block, &ctx, source);
                 }
                 BlockKind::Surface => {
                     emit_surface_obligations(&mut plan, block);
@@ -777,7 +777,7 @@ fn emit_enum_obligations(plan: &mut TestPlan, block: &BlockDecl) {
     });
 }
 
-fn emit_rule_obligations(plan: &mut TestPlan, block: &BlockDecl, ctx: &ModuleContext) {
+fn emit_rule_obligations(plan: &mut TestPlan, block: &BlockDecl, ctx: &ModuleContext, source: &str) {
     let name = block_name(block);
     let deps = extract_rule_dependencies(block, ctx);
 
@@ -794,17 +794,17 @@ fn emit_rule_obligations(plan: &mut TestPlan, block: &BlockDecl, ctx: &ModuleCon
     });
 
     // Walk items for specific obligations
-    walk_rule_items(plan, &name, &block.items, &deps);
+    walk_rule_items(plan, &name, &block.items, &deps, source);
 }
 
-fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], deps: &RuleDependencies) {
-    walk_rule_items_inner(plan, rule_name, items, deps, &mut 0, &mut 0);
+fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], deps: &RuleDependencies, source: &str) {
+    walk_rule_items_inner(plan, rule_name, items, deps, source, &mut 0, &mut 0);
 }
 
-fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], deps: &RuleDependencies, failure_ordinal: &mut u32, creation_ordinal: &mut u32) {
+fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], deps: &RuleDependencies, source: &str, failure_ordinal: &mut u32, creation_ordinal: &mut u32) {
     for item in items {
         match &item.kind {
-            BlockItemKind::Clause { keyword, .. } if keyword == "requires" => {
+            BlockItemKind::Clause { keyword, value } if keyword == "requires" => {
                 *failure_ordinal += 1;
                 plan.obligations.push(Obligation {
                     id: format!("rule-failure.{}.{}", rule_name, failure_ordinal),
@@ -814,7 +814,7 @@ fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockIte
                         rule_name
                     ),
                     source_construct: rule_name.to_string(),
-                    expression: None,
+                    expression: Some(span_text(source, value.span())),
                     source_span: SourceSpan { start: item.span.start, end: item.span.end },
                     detail: None,
                     dependencies: Some(deps.clone()),
@@ -848,7 +848,7 @@ fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockIte
                             rule_name
                         ),
                         source_construct: rule_name.to_string(),
-                        expression: None,
+                        expression: Some(span_text(source, value.span())),
                         source_span: SourceSpan { start: item.span.start, end: item.span.end },
                         detail: None,
                         dependencies: Some(deps.clone()),
@@ -866,7 +866,7 @@ fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockIte
                             rule_name
                         ),
                         source_construct: rule_name.to_string(),
-                        expression: None,
+                        expression: Some(span_text(source, value.span())),
                         source_span: SourceSpan { start: item.span.start, end: item.span.end },
                         detail: None,
                         dependencies: Some(deps.clone()),
@@ -874,14 +874,14 @@ fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockIte
                 }
             }
             BlockItemKind::ForBlock { items, .. } => {
-                walk_rule_items_inner(plan, rule_name, items, deps, failure_ordinal, creation_ordinal);
+                walk_rule_items_inner(plan, rule_name, items, deps, source, failure_ordinal, creation_ordinal);
             }
             BlockItemKind::IfBlock { branches, else_items } => {
                 for branch in branches {
-                    walk_rule_items_inner(plan, rule_name, &branch.items, deps, failure_ordinal, creation_ordinal);
+                    walk_rule_items_inner(plan, rule_name, &branch.items, deps, source, failure_ordinal, creation_ordinal);
                 }
                 if let Some(else_items) = else_items {
-                    walk_rule_items_inner(plan, rule_name, else_items, deps, failure_ordinal, creation_ordinal);
+                    walk_rule_items_inner(plan, rule_name, else_items, deps, source, failure_ordinal, creation_ordinal);
                 }
             }
             _ => {}

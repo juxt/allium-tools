@@ -19,6 +19,7 @@ Commands:
   analyse  Analyse process completeness: data flow, reachability, conflicts (JSON)
   parse    Parse a spec file and print the AST as JSON
   plan     Derive test obligations from a spec
+  diff     Compare the test obligations of two specs or plans
   model    Extract the domain model as structured data
   help     Print help for the CLI or for a specific command
 
@@ -73,15 +74,66 @@ error-severity diagnostic (e.g. it does not parse).
 const PLAN_HELP: &str = "\
 allium plan - derive test obligations from a spec
 
-Usage: allium plan <file.allium>
+Usage: allium plan [--format json|tsv] <file.allium>
 
-Prints a JSON document describing the test plan implied by the spec,
-including invariants, rule pre- and post-conditions, and transitions.
+Prints the test obligations implied by the spec, including invariants,
+rule pre- and post-conditions, and transitions.
 
-The output carries a `diagnostics` array mirroring `check`. Exits
-non-zero if the spec carries an error-severity diagnostic, so an empty
-obligation set from a spec that does not parse is not mistaken for a
-valid spec that legitimately has none.
+--format json (the default) prints one JSON document:
+  {\"version\": n, \"obligations\": [...], \"diagnostics\": [...]}
+Each obligation carries `id`, `category`, `description`,
+`source_construct` and `source_span` {`start`, `end`} (byte offsets),
+plus `expression`, `detail` and `dependencies` where they apply. The
+`diagnostics` array mirrors `check`.
+
+--format tsv prints one obligation per line, with five tab-separated
+columns and no header:
+  id  category  source_construct  description  expression
+`expression` is empty where the obligation has none. A tab, newline,
+carriage return or backslash inside a value is written as \\t, \\n, \\r
+or \\\\. Diagnostics go to stderr as `file:line:col: severity: message
+[code]`.
+
+Exits non-zero if the spec carries an error-severity diagnostic, so an
+empty obligation set from a spec that does not parse is not mistaken for
+a valid spec that legitimately has none.
+";
+
+const DIFF_HELP: &str = "\
+allium diff - compare the test obligations of two specs or plans
+
+Usage: allium diff [--format tsv|json] <old> <new>
+
+Each input is a spec, or the output of `allium plan` in either format.
+The kind is read from the content: a JSON object is a plan, a file
+ending in `.allium` or starting with `-- allium:` is a spec, and lines of
+five tab-separated columns are a plan in TSV form. A spec is planned
+before it is compared. `-` reads one of the inputs from stdin.
+
+--format tsv (the default) prints one line per difference, sorted by id:
+  A  id           added
+  D  id           removed
+  M  id           content changed
+  R  old  new     the same content under a different id
+--format json prints
+  {\"added\": [id], \"removed\": [id], \"changed\": [id],
+   \"moved\": [{\"from\": id, \"to\": id}]}
+
+Content is everything in an obligation except its `id` and
+`source_span`. When either input is a TSV plan, content is its four
+columns after the id. Positional ids such as `rule-failure.<Rule>.<n>`
+are renumbered when clauses are added or removed, so an obligation whose
+content now sits under another id is reported as moved rather than as
+changed.
+
+Example, comparing a spec with its last committed version:
+  allium diff <(git show HEAD:spec.allium) spec.allium
+
+Exit codes:
+  0  No differences
+  1  Differences were found
+  2  Usage error, an unreadable input, an input that is neither a spec nor
+     a plan, or a spec with an error-severity diagnostic
 ";
 
 const MODEL_HELP: &str = "\
@@ -124,7 +176,7 @@ fn main() -> ExitCode {
     let rest = &args[1..];
 
     match subcommand {
-        "check" | "analyse" | "parse" | "plan" | "model" => {
+        "check" | "analyse" | "parse" | "plan" | "diff" | "model" => {
             if rest.iter().any(|a| a == "--help" || a == "-h") {
                 print!("{}", subcommand_help(subcommand));
                 return ExitCode::SUCCESS;
@@ -134,6 +186,7 @@ fn main() -> ExitCode {
                 "analyse" => cmd_analyse(rest),
                 "parse" => cmd_parse(rest),
                 "plan" => cmd_plan(rest),
+                "diff" => cmd_diff(rest),
                 "model" => cmd_model(rest),
                 _ => unreachable!(),
             }
@@ -152,7 +205,7 @@ fn cmd_help(args: &[String]) -> ExitCode {
             print!("{HELP}");
             ExitCode::SUCCESS
         }
-        Some("check") | Some("analyse") | Some("parse") | Some("plan") | Some("model") => {
+        Some("check") | Some("analyse") | Some("parse") | Some("plan") | Some("diff") | Some("model") => {
             print!("{}", subcommand_help(args[0].as_str()));
             ExitCode::SUCCESS
         }
@@ -170,6 +223,7 @@ fn subcommand_help(name: &str) -> &'static str {
         "analyse" => ANALYSE_HELP,
         "parse" => PARSE_HELP,
         "plan" => PLAN_HELP,
+        "diff" => DIFF_HELP,
         "model" => MODEL_HELP,
         _ => HELP,
     }
@@ -729,10 +783,337 @@ fn cmd_parse(args: &[String]) -> ExitCode {
 }
 
 fn cmd_plan(args: &[String]) -> ExitCode {
-    run_single_file("allium plan <file.allium>", args, |module, source| {
-        let plan = test_plan::generate_test_plan(module, source);
-        serde_json::to_value(plan).unwrap()
-    })
+    let usage = "allium plan [--format json|tsv] <file.allium>";
+    let Some((format, files)) = parse_format(args, OutputFormat::Json) else {
+        eprintln!("Usage: {usage}");
+        return ExitCode::from(2);
+    };
+    if format == OutputFormat::Json {
+        return run_single_file(usage, &files, |module, source| {
+            let plan = test_plan::generate_test_plan(module, source);
+            serde_json::to_value(plan).unwrap()
+        });
+    }
+
+    if files.len() != 1 {
+        eprintln!("Usage: {usage}");
+        return ExitCode::from(2);
+    }
+    let path = Path::new(&files[0]);
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{}: {e}", path.display());
+            return ExitCode::from(1);
+        }
+    };
+    let result = allium_parser::parse(&source);
+    let plan = test_plan::generate_test_plan(&result.module, &source);
+    let mut out = String::new();
+    for o in &plan.obligations {
+        let o = serde_json::to_value(o).unwrap();
+        let row = obligation_row(&o);
+        out.push_str(&tsv_escape(&json_str(&o, "id")));
+        for value in &row {
+            out.push('\t');
+            out.push_str(&tsv_escape(value));
+        }
+        out.push('\n');
+    }
+    print!("{out}");
+    let source_map = SourceMap::new(&source);
+    for d in &result.diagnostics {
+        eprintln!("{}", diagnostic_line(d, path, &source_map));
+    }
+    single_file_exit(&result.diagnostics)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum OutputFormat {
+    Json,
+    Tsv,
+}
+
+/// Splits `--format <json|tsv>` (or `--format=<value>`) from the positional
+/// arguments. None on an unknown format, a missing value or an unknown option.
+fn parse_format(args: &[String], default: OutputFormat) -> Option<(OutputFormat, Vec<String>)> {
+    let mut format = default;
+    let mut positional = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let value = if arg == "--format" {
+            rest.next()?.as_str()
+        } else if let Some(value) = arg.strip_prefix("--format=") {
+            value
+        } else if arg.starts_with('-') && arg != "-" {
+            return None;
+        } else {
+            positional.push(arg.clone());
+            continue;
+        };
+        format = match value {
+            "json" => OutputFormat::Json,
+            "tsv" => OutputFormat::Tsv,
+            _ => return None,
+        };
+    }
+    Some((format, positional))
+}
+
+fn json_str(o: &serde_json::Value, key: &str) -> String {
+    o.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+}
+
+/// The TSV columns of an obligation after its id.
+fn obligation_row(o: &serde_json::Value) -> [String; 4] {
+    ["category", "source_construct", "description", "expression"].map(|key| json_str(o, key))
+}
+
+fn tsv_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn tsv_unescape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+fn diagnostic_line(d: &allium_parser::Diagnostic, path: &Path, source_map: &SourceMap) -> String {
+    let json = diagnostic_to_json(d, path, source_map);
+    format!(
+        "{}:{}:{}: {}: {} [{}]",
+        path.display(),
+        json["location"]["line"],
+        json["location"]["col"],
+        json_str(&json, "severity"),
+        json_str(&json, "message"),
+        json_str(&json, "code"),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// diff
+// ---------------------------------------------------------------------------
+
+/// One obligation as `diff` compares it. `full` is the obligation without its
+/// id and source span; a TSV plan carries only `row`.
+struct PlanEntry {
+    id: String,
+    full: Option<String>,
+    row: [String; 4],
+}
+
+fn cmd_diff(args: &[String]) -> ExitCode {
+    let usage = "allium diff [--format tsv|json] <old> <new>";
+    let Some((format, inputs)) = parse_format(args, OutputFormat::Tsv) else {
+        eprintln!("Usage: {usage}");
+        return ExitCode::from(2);
+    };
+    if inputs.len() != 2 || inputs.iter().all(|i| i == "-") {
+        eprintln!("Usage: {usage}");
+        return ExitCode::from(2);
+    }
+    let (old, new) = match (load_plan_entries(&inputs[0]), load_plan_entries(&inputs[1])) {
+        (Ok(old), Ok(new)) => (old, new),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let use_full = old.iter().chain(&new).all(|e| e.full.is_some());
+    let content = |e: &PlanEntry| match (&e.full, use_full) {
+        (Some(full), true) => full.clone(),
+        _ => e.row.join("\t"),
+    };
+    let changes = diff_plans(&old, &new, content);
+
+    match format {
+        OutputFormat::Tsv => {
+            for change in &changes {
+                match change {
+                    PlanChange::Added(id) => println!("A\t{id}"),
+                    PlanChange::Removed(id) => println!("D\t{id}"),
+                    PlanChange::Changed(id) => println!("M\t{id}"),
+                    PlanChange::Moved(from, to) => println!("R\t{from}\t{to}"),
+                }
+            }
+        }
+        OutputFormat::Json => {
+            let pick = |f: fn(&PlanChange) -> Option<serde_json::Value>| {
+                changes.iter().filter_map(f).collect::<Vec<_>>()
+            };
+            let output = serde_json::json!({
+                "added": pick(|c| match c { PlanChange::Added(id) => Some(id.as_str().into()), _ => None }),
+                "removed": pick(|c| match c { PlanChange::Removed(id) => Some(id.as_str().into()), _ => None }),
+                "changed": pick(|c| match c { PlanChange::Changed(id) => Some(id.as_str().into()), _ => None }),
+                "moved": pick(|c| match c {
+                    PlanChange::Moved(from, to) => Some(serde_json::json!({"from": from, "to": to})),
+                    _ => None,
+                }),
+            });
+            println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        }
+    }
+    if changes.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum PlanChange {
+    Added(String),
+    Removed(String),
+    Changed(String),
+    Moved(String, String),
+}
+
+impl PlanChange {
+    fn sort_id(&self) -> &str {
+        match self {
+            PlanChange::Added(id) | PlanChange::Removed(id) | PlanChange::Changed(id) => id,
+            PlanChange::Moved(from, _) => from,
+        }
+    }
+}
+
+/// Pairs obligations in four passes: same id and content (unchanged), same
+/// content under another id (moved, paired in plan order), same id with
+/// other content (changed), and the rest (added or removed).
+fn diff_plans(old: &[PlanEntry], new: &[PlanEntry], content: impl Fn(&PlanEntry) -> String) -> Vec<PlanChange> {
+    let new_content: HashMap<&str, String> = new.iter().map(|e| (e.id.as_str(), content(e))).collect();
+    let old_content: HashMap<&str, String> = old.iter().map(|e| (e.id.as_str(), content(e))).collect();
+    let unchanged = |id: &str, c: &String| new_content.get(id) == Some(c);
+    let mut old_left: Vec<(&str, String)> = old
+        .iter()
+        .map(|e| (e.id.as_str(), content(e)))
+        .filter(|(id, c)| !unchanged(id, c))
+        .collect();
+    let mut new_left: Vec<(&str, String)> = new
+        .iter()
+        .map(|e| (e.id.as_str(), content(e)))
+        .filter(|(id, c)| old_content.get(id) != Some(c))
+        .collect();
+
+    let mut changes = Vec::new();
+    old_left.retain(|(old_id, c)| match new_left.iter().position(|(_, n)| n == c) {
+        Some(i) => {
+            changes.push(PlanChange::Moved(old_id.to_string(), new_left.remove(i).0.to_string()));
+            false
+        }
+        None => true,
+    });
+    let new_ids: HashSet<&str> = new_left.iter().map(|(id, _)| *id).collect();
+    let old_ids: HashSet<&str> = old_left.iter().map(|(id, _)| *id).collect();
+    for (id, _) in &old_left {
+        changes.push(if new_ids.contains(id) {
+            PlanChange::Changed(id.to_string())
+        } else {
+            PlanChange::Removed(id.to_string())
+        });
+    }
+    for (id, _) in &new_left {
+        if !old_ids.contains(id) {
+            changes.push(PlanChange::Added(id.to_string()));
+        }
+    }
+    changes.sort_by(|a, b| a.sort_id().cmp(b.sort_id()));
+    changes
+}
+
+/// Reads one `diff` input and works out what it is: a JSON plan, a spec, or
+/// a TSV plan.
+fn load_plan_entries(input: &str) -> Result<Vec<PlanEntry>, String> {
+    let text = if input == "-" {
+        std::io::read_to_string(std::io::stdin())
+    } else {
+        std::fs::read_to_string(input)
+    }
+    .map_err(|e| format!("{input}: {e}"))?;
+    let trimmed = text.trim_start();
+
+    let obligations: Vec<serde_json::Value> = if trimmed.starts_with('{') {
+        let plan: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("{input}: invalid JSON: {e}"))?;
+        plan.get("obligations")
+            .and_then(|o| o.as_array())
+            .cloned()
+            .ok_or_else(|| format!("{input}: JSON without an `obligations` array is not a plan"))?
+    } else if input.ends_with(".allium") || trimmed.starts_with("-- allium:") {
+        let result = allium_parser::parse(&text);
+        let path = Path::new(input);
+        let source_map = SourceMap::new(&text);
+        let errors: Vec<String> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| diagnostic_line(d, path, &source_map))
+            .collect();
+        if !errors.is_empty() {
+            return Err(errors.join("\n"));
+        }
+        let plan = test_plan::generate_test_plan(&result.module, &text);
+        plan.obligations.iter().map(|o| serde_json::to_value(o).unwrap()).collect()
+    } else {
+        return text
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let cols: Vec<String> = line.split('\t').map(tsv_unescape).collect();
+                match <[String; 5]>::try_from(cols) {
+                    Ok([id, category, construct, description, expression]) => Ok(PlanEntry {
+                        id,
+                        full: None,
+                        row: [category, construct, description, expression],
+                    }),
+                    Err(_) => Err(format!(
+                        "{input}: not a spec, a JSON plan or a TSV plan (expected five tab-separated columns)"
+                    )),
+                }
+            })
+            .collect();
+    };
+
+    obligations
+        .iter()
+        .map(|o| {
+            let id = o.get("id").and_then(|v| v.as_str()).ok_or_else(|| format!("{input}: an obligation has no `id`"))?;
+            let mut full = o.as_object().cloned().unwrap_or_default();
+            full.remove("id");
+            full.remove("source_span");
+            Ok(PlanEntry {
+                id: id.to_string(),
+                full: Some(serde_json::Value::Object(full).to_string()),
+                row: obligation_row(o),
+            })
+        })
+        .collect()
 }
 
 fn cmd_model(args: &[String]) -> ExitCode {

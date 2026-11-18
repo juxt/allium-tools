@@ -36,7 +36,7 @@ fn help_subcommand_prints_top_level_help() {
 
 #[test]
 fn help_subcommand_prints_specific_command_help() {
-    for command in ["check", "parse", "plan", "model"] {
+    for command in ["check", "parse", "plan", "diff", "model"] {
         let output = allium().args(["help", command]).output().expect("spawn allium");
         assert!(output.status.success(), "help {command} did not exit 0");
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -50,7 +50,7 @@ fn help_subcommand_prints_specific_command_help() {
 
 #[test]
 fn subcommand_help_flag_prints_command_help() {
-    for command in ["check", "parse", "plan", "model"] {
+    for command in ["check", "parse", "plan", "diff", "model"] {
         let output = allium().args([command, "--help"]).output().expect("spawn allium");
         assert!(output.status.success(), "{command} --help did not exit 0");
         let stdout = String::from_utf8_lossy(&output.stdout);

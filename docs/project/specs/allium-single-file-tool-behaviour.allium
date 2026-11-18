@@ -6,6 +6,7 @@
 --   - Argument arity and input resolution
 --   - The diagnostics channel carried in the JSON output
 --   - Exit code behavior with respect to parse diagnostics
+--   - The TSV format of `plan`
 -- Excludes:
 --   - The multi-file commands `check` and `analyse` (see their own specs)
 --   - The shape of the command-specific payload (obligations, domain model, AST)
@@ -14,9 +15,14 @@ value SingleFileCommand {
     value: plan | model | parse
 }
 
+value PlanFormat {
+    value: json | tsv
+}
+
 entity SingleFileRun {
     command: SingleFileCommand
     input: String
+    format: PlanFormat
 }
 
 -- The single-file commands' external stimuli. Declared so each listener
@@ -25,6 +31,7 @@ surface SingleFileCli {
     provides:
         SingleFileCommandInvoked(argument_count)
         SingleFileCommandInvokedWithInput(input)
+        SingleFileCommandInvokedWithFormat(format)
         SingleFileRunCompleted(run: SingleFileRun)
 }
 
@@ -51,6 +58,7 @@ rule MissingInputFileIsReported {
 
 rule OutputCarriesDiagnostics {
     when: SingleFileRunCompleted(run)
+    requires: run.format = json
 
     ensures: DiagnosticsArrayEmitted(source: run.input)
 }
@@ -67,4 +75,35 @@ rule NoParseErrorSucceeds {
     requires: run.diagnostics.all(d => d.severity in [info, warning])
 
     ensures: ProcessExit(code: 0)
+}
+
+-- `plan --format tsv` prints one obligation per line for line-oriented
+-- tools: id, category, source_construct, description and expression,
+-- tab-separated, with no header. Tabs, newlines, carriage returns and
+-- backslashes inside a value are escaped.
+rule PlanTsvPrintsOneObligationPerLine {
+    when: SingleFileRunCompleted(run)
+    requires: run.command = plan
+    requires: run.format = tsv
+
+    ensures: OneLinePerObligation(columns: ["id", "category", "source_construct", "description", "expression"])
+    ensures: DiagnosticsPrintedTo(stream: stderr)
+}
+
+-- The positional obligations (`rule-failure.<Rule>.<n>`,
+-- `rule-entity-creation.<Rule>.<n>`) carry their clause's text as
+-- `expression`, so two of them from one rule can be told apart.
+rule PositionalObligationsCarryTheirClause {
+    when: SingleFileRunCompleted(run)
+    requires: run.command = plan
+
+    ensures: PositionalObligationsCarryExpression()
+}
+
+rule UnknownFormatIsRejected {
+    when: SingleFileCommandInvokedWithFormat(format)
+    requires: format not in ["json", "tsv"]
+
+    ensures: UsagePrinted()
+    ensures: ProcessExit(code: 2)
 }
