@@ -114,7 +114,12 @@ export function formatAlliumText(
     .map((line) => line.replace(/[ \t]+$/g, ""));
 
   const formattedLines: string[] = [];
-  let indentLevel = 0;
+  // One frame per open brace. Within a frame, a line's depth comes from the
+  // author's own indentation relative to the frame's first line: clause
+  // bodies (`provides:`, `ensures:`, `for ...:`) and multi-line call
+  // arguments are marked only by being indented further, so that relative
+  // structure is kept and re-expressed in `indentWidth` steps (#114).
+  const frames: BraceFrame[] = [{ level: 0, base: null, columns: [] }];
 
   for (const rawLine of lines) {
     const trimmed = rawLine.trim();
@@ -129,11 +134,40 @@ export function formatAlliumText(
       continue;
     }
 
-    const leadingClosers = countLeadingClosers(trimmed);
-    indentLevel = Math.max(indentLevel - leadingClosers, 0);
+    const { leadingClosers, opens, trailingClosers } = scanBraces(trimmed);
+    let lineLevel: number;
+    if (leadingClosers > 0) {
+      // A closing line aligns with the line that opened the brace.
+      let closedLevel = frames[frames.length - 1].level;
+      for (let i = 0; i < leadingClosers && frames.length > 1; i += 1) {
+        closedLevel = frames.pop()!.level;
+      }
+      lineLevel = Math.max(closedLevel - 1, 0);
+    } else {
+      const frame = frames[frames.length - 1];
+      const column = leadingColumn(rawLine, indentWidth);
+      if (frame.base === null || column <= frame.base) {
+        frame.base ??= column;
+        frame.columns.length = 0;
+      } else {
+        while (
+          frame.columns.length > 0 &&
+          frame.columns[frame.columns.length - 1] > column
+        ) {
+          frame.columns.pop();
+        }
+        if (
+          frame.columns.length === 0 ||
+          frame.columns[frame.columns.length - 1] < column
+        ) {
+          frame.columns.push(column);
+        }
+      }
+      lineLevel = frame.level + frame.columns.length;
+    }
 
     const isTopLevelDeclaration =
-      indentLevel === 0 && isTopLevelDeclarationLine(trimmed);
+      lineLevel === 0 && isTopLevelDeclarationLine(trimmed);
     const prevNonBlank = lastNonBlankLine(formattedLines);
     if (
       isTopLevelDeclaration &&
@@ -147,15 +181,17 @@ export function formatAlliumText(
       }
     }
 
-    const indent = " ".repeat(indentLevel * indentWidth);
+    const indent = " ".repeat(lineLevel * indentWidth);
     formattedLines.push(
       `${indent}${normalizePipeSpacing(normalizeDeclarationHeaderSpacing(trimmed))}`,
     );
 
-    const openCount = countOccurrences(trimmed, "{");
-    const closeCount = countOccurrences(trimmed, "}");
-    const trailingCloseCount = Math.max(closeCount - leadingClosers, 0);
-    indentLevel = Math.max(indentLevel + openCount - trailingCloseCount, 0);
+    for (let i = 0; i < trailingClosers && frames.length > 1; i += 1) {
+      frames.pop();
+    }
+    for (let i = 1; i <= opens; i += 1) {
+      frames.push({ level: lineLevel + i, base: null, columns: [] });
+    }
   }
 
   const withoutTrailingBlankLines = formattedLines
@@ -164,20 +200,81 @@ export function formatAlliumText(
   return `${withoutTrailingBlankLines}\n`;
 }
 
-function countOccurrences(text: string, token: string): number {
-  return text.split(token).length - 1;
+interface BraceFrame {
+  /** Indentation level of the brace block's own lines. */
+  level: number;
+  /** The original column of the block's first line, once seen. */
+  base: number | null;
+  /** Original columns deeper than `base`, innermost last. */
+  columns: number[];
 }
 
-function countLeadingClosers(text: string): number {
-  let count = 0;
-  for (const char of text) {
-    if (char === "}") {
-      count += 1;
+function leadingColumn(line: string, tabWidth: number): number {
+  let column = 0;
+  for (const char of line) {
+    if (char === " ") {
+      column += 1;
+    } else if (char === "\t") {
+      column += tabWidth;
+    } else {
+      break;
+    }
+  }
+  return column;
+}
+
+/**
+ * Counts the braces on a line that change nesting, skipping those inside
+ * string or backtick literals and in a trailing `--` comment (#114).
+ * `leadingClosers` are the `}` before any other code; `opens` and
+ * `trailingClosers` are what remains after the line, net of each other.
+ */
+function scanBraces(line: string): {
+  leadingClosers: number;
+  opens: number;
+  trailingClosers: number;
+} {
+  let leadingClosers = 0;
+  let depth = 0;
+  let minDepth = 0;
+  let sawCode = false;
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (quote !== null) {
+      if (char === "\\" && quote === '"') {
+        i += 1;
+      } else if (char === quote) {
+        quote = null;
+      }
       continue;
     }
-    break;
+    if (char === "-" && line[i + 1] === "-") {
+      break;
+    }
+    if (char === '"' || char === "`") {
+      quote = char;
+      sawCode = true;
+      continue;
+    }
+    if (char === "}") {
+      if (!sawCode) {
+        leadingClosers += 1;
+        continue;
+      }
+      depth -= 1;
+      minDepth = Math.min(minDepth, depth);
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char !== " " && char !== "\t") {
+      sawCode = true;
+    }
+    if (char === "{") {
+      sawCode = true;
+    }
   }
-  return count;
+  const trailingClosers = -minDepth;
+  return { leadingClosers, opens: depth - minDepth, trailingClosers };
 }
 
 function parseArgs(argv: string[]): ParsedArgs | null {
