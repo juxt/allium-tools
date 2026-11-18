@@ -814,7 +814,7 @@ fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockIte
                         rule_name
                     ),
                     source_construct: rule_name.to_string(),
-                    expression: Some(span_text(source, value.span())),
+                    expression: Some(clause_text(&span_text(source, value.span()))),
                     source_span: SourceSpan { start: item.span.start, end: item.span.end },
                     detail: None,
                     dependencies: Some(deps.clone()),
@@ -848,7 +848,7 @@ fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockIte
                             rule_name
                         ),
                         source_construct: rule_name.to_string(),
-                        expression: Some(span_text(source, value.span())),
+                        expression: Some(creation_text(source, value)),
                         source_span: SourceSpan { start: item.span.start, end: item.span.end },
                         detail: None,
                         dependencies: Some(deps.clone()),
@@ -866,7 +866,7 @@ fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockIte
                             rule_name
                         ),
                         source_construct: rule_name.to_string(),
-                        expression: Some(span_text(source, value.span())),
+                        expression: Some(creation_text(source, value)),
                         source_span: SourceSpan { start: item.span.start, end: item.span.end },
                         detail: None,
                         dependencies: Some(deps.clone()),
@@ -1034,6 +1034,70 @@ fn contains_temporal(expr: &Expr) -> bool {
         Expr::Block { items, .. } => items.iter().any(contains_temporal),
         _ => false,
     }
+}
+
+/// The `.created(...)` calls that make a clause an entity creation, as
+/// normalised text, one per line.
+fn creation_text(source: &str, expr: &Expr) -> String {
+    fn collect<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match expr {
+            Expr::Block { items, .. } => items.iter().for_each(|item| collect(item, out)),
+            e if contains_entity_creation(e) => out.push(e),
+            _ => {}
+        }
+    }
+    let mut calls = Vec::new();
+    collect(expr, &mut calls);
+    calls
+        .iter()
+        .map(|call| clause_text(&span_text(source, call.span())))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Clause text without comments, with each run of whitespace outside a
+/// string or backtick literal collapsed to one space, so a comment edit or a
+/// re-indent leaves it unchanged.
+fn clause_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut pending_space = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '-' if chars.peek() == Some(&'-') => {
+                while chars.peek().is_some_and(|&n| n != '\n') {
+                    chars.next();
+                }
+                pending_space = true;
+            }
+            c if c.is_whitespace() => pending_space = true,
+            '"' | '`' => {
+                if pending_space && !out.is_empty() {
+                    out.push(' ');
+                }
+                pending_space = false;
+                out.push(c);
+                while let Some(n) = chars.next() {
+                    out.push(n);
+                    if n == '\\' && c == '"' {
+                        if let Some(escaped) = chars.next() {
+                            out.push(escaped);
+                        }
+                    } else if n == c {
+                        break;
+                    }
+                }
+            }
+            c => {
+                if pending_space && !out.is_empty() {
+                    out.push(' ');
+                }
+                pending_space = false;
+                out.push(c);
+            }
+        }
+    }
+    out
 }
 
 fn contains_entity_creation(expr: &Expr) -> bool {
@@ -1685,6 +1749,36 @@ mod tests {
 
     fn to_json(plan: &TestPlan) -> serde_json::Value {
         serde_json::to_value(plan).unwrap()
+    }
+
+    #[test]
+    fn clause_text_drops_comments_and_collapses_whitespace() {
+        assert_eq!(
+            clause_text("order.status = pending -- must be open\n        and order.total > 0"),
+            "order.status = pending and order.total > 0"
+        );
+    }
+
+    #[test]
+    fn clause_text_keeps_literals_as_written() {
+        assert_eq!(clause_text("note = \"a  -- b\"  and  `x  y`"), "note = \"a  -- b\" and `x  y`");
+        assert_eq!(clause_text("note = \"say \\\"hi\\\"  now\""), "note = \"say \\\"hi\\\"  now\"");
+    }
+
+    #[test]
+    fn creation_obligation_carries_only_its_created_calls() {
+        let source = "-- allium: 3\n\n\
+            entity User {\n    email: String\n}\n\n\
+            entity Audit {\n    note: String\n}\n\n\
+            rule Signup {\n    when: SignedUp(email)\n    ensures:\n        \
+            -- make the user\n        User.created(\n            email: email\n        )\n        \
+            Audit.created(note: \"signup\")\n        Notified(email: email)\n}\n";
+        let plan = parse_plan(source);
+        let ob = find_obligation(&plan, "rule-entity-creation.Signup.1");
+        assert_eq!(
+            ob.expression.as_deref(),
+            Some("User.created( email: email )\nAudit.created(note: \"signup\")")
+        );
     }
 
     fn find_obligation<'a>(plan: &'a TestPlan, id_substring: &str) -> &'a Obligation {

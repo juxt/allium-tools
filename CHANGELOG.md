@@ -4,7 +4,7 @@ Behaviour changes worth knowing before you upgrade. Releases ship from a single 
 
 ## Unreleased
 
-`allium plan --format tsv` prints one obligation per line, with id, category, source construct, description and expression as tab-separated columns, so `grep`, `cut`, `sort` and `comm` can select, count and compare obligations. JSON stays the default. The positional obligations `rule-failure.<Rule>.<n>` and `rule-entity-creation.<Rule>.<n>` now carry their clause's text as `expression`, so two from the same rule can be told apart.
+`allium plan --format tsv` prints one obligation per line, with id, category, source construct, description and expression as tab-separated columns, so `grep`, `cut`, `sort` and `comm` can select, count and compare obligations. JSON stays the default. The positional obligations now carry the text they test as `expression`, so two from the same rule can be told apart: the `requires` clause for `rule-failure.<Rule>.<n>`, and the `.created(...)` calls for `rule-entity-creation.<Rule>.<n>`. Comments are dropped and whitespace is collapsed, so editing a comment or re-indenting leaves the text unchanged.
 
 The new `allium diff old new` compares the test obligations of two specs, or of two `allium plan` outputs in either format, and works out which it has been given from the content. It prints one line per difference in the style of `git diff --name-status`: `A`, `D`, `M`, and `R` for an obligation whose content now sits under another id, as happens when a clause is added above it. `--format json` gives the same result as JSON. It exits 0 when there are no differences, 1 when there are and 2 on an error (#116).
 

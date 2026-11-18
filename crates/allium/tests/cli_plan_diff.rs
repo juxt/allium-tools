@@ -90,11 +90,30 @@ fn plan_json_carries_the_requires_clause_as_expression() {
 }
 
 #[test]
-fn plan_tsv_escapes_newlines_in_values() {
-    let s = TempFile::new("multiline.allium", &spec(&["order.status = pending\n        and order.total > 0"]));
+fn plan_expression_ignores_comments_and_layout() {
+    let s = TempFile::new("multiline.allium", &spec(&["order.status = pending -- open orders only\n        and order.total > 0"]));
     let text = stdout(&run(&["plan", "--format", "tsv", &s.arg()]));
     let line = text.lines().find(|l| l.starts_with("rule-failure.Pay.1\t")).expect(&text);
-    assert!(line.ends_with("order.status = pending\\n        and order.total > 0"), "{line}");
+    assert!(line.ends_with("\torder.status = pending and order.total > 0"), "{line}");
+}
+
+#[test]
+fn diff_ignores_a_comment_edit_or_reindent() {
+    let old = TempFile::new("cmt-old.allium", &spec(&["order.status = pending -- open\n        and order.total > 0"]));
+    let new = TempFile::new("cmt-new.allium", &spec(&["order.status = pending -- only open orders\n            and order.total > 0"]));
+    let out = run(&["diff", &old.arg(), &new.arg()]);
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+}
+
+#[test]
+fn plan_tsv_escapes_newlines_in_values() {
+    let s = TempFile::new("two-creations.allium", "-- allium: 3\n\n\
+        entity A {\n    n: Integer\n}\n\nentity B {\n    n: Integer\n}\n\n\
+        rule Make {\n    when: Go()\n    ensures:\n        A.created(n: 1)\n        B.created(n: 2)\n}\n\n\
+        surface S {\n    provides:\n        Go()\n}\n");
+    let text = stdout(&run(&["plan", "--format", "tsv", &s.arg()]));
+    let line = text.lines().find(|l| l.starts_with("rule-entity-creation.Make.1\t")).expect(&text);
+    assert!(line.ends_with("\tA.created(n: 1)\\nB.created(n: 2)"), "{line}");
 }
 
 #[test]
