@@ -31,6 +31,7 @@ entity Order {
     cancelled_at: Timestamp when status = cancelled
     cancelled_by: String? when status = cancelled
     locale: Locale
+    total: Integer
 
     transitions status {
         pending -> confirmed

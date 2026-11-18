@@ -1374,6 +1374,25 @@ test("warns on a .created() argument the entity does not declare (#75)", () => {
   );
 });
 
+test("warns on a member chain naming an undeclared field (#75)", () => {
+  const types =
+    "value Money {\n  cents: Integer\n}\nentity Order {\n  total: Money\n  lines: Set<Order>\n}\n";
+  const typo = analyzeAllium(
+    `${types}entity Payment {\n  order: Order\n  amount: Money\n  invariant Within {\n    amount.cents <= order.total.centz\n  }\n}`,
+  );
+  const found = typo.filter((f) => f.code === "allium.navigation.unknownField");
+  assert.equal(found.length, 1);
+  assert.equal(found[0].message, "'centz' is not a field of 'Money'.");
+
+  const clean = analyzeAllium(
+    `${types}entity Payment {\n  order: Order\n  amount: Money\n  x: Integer\n  a: this.order.total.cents\n  b: order.lines.any(order => order.anything)\n  c: x.whatever\n  invariant Within {\n    amount.cents <= order.total.cents\n  }\n}`,
+  );
+  assert.equal(
+    clean.some((f) => f.code === "allium.navigation.unknownField"),
+    false,
+  );
+});
+
 test("rule 14c: empty list literal must target a List<T> field", () => {
   const bad = analyzeAllium(
     `entity E {\n  id: String\n}\ndefault E e = { id: [] }`,
