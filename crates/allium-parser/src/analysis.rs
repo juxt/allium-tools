@@ -5843,6 +5843,11 @@ fn collect_qrefs_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<QRef<'a>>)
     }
 }
 
+/// The built-in dot-methods on collections (language reference, validation
+/// rule 14a).
+const BUILTIN_COLLECTION_METHODS: [&str; 8] =
+    ["count", "any", "all", "first", "last", "unique", "add", "remove"];
+
 fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
     match expr {
         Expr::QualifiedName(q) => {
@@ -5852,6 +5857,17 @@ fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
         }
         Expr::MemberAccess { object, field, .. }
         | Expr::OptionalAccess { object, field, .. } => {
+            // The receiver of a built-in collection method (`alias/Things.count`,
+            // `alias/Things.any(...)`) is an entity collection, exempt from the
+            // membership test like a `for … in` iterable (#108).
+            if let Expr::QualifiedName(QualifiedName { qualifier: Some(qualifier), name, span }) =
+                object.as_ref()
+            {
+                if BUILTIN_COLLECTION_METHODS.contains(&field.name.as_str()) {
+                    out.push(QRef { qualifier, name, span: *span, collection: true });
+                    return;
+                }
+            }
             // Detect alias.TypeName pattern (e.g. core.EntityMap in exposes)
             if let Expr::Ident(id) = object.as_ref() {
                 if starts_uppercase(&field.name) {

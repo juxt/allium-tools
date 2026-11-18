@@ -512,7 +512,8 @@ rule UndeclaredImportAliasIsDiagnosedAtEveryReferenceSite {
 -- name-existence audit). A target outside the check set is unknowable.
 --
 -- One reference form is exempt: a name in a collection-consuming position
--- (a `for … in` / `in` / `where` iterable, or a `let` value) is an entity
+-- (a `for … in` / `in` / `where` iterable, a `let` value, or the receiver of a
+-- built-in collection method such as `.count` or `.any()`) is an entity
 -- collection, the pluralised form of an entity. The offered set holds declared
 -- singular names, never the derived plural, and the checker has no
 -- pluralisation model, so the membership test can neither confirm nor refute a

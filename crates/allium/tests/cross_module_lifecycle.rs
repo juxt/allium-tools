@@ -1035,9 +1035,10 @@ const TICKETS_82: &str = "-- allium: 3\n-- tickets.allium\n\n\
 
 #[test]
 fn qualified_collection_reference_is_not_diagnosed_at_any_site() {
-    // The three homes of an entity collection, per the language reference and
-    // the report: a top-level invariant, a rule-level `for`, a surface `let`.
-    let sites: [(&str, &str); 3] = [
+    // The homes of an entity collection, per the language reference and the
+    // reports: a top-level invariant, a rule-level `for`, a surface `let`, and
+    // the receiver of a built-in collection method (#108).
+    let sites: [(&str, &str); 5] = [
         (
             "invariant",
             "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
@@ -1053,6 +1054,16 @@ fn qualified_collection_reference_is_not_diagnosed_at_any_site() {
             "surface-let",
             "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
              surface TicketBoard {\n    let open = tickets/Tickets\n    provides:\n        BoardOpened()\n}\n",
+        ),
+        (
+            "method-count",
+            "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
+             invariant AtMostTenTickets {\n    tickets/Tickets.count <= 10\n}\n",
+        ),
+        (
+            "method-any",
+            "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
+             invariant SomeTicketIsCalm {\n    tickets/Tickets.any(t => not t.escalated)\n}\n",
         ),
     ];
 
@@ -1108,6 +1119,24 @@ fn bad_alias_on_a_collection_is_still_diagnosed() {
             .iter()
             .any(|d| d.code == "allium.reference.undefinedImportedAlias" && d.message.contains("nosuch")),
         "an unknown alias on a collection must still be diagnosed.\n{stdout}"
+    );
+}
+
+#[test]
+fn bad_alias_on_a_collection_method_receiver_is_still_diagnosed() {
+    let dir = TempDir::new("i108-guard-alias");
+    dir.write("tickets.allium", TICKETS_82);
+    dir.write(
+        "console.allium",
+        "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
+         invariant I {\n    nosuch/Tickets.count <= 10\n}\n",
+    );
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        parse_diagnostics(&stdout)
+            .iter()
+            .any(|d| d.code == "allium.reference.undefinedImportedAlias" && d.message.contains("nosuch")),
+        "an unknown alias on a method receiver must still be diagnosed.\n{stdout}"
     );
 }
 
