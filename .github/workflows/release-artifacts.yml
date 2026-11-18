@@ -73,7 +73,8 @@ jobs:
   # the install from source in Homebrew's build sandbox — which aborts on macOS
   # Tahoe when it realpaths a TCC-protected ~/Documents (juxt/allium#42).
   # The binary is :any_skip_relocation, so one bottle built on the OLDEST arm64
-  # runner (sonoma) covers all newer macOS via Homebrew's OS-version fallback.
+  # runner (sequoia; GitHub retired macos-14 in November 2026) covers all newer
+  # macOS via Homebrew's OS-version fallback. Older macOS builds from source.
   #
   # arm64-only on purpose: x86_64 macOS bottles require the macos-13 Intel
   # runner, which is scarce/deprecated and stalled the release indefinitely.
@@ -87,7 +88,7 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            os: macos-14 # oldest arm64 runner (sonoma) → covers sonoma..latest
+            os: macos-15 # oldest arm64 runner (sequoia) → covers sequoia..latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
