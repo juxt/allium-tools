@@ -2971,6 +2971,14 @@ fn visit_created_calls<'a>(
                 visit_created_calls(body, status_by_entity, has_transitions, on_status, issues);
             }
         }
+        // `for x in xs: E.created(...)` and `let e = E.created(...)` create
+        // the entity just as a bare statement does (#103).
+        Expr::For { body, .. } => {
+            visit_created_calls(body, status_by_entity, has_transitions, on_status, issues);
+        }
+        Expr::LetExpr { value, .. } => {
+            visit_created_calls(value, status_by_entity, has_transitions, on_status, issues);
+        }
         _ => {}
     }
 }
@@ -7441,6 +7449,44 @@ mod tests {
     }
 
     // -- Status state machine --
+
+    const SHIP_103: &str = "entity Port {\n  name: String\n}\n\n\
+        entity Fleet {\n  ports: Set<Port>\n  home: Port\n  flagship: Ship?\n}\n\n\
+        entity Ship {\n  port: Port\n  status: afloat | sunk\n\n  \
+        transitions status {\n    afloat -> sunk\n    terminal: sunk\n  }\n}\n\n\
+        rule Sink {\n  when: SinkShip(ship)\n  requires: ship.status = afloat\n  \
+        ensures: ship.status = sunk\n}\n\n";
+
+    #[test]
+    fn created_status_inside_ensures_for_is_an_assignment() {
+        let src = format!(
+            "{SHIP_103}rule Launch {{\n  when: fleet: Fleet.created\n  ensures:\n    \
+             for p in fleet.ports:\n      Ship.created(port: p, status: afloat)\n}}\n"
+        );
+        let ds = analyze_src(&src);
+        assert!(!has_code(&ds, "allium.status.unreachableValue"), "{ds:?}");
+    }
+
+    #[test]
+    fn created_status_bound_by_let_is_an_assignment() {
+        let src = format!(
+            "{SHIP_103}rule Launch {{\n  when: fleet: Fleet.created\n  ensures:\n    \
+             let ship = Ship.created(port: fleet.home, status: afloat)\n    \
+             fleet.flagship = ship\n}}\n"
+        );
+        let ds = analyze_src(&src);
+        assert!(!has_code(&ds, "allium.status.unreachableValue"), "{ds:?}");
+    }
+
+    #[test]
+    fn created_with_undeclared_status_inside_for_is_still_an_error() {
+        let src = format!(
+            "{SHIP_103}rule Launch {{\n  when: fleet: Fleet.created\n  ensures:\n    \
+             for p in fleet.ports:\n      Ship.created(port: p, status: docked)\n}}\n"
+        );
+        let ds = analyze_src(&src);
+        assert!(has_code(&ds, "allium.created.invalidStatus"), "{ds:?}");
+    }
 
     #[test]
     fn variable_status_assignment_suppresses_unreachable() {
