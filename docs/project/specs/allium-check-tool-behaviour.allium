@@ -437,6 +437,21 @@ rule MemberChainNamesUndeclaredField {
     ensures: FindingObserved(code: "allium.navigation.unknownField", severity: warning)
 }
 
+-- Language reference rule 14a: the built-in dot-methods on a collection are
+-- count, any, all, first, last, unique, add and remove, and any other is an
+-- error. The check fires only where the receiver is certainly a collection: a
+-- field declared Set<T> or List<T>, a projection, a relationship whose name is
+-- a regular plural of its target, or an entity collection such as Slots. A
+-- derived value with parameters called on an entity is not a collection (#110).
+rule UnknownDotMethodOnCollectionIsError {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: ReceiverIsCertainlyCollection(receiver)
+    requires: MethodIsNotBuiltIn(method)
+
+    ensures: FindingObserved(code: "allium.collection.unknownMethod", severity: error)
+}
+
 rule UnresolvedUsePathWarnsInMultiFileMode {
     when: CheckCommandInvokedWithInputs(inputs)
 

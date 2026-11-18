@@ -96,7 +96,7 @@ entity Document {
     sections: Section with document = this
     active_sections: sections where status = active
     section_titles: sections where status = active -> title
-    word_count: sections.sum(s => s.word_count)
+    word_count: sum(sections, s => s.word_count)
     is_published: status = published
     published_at: Timestamp?
 }

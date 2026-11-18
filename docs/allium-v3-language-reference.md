@@ -1076,6 +1076,8 @@ ordered_interviewers.unique
 
 `.add()` and `.remove()` are ensures-only mutations on a relationship. Set `+` and `-` are expression-level operations that produce new sets without mutating anything. When applied to ordered collections (`Sequence` or `List<T>`), `+` and `-` produce unordered results (`Set<T>`). The checker reports the type change if the result is used where ordering is expected.
 
+Dot-method syntax on collections is reserved for built-in operations. The built-in dot-methods are: `.count`, `.any()`, `.all()`, `.first`, `.last`, `.unique`, `.add()`, `.remove()`. The checker rejects any dot-method call on a collection whose name is not in this set. Domain-specific collection operations use free-standing black box function syntax with the collection as the first argument (see [Black box functions](#black-box-functions)).
+
 ### Comparisons
 
 ```
@@ -1902,6 +1904,7 @@ A valid Allium specification must satisfy:
 12. Type consistency in comparisons and arithmetic
 13. All lambdas are explicit (use `i => i.field` not `field`)
 14. Inline enum fields cannot be compared with each other (whether on the same entity or across entities); use a named enum to share values across fields
+14a. Dot-method calls on collections must use a recognised built-in name (`.count`, `.any()`, `.all()`, `.first`, `.last`, `.unique`, `.add()`, `.remove()`). Unrecognised dot-methods are errors. Domain-specific collection operations use free-standing black box function syntax
 
 **Sum type validity:**
 15. Sum type discriminators use the pipe syntax with capitalised variant names (`A | B | C`)
