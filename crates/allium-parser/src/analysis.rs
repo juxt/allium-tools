@@ -162,6 +162,7 @@ fn run_checks(mut ctx: Ctx<'_>, source: &str) -> Vec<Diagnostic> {
     ctx.check_list_literal_homogeneity();
     ctx.check_undefined_import_aliases();
     ctx.check_default_field_schemas();
+    ctx.check_created_field_names();
 
     let mut diagnostics = apply_suppressions(ctx.diagnostics, source);
     // Deterministic ordering: the analysis passes iterate `HashMap`s, whose
@@ -6454,6 +6455,84 @@ impl Ctx<'_> {
     }
 }
 
+impl Ctx<'_> {
+    /// Checks that each named argument of a local `Entity.created(...)` call
+    /// names a field the entity (or, for a variant, the variant or its base)
+    /// declares (#75, the `.created` counterpart of `default.unknownField`).
+    /// Qualified creations (`alias/Entity.created`) are left alone, since
+    /// the imported schema is not visible here.
+    fn check_created_field_names(&mut self) {
+        let mut schemas: HashMap<&str, HashSet<&str>> = collect_local_type_schemas(self.module)
+            .into_iter()
+            .map(|(name, fields)| (name, fields.into_keys().collect()))
+            .collect();
+        for v in self.variants() {
+            // `variant V : Base { f: T }` parses its body as a lookup on the
+            // base, so the variant's own fields sit in the `JoinLookup`.
+            let (base, own_fields) = match &v.base {
+                Expr::JoinLookup { entity, fields, .. } => (expr_as_ident(entity), fields.as_slice()),
+                other => (expr_as_ident(other), &[][..]),
+            };
+            let mut fields: HashSet<&str> =
+                base.and_then(|b| schemas.get(b)).cloned().unwrap_or_default();
+            for f in own_fields {
+                fields.insert(f.field.name.as_str());
+            }
+            for item in &v.items {
+                if let BlockItemKind::Assignment { name, .. }
+                | BlockItemKind::FieldWithWhen { name, .. } = &item.kind
+                {
+                    fields.insert(name.name.as_str());
+                }
+            }
+            schemas.insert(v.name.name.as_str(), fields);
+        }
+        let mut diagnostics = Vec::new();
+        for rule in self.blocks(BlockKind::Rule) {
+            for_each_rule_clause(&rule.items, &mut |_, value| {
+                visit_created_field_names(value, &schemas, &mut diagnostics);
+            });
+        }
+        for diag in diagnostics {
+            self.push(diag);
+        }
+    }
+}
+
+fn visit_created_field_names(
+    expr: &Expr,
+    schemas: &HashMap<&str, HashSet<&str>>,
+    out: &mut Vec<Diagnostic>,
+) {
+    if let Expr::Call { function, args, .. } = expr {
+        if let Expr::MemberAccess { object, field, .. } = function.as_ref() {
+            if field.name == "created" {
+                if let Some((entity, fields)) = expr_as_ident(object)
+                    .and_then(|e| schemas.get(e).map(|f| (e, f)))
+                {
+                    for arg in args {
+                        if let CallArg::Named(named) = arg {
+                            if !fields.contains(named.name.name.as_str()) {
+                                out.push(
+                                    Diagnostic::warning(
+                                        named.name.span,
+                                        format!(
+                                            ".created() sets field '{}' which is not declared on '{entity}'.",
+                                            named.name.name
+                                        ),
+                                    )
+                                    .with_code("allium.created.unknownField"),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    walk_expr_children(expr, &mut |child| visit_created_field_names(child, schemas, out));
+}
+
 /// entity/value type name → (field name → declared type expression).
 fn collect_local_type_schemas(module: &Module) -> HashMap<&str, HashMap<&str, &Expr>> {
     let mut schemas: HashMap<&str, HashMap<&str, &Expr>> = HashMap::new();
@@ -8558,6 +8637,69 @@ rule ShowsError {
     }
 
     // -- Unused entities --
+
+    const PAYMENT_75: &str = "entity Order {\n  total: Integer\n}\n\n\
+        entity Payment {\n  order: Order\n  amount: Integer\n  payer: String\n}\n\n";
+
+    fn created_unknown_fields(ds: &[Diagnostic]) -> Vec<&str> {
+        ds.iter()
+            .filter(|d| d.code == Some("allium.created.unknownField"))
+            .map(|d| d.message.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn created_with_undeclared_field_warns() {
+        let ds = analyze_src(&format!(
+            "{PAYMENT_75}rule MakePayment {{\n  when: Pay(order, payer, amount)\n  \
+             ensures: Payment.created(order: order, amount: amount, payerz: payer)\n}}\n"
+        ));
+        let found = created_unknown_fields(&ds);
+        assert_eq!(found.len(), 1, "{ds:?}");
+        assert!(found[0].contains("'payerz'") && found[0].contains("'Payment'"));
+    }
+
+    #[test]
+    fn created_with_declared_fields_is_clean() {
+        let ds = analyze_src(&format!(
+            "{PAYMENT_75}rule MakePayment {{\n  when: Pay(order, payer, amount)\n  \
+             ensures: Payment.created(order: order, amount: amount, payer: payer)\n}}\n"
+        ));
+        assert!(created_unknown_fields(&ds).is_empty(), "{ds:?}");
+    }
+
+    #[test]
+    fn created_inside_for_and_if_is_checked() {
+        let ds = analyze_src(&format!(
+            "{PAYMENT_75}rule MakePayments {{\n  when: PayAll(orders, payer)\n  \
+             for o in orders:\n    if o.total > 0:\n      \
+             ensures: Payment.created(order: o, amount: o.total, payr: payer)\n}}\n"
+        ));
+        assert_eq!(created_unknown_fields(&ds).len(), 1, "{ds:?}");
+    }
+
+    #[test]
+    fn created_on_variant_accepts_base_and_variant_fields() {
+        let src = "entity Notification {\n  recipient: String\n  kind: Email | Sms\n}\n\n\
+            variant Email : Notification {\n  subject: String\n}\n\n\
+            variant Sms : Notification {\n  number: String\n}\n\n\
+            rule Notify {\n  when: Send(to)\n  \
+            ensures: Email.created(recipient: to, subject: \"hi\", numbr: \"1\")\n}\n";
+        let ds = analyze_src(src);
+        let found = created_unknown_fields(&ds);
+        assert_eq!(found.len(), 1, "{ds:?}");
+        assert!(found[0].contains("'numbr'") && found[0].contains("'Email'"));
+    }
+
+    #[test]
+    fn created_on_unknown_or_qualified_entity_is_not_checked() {
+        let ds = analyze_src(
+            "use \"./b.allium\" as b\n\n\
+             rule Make {\n  when: Go()\n  ensures:\n    \
+             b/Thing.created(anything: 1)\n    Missing.created(whatever: 2)\n}\n",
+        );
+        assert!(created_unknown_fields(&ds).is_empty(), "{ds:?}");
+    }
 
     #[test]
     fn unused_entity_reported() {

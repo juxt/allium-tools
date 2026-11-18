@@ -123,6 +123,7 @@ export function analyzeAllium(
   findings.push(...findInvalidTriggerIssues(lineStarts, blocks));
   findings.push(...findListLiteralHomogeneityIssues(text, lineStarts));
   findings.push(...findDefaultFieldSchemaIssues(text, lineStarts));
+  findings.push(...findCreatedFieldNameIssues(text, lineStarts));
 
   findings.push(...findDuplicateConfigKeys(maskedText, lineStarts, blocks));
   findings.push(...findDuplicateDefaultNames(maskedText, lineStarts));
@@ -2761,6 +2762,135 @@ function baseTypeName(typeExpr: unknown): string | undefined {
     return baseTypeName(body?.inner);
   }
   return undefined;
+}
+
+/**
+ * Warns when a named argument of a local `Entity.created(...)` call in a rule
+ * names a field the entity (or, for a variant, the variant or its base) does
+ * not declare (`allium.created.unknownField`). Mirrors the Rust
+ * `check_created_field_names`. Qualified creations are skipped.
+ */
+function findCreatedFieldNameIssues(
+  text: string,
+  lineStarts: number[],
+): Finding[] {
+  const findings: Finding[] = [];
+  let declarations: unknown;
+  try {
+    declarations = (parseAllium(text).module as unknown as AstNode).declarations;
+  } catch {
+    return findings;
+  }
+  if (!Array.isArray(declarations)) {
+    return findings;
+  }
+
+  const fieldNamesOf = (items: unknown[]): string[] =>
+    items.flatMap((item) => {
+      const kind = (item as AstNode)?.kind as AstNode | undefined;
+      const assignment = (kind?.Assignment ?? kind?.FieldWithWhen) as
+        | AstNode
+        | undefined;
+      const name = (assignment?.name as AstNode | undefined)?.name;
+      return typeof name === "string" ? [name] : [];
+    });
+  const identName = (node: unknown): string | undefined => {
+    const ident = (node as AstNode | undefined)?.Ident as AstNode | undefined;
+    return typeof ident?.name === "string" ? ident.name : undefined;
+  };
+
+  const schemas = new Map<string, Set<string>>();
+  const rules: AstNode[] = [];
+  for (const decl of declarations) {
+    const block = (decl as AstNode)?.Block as AstNode | undefined;
+    if (!block) {
+      continue;
+    }
+    if (block.kind === "Rule") {
+      rules.push(block);
+      continue;
+    }
+    if (
+      block.kind !== "Entity" &&
+      block.kind !== "ExternalEntity" &&
+      block.kind !== "Value"
+    ) {
+      continue;
+    }
+    const typeName = (block.name as AstNode | undefined)?.name;
+    if (typeof typeName === "string") {
+      schemas.set(typeName, new Set(fieldNamesOf((block.items as unknown[]) ?? [])));
+    }
+  }
+  // `variant V : Base { f: T }` parses its body as a lookup on the base.
+  for (const decl of declarations) {
+    const variant = (decl as AstNode)?.Variant as AstNode | undefined;
+    const name = (variant?.name as AstNode | undefined)?.name;
+    if (!variant || typeof name !== "string") {
+      continue;
+    }
+    const join = (variant.base as AstNode | undefined)?.JoinLookup as
+      | AstNode
+      | undefined;
+    const base = join ? identName(join.entity) : identName(variant.base);
+    const fields = new Set(base ? (schemas.get(base) ?? []) : []);
+    for (const f of (join?.fields as unknown[]) ?? []) {
+      const fname = ((f as AstNode)?.field as AstNode | undefined)?.name;
+      if (typeof fname === "string") {
+        fields.add(fname);
+      }
+    }
+    for (const fname of fieldNamesOf((variant.items as unknown[]) ?? [])) {
+      fields.add(fname);
+    }
+    schemas.set(name, fields);
+  }
+
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (!node || typeof node !== "object") {
+      return;
+    }
+    const call = (node as AstNode).Call as AstNode | undefined;
+    const member = (call?.function as AstNode | undefined)?.MemberAccess as
+      | AstNode
+      | undefined;
+    const entity = identName(member?.object);
+    const fields = entity ? schemas.get(entity) : undefined;
+    if (
+      call &&
+      fields &&
+      (member?.field as AstNode | undefined)?.name === "created"
+    ) {
+      for (const arg of (call.args as unknown[]) ?? []) {
+        const nameNode = ((arg as AstNode)?.Named as AstNode | undefined)
+          ?.name as AstNode | undefined;
+        const fieldName = nameNode?.name;
+        if (typeof fieldName === "string" && !fields.has(fieldName)) {
+          const span = (nameNode?.span ?? { start: 0, end: 0 }) as {
+            start: number;
+            end: number;
+          };
+          findings.push(
+            rangeFinding(
+              lineStarts,
+              span.start,
+              span.end,
+              "allium.created.unknownField",
+              `.created() sets field '${fieldName}' which is not declared on '${entity}'.`,
+              "warning",
+            ),
+          );
+        }
+      }
+    }
+    Object.values(node as AstNode).forEach(visit);
+  };
+  rules.forEach((rule) => visit(rule.items));
+  return findings;
 }
 
 /**
