@@ -712,6 +712,35 @@ rule LifecycleTriggerBindingReadWithoutImportEdgeDoesNotCredit {
     ensures: FindingObserved(code: "allium.field.unused", field: field, severity: info)
 }
 
+-- A field read across the boundary through a name the importer's own surface
+-- bound (`context shelf: alias/Shelf`, then `shelf.copies`), or through a rule
+-- binding carried by a trigger that surface provides. The qualified spelling
+-- never appears, so the read is credited through the binding (#95).
+
+rule BoundContextReadCreditsImportedFieldUse {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileDeclaresEntityWithField(file_a, field)
+    requires: FileHasUseDeclarationMappingAliasTo(file_b, file_a)
+    requires: FileSurfaceBindsNameByQualifiedContext(file_b, binding)
+    requires: FileSurfaceReadsFieldOffBinding(file_b, binding, field)
+
+    ensures: FindingNotObserved(code: "allium.field.unused", field: field)
+}
+
+rule TriggerBindingReadCreditsImportedFieldUse {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileDeclaresEntityWithField(file_a, field)
+    requires: FileHasUseDeclarationMappingAliasTo(file_b, file_a)
+    requires: FileSurfaceProvidesTriggerCarryingQualifiedBinding(file_b, trigger, binding)
+    requires: FileRuleSubscribesAndReadsFieldOffBinding(file_b, trigger, binding, field)
+
+    ensures: FindingNotObserved(code: "allium.field.unused", field: field)
+}
+
 rule ImportedModuleAloneKeepsLocalLifecycleWarnings {
     when: CheckCommandInvokedWithInputs(inputs)
 
