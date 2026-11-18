@@ -1355,3 +1355,147 @@ fn a_trigger_the_provider_never_emits_still_warns() {
         "a trigger the provider never mentions must still warn.\n{stdout}"
     );
 }
+
+// ===========================================================================
+// #107: a field read through a lifecycle-trigger binding. An importer writes
+// `when: ticket: base/Ticket.created` (or `.field becomes v`,
+// `.status transitions_to s`, or a temporal `.field <= now`, bare or with
+// an offset) and reads `ticket.priority` in the rule body. The qualified
+// spelling `base/Ticket.priority` never appears, so the qualified pass
+// credited nothing and the imported module reported a field its only reader
+// reads.
+//
+// Same oracles as above: the merged single file is the control, the imported
+// module alone keeps its warning, and crediting needs a real `use` edge.
+// ===========================================================================
+
+const TICKET_107: &str = r#"-- allium: 3
+
+entity Ticket {
+    reference: String
+    priority: Integer
+    severity: Integer
+    due_at: Timestamp
+    escalated: Boolean
+    owner: String
+    status: open | closed
+}
+
+rule RaiseTicket {
+    when: TicketRaised(reference, severity, due_at)
+    ensures: Ticket.created(reference: reference, severity: severity, due_at: due_at, escalated: false, status: open)
+}
+
+rule CloseTicket {
+    when: TicketClosed(ticket)
+    requires: ticket.status = open
+    ensures: ticket.status = closed
+}
+
+surface TicketDesk {
+    facing _: Actor
+    provides:
+        TicketRaised(reference, severity, due_at)
+        TicketClosed(ticket)
+}
+"#;
+
+/// The three lifecycle-trigger forms the issue names, plus the temporal form
+/// the reverse channel already types a binding from, bare and with an offset.
+/// Each reads `priority` only through the bound name.
+const LIFECYCLE_TRIGGERS_107: [(&str, &str); 5] = [
+    ("created", "ticket: base/Ticket.created"),
+    ("becomes", "ticket: base/Ticket.severity becomes 5"),
+    ("transitions", "ticket: base/Ticket.status transitions_to closed"),
+    ("temporal", "ticket: base/Ticket.due_at <= now"),
+    ("temporal-offset", "ticket: base/Ticket.due_at + 48.hours <= now"),
+];
+
+/// The consumer's rule, reading `priority` only through the trigger binding.
+fn rule_107(trigger: &str) -> String {
+    format!(
+        "rule EscalateUrgentTicket {{\n    when: {trigger}\n    requires: ticket.priority > 3\n    ensures: ticket.escalated = true\n}}\n"
+    )
+}
+
+fn consumer_107(trigger: &str) -> String {
+    format!("-- allium: 3\n\nuse \"./base.allium\" as base\n\n{}", rule_107(trigger))
+}
+
+/// The equivalent single file: the consumer's rule with the alias dropped.
+fn merged_107(trigger: &str) -> String {
+    format!("{TICKET_107}\n{}", rule_107(&trigger.replace("base/", "")))
+}
+
+fn unused_field_messages(stdout: &str) -> Vec<String> {
+    let mut out: Vec<String> = parse_diagnostics(stdout)
+        .into_iter()
+        .filter(|d| d.code == "allium.field.unused")
+        .map(|d| d.message)
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn lifecycle_trigger_binding_read_matches_the_merged_single_file_control() {
+    for (label, trigger) in LIFECYCLE_TRIGGERS_107 {
+        let pair = TempDir::new(&format!("lifecycle-bound-pair-{label}"));
+        pair.write("base.allium", TICKET_107);
+        pair.write("consumer.allium", &consumer_107(trigger));
+        let (_ok, pair_out) = run("check", &[pair.path().to_str().unwrap()]);
+
+        let one = TempDir::new(&format!("lifecycle-bound-merged-{label}"));
+        one.write("merged.allium", &merged_107(trigger));
+        let (_ok, one_out) = run("check", &[&one.file("merged.allium")]);
+
+        let from_pair = unused_field_messages(&pair_out);
+        let from_one = unused_field_messages(&one_out);
+        assert!(
+            !from_pair.iter().any(|m| m.contains("Ticket.priority")),
+            "[{label}] `ticket.priority` is read off a binding typed by `{trigger}`.\n{pair_out}"
+        );
+        assert_eq!(
+            from_pair, from_one,
+            "[{label}] the pair must report exactly what the equivalent one-file spec reports"
+        );
+        // Precision: the oracle is not vacuous — `owner` is read by nobody and
+        // stays reported on both sides.
+        assert!(
+            from_pair.iter().any(|m| m.contains("Ticket.owner")),
+            "[{label}] `owner` is never read and must still be reported.\n{pair_out}"
+        );
+    }
+}
+
+#[test]
+fn lifecycle_trigger_binding_imported_module_alone_keeps_its_warning() {
+    let dir = TempDir::new("lifecycle-bound-alone");
+    dir.write("base.allium", TICKET_107);
+
+    let (_ok, stdout) = run("check", &[&dir.file("base.allium")]);
+    assert!(
+        unused_field_messages(&stdout).iter().any(|m| m.contains("Ticket.priority")),
+        "checked alone, base.allium has no reader for `priority` and must still warn.\n{stdout}"
+    );
+}
+
+#[test]
+fn lifecycle_trigger_binding_without_import_edge_credits_nothing() {
+    // The `gate_no_import_edge_means_no_credit` guard, for the bound read: the
+    // co-supplied file names `Ticket` bare and has no `use` edge.
+    for (label, trigger) in LIFECYCLE_TRIGGERS_107 {
+        let dir = TempDir::new(&format!("lifecycle-bound-no-edge-{label}"));
+        dir.write("base.allium", TICKET_107);
+        dir.write(
+            "unrelated.allium",
+            &format!("-- allium: 3\n\n{}", rule_107(&trigger.replace("base/", ""))),
+        );
+
+        let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+        assert!(
+            unused_field_messages(&stdout).iter().any(|m| m.contains("Ticket.priority")),
+            "[{label}] without a `use` edge, a co-supplied file's bound read must not credit.\n{stdout}"
+        );
+    }
+}
