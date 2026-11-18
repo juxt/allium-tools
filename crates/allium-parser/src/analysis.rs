@@ -4652,6 +4652,7 @@ fn collect_uppercase_idents_from_expr<'a>(expr: &'a Expr, out: &mut Vec<Referenc
 pub fn collect_qualified_references(module: &Module) -> Vec<(String, String)> {
     collect_qref_nodes(module)
         .into_iter()
+        .filter(|r| !r.dotted)
         .map(|r| (r.qualifier.to_string(), r.name.to_string()))
         .collect()
 }
@@ -5821,6 +5822,11 @@ struct QRef<'a> {
     /// valid collection from a typo. The `unknownName` branch leaves these
     /// alone rather than false-positive on every qualified collection (#82).
     collection: bool,
+    /// True for `x.Member` member access, collected only so that the alias
+    /// check can reject the dotted form when `x` is a `use` alias: the
+    /// language writes cross-module references as `alias/Name`, never
+    /// `alias.Name`. Dotted pairs are never credited as references.
+    dotted: bool,
 }
 
 fn collect_qrefs_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<QRef<'a>>) {
@@ -5872,7 +5878,7 @@ fn collect_qrefs_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<QRef<'a>>)
         BlockItemKind::ContractsClause { entries } => {
             for e in entries {
                 if let Some(qualifier) = &e.qualifier {
-                    out.push(QRef { qualifier, name: &e.name.name, span: e.name.span, collection: false });
+                    out.push(QRef { qualifier, name: &e.name.name, span: e.name.span, collection: false, dotted: false });
                 }
             }
         }
@@ -5891,7 +5897,7 @@ fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
     match expr {
         Expr::QualifiedName(q) => {
             if let Some(qualifier) = &q.qualifier {
-                out.push(QRef { qualifier, name: &q.name, span: q.span, collection: false });
+                out.push(QRef { qualifier, name: &q.name, span: q.span, collection: false, dotted: false });
             }
         }
         Expr::MemberAccess { object, field, .. }
@@ -5903,15 +5909,18 @@ fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
                 object.as_ref()
             {
                 if BUILTIN_COLLECTION_METHODS.contains(&field.name.as_str()) {
-                    out.push(QRef { qualifier, name, span: *span, collection: true });
+                    out.push(QRef { qualifier, name, span: *span, collection: true, dotted: false });
                     return;
                 }
             }
-            // Detect alias.TypeName pattern (e.g. core.EntityMap in exposes)
             if let Expr::Ident(id) = object.as_ref() {
-                if starts_uppercase(&field.name) {
-                    out.push(QRef { qualifier: &id.name, name: &field.name, span: id.span.merge(field.span), collection: false });
-                }
+                out.push(QRef {
+                    qualifier: &id.name,
+                    name: &field.name,
+                    span: id.span.merge(field.span),
+                    collection: false,
+                    dotted: true,
+                });
             }
             collect_qrefs_from_expr(object, out);
         }
@@ -6042,7 +6051,7 @@ fn collect_qrefs_from_collection<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
     match expr {
         Expr::QualifiedName(q) => {
             if let Some(qualifier) = &q.qualifier {
-                out.push(QRef { qualifier, name: &q.name, span: q.span, collection: true });
+                out.push(QRef { qualifier, name: &q.name, span: q.span, collection: true, dotted: false });
             }
         }
         // A filtered/projected collection still has its collection at `source`;
@@ -6339,12 +6348,30 @@ impl Ctx<'_> {
                         name: &t.name,
                         span: a.span.merge(t.span),
                         collection: false,
+                        dotted: false,
                     });
                 }
             }
         }
 
         for r in refs {
+            if r.dotted {
+                // `x.Member` is member access. It is only wrong when `x` is a
+                // `use` alias, which is not a value (#97).
+                if aliases.contains(r.qualifier) {
+                    self.push(
+                        Diagnostic::error(
+                            r.span,
+                            format!(
+                                "'{}.{}' is not a cross-module reference. Write '{}/{}'.",
+                                r.qualifier, r.name, r.qualifier, r.name
+                            ),
+                        )
+                        .with_code("allium.reference.dottedAlias"),
+                    );
+                }
+                continue;
+            }
             if !aliases.contains(r.qualifier) {
                 self.push(
                     Diagnostic::error(
@@ -9102,12 +9129,12 @@ rule ShowsError {
     }
 
     #[test]
-    fn collect_qualified_refs_from_alias_dot_member() {
+    fn dotted_alias_member_is_not_a_qualified_reference() {
         let src = "use \"./core.allium\" as core\n\nsurface Dashboard {\n  facing user: User\n  exposes:\n    core.EntityMap\n}\n";
         let input = format!("-- allium: 3\n{src}");
         let result = parse(&input);
         let refs = collect_qualified_references(&result.module);
-        assert!(refs.iter().any(|(q, n)| q == "core" && n == "EntityMap"));
+        assert!(!refs.iter().any(|(q, n)| q == "core" && n == "EntityMap"));
     }
 
     #[test]

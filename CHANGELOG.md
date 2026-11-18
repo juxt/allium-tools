@@ -4,6 +4,8 @@ Behaviour changes worth knowing before you upgrade. Releases ship from a single 
 
 ## Unreleased
 
+The dotted form `alias.Name` is no longer treated as a cross-module reference. The language has only ever written these as `alias/Name`. When the name before the dot is a `use` alias, `allium check` now reports `allium.reference.dottedAlias` (error) and points to the slash form, and the dotted form no longer stops the imported declaration being reported unused. Member access through any other name, such as `properties.Status` on a field, is ordinary member access and no longer draws `allium.reference.undefinedImportedAlias` (#97).
+
 Five checker fixes. Four only remove false warnings. The fifth, #103, can add an error, but only to a spec that is already wrong.
 
 - `x * alias/config.param` now reads the qualified name as one operand. It used to parse the `/` as division and warn `allium.config.undefinedReference` (#102).
