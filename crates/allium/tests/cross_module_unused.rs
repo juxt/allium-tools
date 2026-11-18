@@ -146,11 +146,13 @@ fn unqualified_entity_ref_in_rule_suppresses_unused() {
 }
 
 // -----------------------------------------------------------------------
-// Dot-notation alias.Type references in surface exposes
+// The language writes cross-module references as `alias/Name`. The dotted
+// form `alias.Name` is not part of it: it is rejected, and it does not count
+// as a reference to the imported entity.
 // -----------------------------------------------------------------------
 
 #[test]
-fn alias_dot_member_ref_suppresses_unused() {
+fn alias_dot_member_is_rejected_and_credits_nothing() {
     let dir = TempDir::new("alias-dot");
     dir.write("core.allium", "-- allium: 3\nentity EntityMap {\n  entries: Set<String>\n}\n");
     dir.write(
@@ -166,8 +168,40 @@ fn alias_dot_member_ref_suppresses_unused() {
     let diags = parse_diagnostics(&stdout);
 
     assert!(
-        !diags.iter().any(|d| d.code == "allium.entity.unused" && d.message.contains("EntityMap")),
-        "EntityMap referenced via core.EntityMap should not be flagged.\nDiagnostics: {:?}",
+        diags.iter().any(|d| d.code == "allium.reference.dottedAlias"
+            && d.message.contains("'core/EntityMap'")),
+        "core.EntityMap should be rejected in favour of core/EntityMap.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+    assert!(
+        diags.iter().any(|d| d.code == "allium.entity.unused" && d.message.contains("EntityMap")),
+        "the dotted form must not count as a reference to EntityMap.\nDiagnostics: {:?}",
+        diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn uppercase_member_of_a_local_name_is_plain_member_access() {
+    // #97: `properties` is a field, not an alias, so `properties.Status` is
+    // ordinary member access and draws no reference diagnostic.
+    let dir = TempDir::new("map-member");
+    dir.write(
+        "map.allium",
+        "-- allium: 3\n\nexternal entity Page {\n    properties: Map<String, Any>\n    \
+         current_status: String? = first_non_null(\n        properties.Status.status.name,\n        \
+         properties.Review.status.name\n    )\n    lower_status: String? = properties.status.name\n}\n",
+    );
+
+    let output = allium()
+        .args(["check", dir.path().to_str().unwrap()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diags = parse_diagnostics(&stdout);
+
+    assert!(
+        !diags.iter().any(|d| d.code.starts_with("allium.reference.")),
+        "member access on a local field is not a cross-module reference.\nDiagnostics: {:?}",
         diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
     );
 }

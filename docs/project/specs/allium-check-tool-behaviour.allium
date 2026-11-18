@@ -580,6 +580,30 @@ rule UndeclaredImportAliasIsDiagnosedAtEveryReferenceSite {
     ensures: FindingMessageAnchoredAtReferenceNamesUnknownAlias(alias)
 }
 
+-- Cross-module references are written alias/Name. The dotted form alias.Name
+-- has never been part of the language: when the name before the dot is a use
+-- alias, it is an error that points to the slash form, and it does not count
+-- as a reference to the imported declaration. When the name before the dot is
+-- anything else, such as a field, x.Name is ordinary member access, whatever
+-- the case of Name (#97).
+
+rule DottedAliasReferenceIsRejected {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: MemberAccessOnUseAlias(alias, name)
+
+    ensures: FindingObserved(code: "allium.reference.dottedAlias", severity: error)
+    ensures: DeclarationNotCreditedAsReferenced(alias, name)
+}
+
+rule UppercaseMemberOfLocalNameIsMemberAccess {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: MemberAccessOnNameThatIsNotUseAlias(name, member)
+
+    ensures: FindingNotObserved(code: "allium.reference.undefinedImportedAlias", name: name)
+}
+
 -- Beyond the alias, the name itself must resolve: with a valid alias whose
 -- target is in the check set, a qualified reference alias/Name where the aliased
 -- module offers no such name is diagnosed at the reference. A module offers its
