@@ -77,7 +77,8 @@ Pre-built binaries for Linux, macOS and Windows (not yet signed) are available o
 - `allium check` — validate specifications and report diagnostics.
 - `allium analyse` — run structural checks plus process-level analysis: data flow, reachability, deadlock and conflict detection, invariant verification.
 - `allium parse` — parse a file and output the syntax tree.
-- `allium plan` — derive test obligations from a specification.
+- `allium plan` — derive test obligations from a specification, as JSON or one obligation per line (`--format tsv`).
+- `allium diff` — compare the test obligations of two specifications or plans.
 - `allium model` — extract the domain model as structured data.
 
 With the CLI installed, your LLM validates every `.allium` file after writing or editing it, catching structural errors before they accumulate.

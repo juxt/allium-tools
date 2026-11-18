@@ -157,7 +157,7 @@ pub fn generate_test_plan(module: &Module, source: &str) -> TestPlan {
                     emit_enum_obligations(&mut plan, block);
                 }
                 BlockKind::Rule => {
-                    emit_rule_obligations(&mut plan, block, &ctx);
+                    emit_rule_obligations(&mut plan, block, &ctx, source);
                 }
                 BlockKind::Surface => {
                     emit_surface_obligations(&mut plan, block);
@@ -777,7 +777,7 @@ fn emit_enum_obligations(plan: &mut TestPlan, block: &BlockDecl) {
     });
 }
 
-fn emit_rule_obligations(plan: &mut TestPlan, block: &BlockDecl, ctx: &ModuleContext) {
+fn emit_rule_obligations(plan: &mut TestPlan, block: &BlockDecl, ctx: &ModuleContext, source: &str) {
     let name = block_name(block);
     let deps = extract_rule_dependencies(block, ctx);
 
@@ -794,17 +794,17 @@ fn emit_rule_obligations(plan: &mut TestPlan, block: &BlockDecl, ctx: &ModuleCon
     });
 
     // Walk items for specific obligations
-    walk_rule_items(plan, &name, &block.items, &deps);
+    walk_rule_items(plan, &name, &block.items, &deps, source);
 }
 
-fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], deps: &RuleDependencies) {
-    walk_rule_items_inner(plan, rule_name, items, deps, &mut 0, &mut 0);
+fn walk_rule_items(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], deps: &RuleDependencies, source: &str) {
+    walk_rule_items_inner(plan, rule_name, items, deps, source, &mut 0, &mut 0);
 }
 
-fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], deps: &RuleDependencies, failure_ordinal: &mut u32, creation_ordinal: &mut u32) {
+fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockItem], deps: &RuleDependencies, source: &str, failure_ordinal: &mut u32, creation_ordinal: &mut u32) {
     for item in items {
         match &item.kind {
-            BlockItemKind::Clause { keyword, .. } if keyword == "requires" => {
+            BlockItemKind::Clause { keyword, value } if keyword == "requires" => {
                 *failure_ordinal += 1;
                 plan.obligations.push(Obligation {
                     id: format!("rule-failure.{}.{}", rule_name, failure_ordinal),
@@ -814,7 +814,7 @@ fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockIte
                         rule_name
                     ),
                     source_construct: rule_name.to_string(),
-                    expression: None,
+                    expression: Some(clause_text(&span_text(source, value.span()))),
                     source_span: SourceSpan { start: item.span.start, end: item.span.end },
                     detail: None,
                     dependencies: Some(deps.clone()),
@@ -848,7 +848,7 @@ fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockIte
                             rule_name
                         ),
                         source_construct: rule_name.to_string(),
-                        expression: None,
+                        expression: Some(creation_text(source, value)),
                         source_span: SourceSpan { start: item.span.start, end: item.span.end },
                         detail: None,
                         dependencies: Some(deps.clone()),
@@ -866,7 +866,7 @@ fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockIte
                             rule_name
                         ),
                         source_construct: rule_name.to_string(),
-                        expression: None,
+                        expression: Some(creation_text(source, value)),
                         source_span: SourceSpan { start: item.span.start, end: item.span.end },
                         detail: None,
                         dependencies: Some(deps.clone()),
@@ -874,14 +874,14 @@ fn walk_rule_items_inner(plan: &mut TestPlan, rule_name: &str, items: &[BlockIte
                 }
             }
             BlockItemKind::ForBlock { items, .. } => {
-                walk_rule_items_inner(plan, rule_name, items, deps, failure_ordinal, creation_ordinal);
+                walk_rule_items_inner(plan, rule_name, items, deps, source, failure_ordinal, creation_ordinal);
             }
             BlockItemKind::IfBlock { branches, else_items } => {
                 for branch in branches {
-                    walk_rule_items_inner(plan, rule_name, &branch.items, deps, failure_ordinal, creation_ordinal);
+                    walk_rule_items_inner(plan, rule_name, &branch.items, deps, source, failure_ordinal, creation_ordinal);
                 }
                 if let Some(else_items) = else_items {
-                    walk_rule_items_inner(plan, rule_name, else_items, deps, failure_ordinal, creation_ordinal);
+                    walk_rule_items_inner(plan, rule_name, else_items, deps, source, failure_ordinal, creation_ordinal);
                 }
             }
             _ => {}
@@ -1034,6 +1034,70 @@ fn contains_temporal(expr: &Expr) -> bool {
         Expr::Block { items, .. } => items.iter().any(contains_temporal),
         _ => false,
     }
+}
+
+/// The `.created(...)` calls that make a clause an entity creation, as
+/// normalised text, one per line.
+fn creation_text(source: &str, expr: &Expr) -> String {
+    fn collect<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match expr {
+            Expr::Block { items, .. } => items.iter().for_each(|item| collect(item, out)),
+            e if contains_entity_creation(e) => out.push(e),
+            _ => {}
+        }
+    }
+    let mut calls = Vec::new();
+    collect(expr, &mut calls);
+    calls
+        .iter()
+        .map(|call| clause_text(&span_text(source, call.span())))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Clause text without comments, with each run of whitespace outside a
+/// string or backtick literal collapsed to one space, so a comment edit or a
+/// re-indent leaves it unchanged.
+fn clause_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut pending_space = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '-' if chars.peek() == Some(&'-') => {
+                while chars.peek().is_some_and(|&n| n != '\n') {
+                    chars.next();
+                }
+                pending_space = true;
+            }
+            c if c.is_whitespace() => pending_space = true,
+            '"' | '`' => {
+                if pending_space && !out.is_empty() {
+                    out.push(' ');
+                }
+                pending_space = false;
+                out.push(c);
+                while let Some(n) = chars.next() {
+                    out.push(n);
+                    if n == '\\' && c == '"' {
+                        if let Some(escaped) = chars.next() {
+                            out.push(escaped);
+                        }
+                    } else if n == c {
+                        break;
+                    }
+                }
+            }
+            c => {
+                if pending_space && !out.is_empty() {
+                    out.push(' ');
+                }
+                pending_space = false;
+                out.push(c);
+            }
+        }
+    }
+    out
 }
 
 fn contains_entity_creation(expr: &Expr) -> bool {
@@ -1685,6 +1749,36 @@ mod tests {
 
     fn to_json(plan: &TestPlan) -> serde_json::Value {
         serde_json::to_value(plan).unwrap()
+    }
+
+    #[test]
+    fn clause_text_drops_comments_and_collapses_whitespace() {
+        assert_eq!(
+            clause_text("order.status = pending -- must be open\n        and order.total > 0"),
+            "order.status = pending and order.total > 0"
+        );
+    }
+
+    #[test]
+    fn clause_text_keeps_literals_as_written() {
+        assert_eq!(clause_text("note = \"a  -- b\"  and  `x  y`"), "note = \"a  -- b\" and `x  y`");
+        assert_eq!(clause_text("note = \"say \\\"hi\\\"  now\""), "note = \"say \\\"hi\\\"  now\"");
+    }
+
+    #[test]
+    fn creation_obligation_carries_only_its_created_calls() {
+        let source = "-- allium: 3\n\n\
+            entity User {\n    email: String\n}\n\n\
+            entity Audit {\n    note: String\n}\n\n\
+            rule Signup {\n    when: SignedUp(email)\n    ensures:\n        \
+            -- make the user\n        User.created(\n            email: email\n        )\n        \
+            Audit.created(note: \"signup\")\n        Notified(email: email)\n}\n";
+        let plan = parse_plan(source);
+        let ob = find_obligation(&plan, "rule-entity-creation.Signup.1");
+        assert_eq!(
+            ob.expression.as_deref(),
+            Some("User.created( email: email )\nAudit.created(note: \"signup\")")
+        );
     }
 
     fn find_obligation<'a>(plan: &'a TestPlan, id_substring: &str) -> &'a Obligation {

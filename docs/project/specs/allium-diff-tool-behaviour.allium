@@ -1,0 +1,126 @@
+-- allium: 3
+-- allium-diff-tool-behaviour.allium
+-- Scope: `allium diff`, which compares the test obligations of two specs or
+-- two outputs of `allium plan`.
+-- Includes:
+--   - Recognising each input from its content
+--   - Pairing obligations as unchanged, moved, changed, added or removed
+--   - Output formats and exit codes
+-- Excludes:
+--   - How `plan` derives obligations (see allium-single-file-tool-behaviour.allium)
+
+value DiffInputKind {
+    value: json_plan | tsv_plan | spec | unrecognised
+}
+
+value DiffFormat {
+    value: tsv | json
+}
+
+entity DiffInput {
+    kind: DiffInputKind
+    error_diagnostics: Integer
+}
+
+entity PlanObligation {
+    id: String
+    -- Everything in the obligation except its id and source span. Against
+    -- a TSV plan, only the four columns after the id.
+    content: String
+}
+
+entity DiffRun {
+    format: DiffFormat
+    changes: Integer
+}
+
+surface DiffCli {
+    provides:
+        DiffInvoked(input_count, stdin_count)
+        DiffInputRead(input: DiffInput)
+        ObligationsCompared(old: PlanObligation, new: PlanObligation)
+        DiffRunCompleted(run: DiffRun)
+}
+
+rule WrongArityIsRejected {
+    when: DiffInvoked(input_count, stdin_count)
+    requires: input_count != 2 or stdin_count > 1
+
+    ensures: UsagePrinted()
+    ensures: ProcessExit(code: 2)
+}
+
+-- A JSON object is a plan, a `.allium` path or a `-- allium:` header is a
+-- spec, and lines of five tab-separated columns are a TSV plan.
+rule UnrecognisedInputIsRejected {
+    when: DiffInputRead(input)
+    requires: input.kind = unrecognised
+
+    ensures: UserInformed(message: "<input>: not a spec, a JSON plan or a TSV plan")
+    ensures: ProcessExit(code: 2)
+}
+
+-- A spec is planned before it is compared, so it must parse.
+rule SpecWithErrorsIsRejected {
+    when: DiffInputRead(input)
+    requires: input.kind = spec
+    requires: input.error_diagnostics > 0
+
+    ensures: DiagnosticsPrintedTo(stream: stderr)
+    ensures: ProcessExit(code: 2)
+}
+
+rule SameIdSameContentIsUnchanged {
+    when: ObligationsCompared(old, new)
+    requires: old.id = new.id
+    requires: old.content = new.content
+
+    ensures: NothingReported()
+}
+
+-- Positional ids such as `rule-failure.<Rule>.<n>` are renumbered when a
+-- clause is added or removed. Content is matched first, so a renumbered
+-- obligation is reported as moved, not as changed.
+rule SameContentOtherIdIsMoved {
+    when: ObligationsCompared(old, new)
+    requires: old.id != new.id
+    requires: old.content = new.content
+
+    ensures: ChangeReported(status: "R", ids: [old.id, new.id])
+}
+
+rule SameIdOtherContentIsChanged {
+    when: ObligationsCompared(old, new)
+    requires: old.id = new.id
+    requires: old.content != new.content
+
+    ensures: ChangeReported(status: "M", ids: [old.id])
+}
+
+rule TsvOutputFollowsNameStatus {
+    when: DiffRunCompleted(run)
+    requires: run.format = tsv
+
+    ensures: OneLinePerChangeSortedById(statuses: ["A", "D", "M", "R"])
+}
+
+rule JsonOutputGroupsChangesByKind {
+    when: DiffRunCompleted(run)
+    requires: run.format = json
+
+    ensures: JsonEmitted(keys: ["added", "removed", "changed", "moved"])
+}
+
+rule NoDifferencesExitsZero {
+    when: DiffRunCompleted(run)
+    requires: run.changes = 0
+
+    ensures: ProcessExit(code: 0)
+}
+
+rule DifferencesExitOne {
+    when: DiffRunCompleted(run)
+    requires: run.changes > 0
+
+    ensures: ProcessExit(code: 1)
+}
