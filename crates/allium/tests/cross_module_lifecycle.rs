@@ -448,6 +448,56 @@ fn t63_qualified_provides_credits_triggers_in_pair() {
     assert!(ok, "analyse on the pair should exit 0 once the provides are credited.\n{stdout}");
 }
 
+// #109 — qualified `ensures: alias/Trigger(...)` emissions credit reachability
+// the same way a qualified `provides:` does.
+const EMITTER_109: &str = r#"-- allium: 3
+
+use "./ticket.allium" as ticket
+
+rule Escalate {
+    when: Escalated(ticket_ref)
+    ensures: ticket/OpenTicket()
+}
+
+surface Desk {
+    facing _: Actor
+    provides:
+        Escalated(ticket_ref)
+}
+"#;
+
+#[test]
+fn t109_qualified_emission_credits_imported_listener() {
+    let dir = TempDir::new("109-pair");
+    dir.write("ticket.allium", TICKET_63);
+    dir.write("emitter.allium", EMITTER_109);
+
+    let (_ok, stdout) = run("analyse", &[dir.path().to_str().unwrap()]);
+    let unreachable: Vec<String> = parse_diagnostics(&stdout)
+        .into_iter()
+        .filter(|d| d.code == "allium.rule.unreachableTrigger")
+        .map(|d| d.message)
+        .collect();
+    assert!(
+        !unreachable.iter().any(|m| m.contains("CreateTicket")),
+        "the emitter emits ticket/OpenTicket, so CreateTicket is reachable.\n{unreachable:?}"
+    );
+    // Don't overcorrect: CloseTicket is neither provided nor emitted anywhere.
+    assert!(
+        unreachable.iter().any(|m| m.contains("CloseOpenTicket")),
+        "CloseTicket has no source, so CloseOpenTicket stays unreachable.\n{unreachable:?}"
+    );
+    let findings: Vec<String> = parse_findings(&stdout)
+        .into_iter()
+        .filter(|f| f.kind == "unreachable_trigger")
+        .map(|f| f.summary)
+        .collect();
+    assert!(
+        !findings.iter().any(|f| f.contains("'OpenTicket'")),
+        "no unreachable_trigger finding for OpenTicket expected.\n{findings:?}"
+    );
+}
+
 #[test]
 fn t63_triggers_unreachable_when_ticket_analysed_alone() {
     let dir = TempDir::new("63-alone");
@@ -1035,9 +1085,10 @@ const TICKETS_82: &str = "-- allium: 3\n-- tickets.allium\n\n\
 
 #[test]
 fn qualified_collection_reference_is_not_diagnosed_at_any_site() {
-    // The three homes of an entity collection, per the language reference and
-    // the report: a top-level invariant, a rule-level `for`, a surface `let`.
-    let sites: [(&str, &str); 3] = [
+    // The homes of an entity collection, per the language reference and the
+    // reports: a top-level invariant, a rule-level `for`, a surface `let`, and
+    // the receiver of a built-in collection method (#108).
+    let sites: [(&str, &str); 5] = [
         (
             "invariant",
             "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
@@ -1053,6 +1104,16 @@ fn qualified_collection_reference_is_not_diagnosed_at_any_site() {
             "surface-let",
             "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
              surface TicketBoard {\n    let open = tickets/Tickets\n    provides:\n        BoardOpened()\n}\n",
+        ),
+        (
+            "method-count",
+            "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
+             invariant AtMostTenTickets {\n    tickets/Tickets.count <= 10\n}\n",
+        ),
+        (
+            "method-any",
+            "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
+             invariant SomeTicketIsCalm {\n    tickets/Tickets.any(t => not t.escalated)\n}\n",
         ),
     ];
 
@@ -1108,6 +1169,24 @@ fn bad_alias_on_a_collection_is_still_diagnosed() {
             .iter()
             .any(|d| d.code == "allium.reference.undefinedImportedAlias" && d.message.contains("nosuch")),
         "an unknown alias on a collection must still be diagnosed.\n{stdout}"
+    );
+}
+
+#[test]
+fn bad_alias_on_a_collection_method_receiver_is_still_diagnosed() {
+    let dir = TempDir::new("i108-guard-alias");
+    dir.write("tickets.allium", TICKETS_82);
+    dir.write(
+        "console.allium",
+        "-- allium: 3\nuse \"./tickets.allium\" as tickets\n\n\
+         invariant I {\n    nosuch/Tickets.count <= 10\n}\n",
+    );
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(
+        parse_diagnostics(&stdout)
+            .iter()
+            .any(|d| d.code == "allium.reference.undefinedImportedAlias" && d.message.contains("nosuch")),
+        "an unknown alias on a method receiver must still be diagnosed.\n{stdout}"
     );
 }
 

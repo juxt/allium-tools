@@ -1769,6 +1769,19 @@ impl<'s> Parser<'s> {
 
     // -- prefix ---------------------------------------------------------
 
+    /// Whether the token `offset` places ahead names the right side of a
+    /// qualified name `alias/Name` or `alias/config`: a word that starts with
+    /// an uppercase letter or is a block keyword.
+    fn at_qualified_name_after_slash(&self, offset: usize) -> bool {
+        let tok = self.peek_at(offset);
+        tok.kind.is_word()
+            && (self.text(tok.span).chars().next().is_some_and(|c| c.is_uppercase())
+                || matches!(
+                    tok.kind,
+                    TokenKind::Config | TokenKind::Entity | TokenKind::Value
+                ))
+    }
+
     fn parse_prefix(&mut self) -> Option<Expr> {
         match self.peek_kind() {
             TokenKind::Not => {
@@ -1875,6 +1888,18 @@ impl<'s> Parser<'s> {
             }
             k if k.is_word() => {
                 let id = self.parse_ident()?;
+                // A qualified name binds tighter than any operator, so
+                // `x * alias/config.p` reads `alias/config` as one operand
+                // rather than dividing `x * alias` by `config.p`.
+                if self.at(TokenKind::Slash) && self.at_qualified_name_after_slash(1) {
+                    self.advance();
+                    let name_tok = self.advance();
+                    return Some(Expr::QualifiedName(QualifiedName {
+                        span: id.span.merge(name_tok.span),
+                        qualifier: Some(id.name),
+                        name: self.text(name_tok.span).to_string(),
+                    }));
+                }
                 Some(Expr::Ident(id))
             }
             TokenKind::Star => {
@@ -2133,24 +2158,13 @@ impl<'s> Parser<'s> {
                 // word that either starts with uppercase or is a block keyword
                 // (like `config`).
                 if let Expr::Ident(ref id) = lhs {
-                    if self.peek_kind().is_word() {
-                        let next_text = self.text(self.peek().span);
-                        let is_qualified = next_text
-                            .chars()
-                            .next()
-                            .is_some_and(|c| c.is_uppercase())
-                            || matches!(
-                                self.peek_kind(),
-                                TokenKind::Config | TokenKind::Entity | TokenKind::Value
-                            );
-                        if is_qualified {
-                            let name_tok = self.advance();
-                            return Some(Expr::QualifiedName(QualifiedName {
-                                span: lhs.span().merge(name_tok.span),
-                                qualifier: Some(id.name.clone()),
-                                name: self.text(name_tok.span).to_string(),
-                            }));
-                        }
+                    if self.at_qualified_name_after_slash(0) {
+                        let name_tok = self.advance();
+                        return Some(Expr::QualifiedName(QualifiedName {
+                            span: lhs.span().merge(name_tok.span),
+                            qualifier: Some(id.name.clone()),
+                            name: self.text(name_tok.span).to_string(),
+                        }));
                     }
                 }
                 let rhs = self.parse_expr(r_bp)?;
@@ -4584,6 +4598,35 @@ oauth/config {
         };
         assert!(matches!(object.as_ref(), Expr::QualifiedName(_)));
         assert_eq!(field.name, "check");
+    }
+
+    #[test]
+    fn qualified_name_as_right_operand_of_multiplication() {
+        // #102: `x * alias/config.p` multiplies by the qualified config
+        // reference; the `/` is not division.
+        let src = "entity E { v: x * core/config.factor }";
+        let r = parse_ok(src);
+        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        let Expr::BinaryOp { op, right, .. } = value else {
+            panic!("expected BinaryOp, got {value:?}");
+        };
+        assert_eq!(*op, BinaryOp::Mul);
+        let Expr::MemberAccess { object, field, .. } = right.as_ref() else {
+            panic!("expected MemberAccess, got {right:?}");
+        };
+        assert!(matches!(object.as_ref(), Expr::QualifiedName(q) if q.qualifier.as_deref() == Some("core") && q.name == "config"));
+        assert_eq!(field.name, "factor");
+    }
+
+    #[test]
+    fn division_by_lowercase_name_stays_division() {
+        let src = "entity E { v: a / b }";
+        let r = parse_ok(src);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let BlockItemKind::Assignment { value, .. } = &b.items[0].kind else { panic!() };
+        assert!(matches!(value, Expr::BinaryOp { op: BinaryOp::Div, .. }));
     }
 
     #[test]

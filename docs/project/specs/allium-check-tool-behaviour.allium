@@ -357,6 +357,42 @@ rule CrossModuleReferenceSuppressesUnusedWarning {
     ensures: FindingNotObserved(code: "allium.definition.unused", definition: entity_or_value)
 }
 
+-- An entity iterated only through its collection (for s in Sequences) is used.
+-- Regular English plurals are recognised (Users, Addresses, Candidacies);
+-- irregular ones (People) are not modelled (#111).
+rule EntityReferencedThroughItsCollectionIsUsed {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: FileDeclares(file, entity)
+    requires: FileReferencesRegularPluralOf(file, entity)
+
+    ensures: FindingNotObserved(code: "allium.entity.unused", entity: entity)
+}
+
+-- A .created(status: value) call counts as assigning value wherever an ensures
+-- block may create an entity: a bare statement, an if/else branch, a for body,
+-- or the value of a let binding (#103).
+rule CreationInsideForOrLetAssignsStatus {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: RuleCreatesEntityWithStatusInsideForOrLet(entity, value)
+
+    ensures: FindingNotObserved(code: "allium.status.unreachableValue", status: value)
+}
+
+-- A qualified name binds tighter than any operator: x * alias/config.param
+-- multiplies by the imported config value rather than dividing x * alias by
+-- config.param (#102).
+rule QualifiedNameParsesAsOneOperand {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: ExpressionUsesQualifiedNameAsRightOperand(alias, name)
+    requires: UseDeclarationBindsAliasToFileInCheckSet(alias)
+    requires: AliasedModuleOffersName(alias, name)
+
+    ensures: FindingNotObserved(code: "allium.config.undefinedReference", name: name)
+}
+
 rule UnresolvedUsePathWarnsInMultiFileMode {
     when: CheckCommandInvokedWithInputs(inputs)
 
@@ -484,6 +520,19 @@ rule QualifiedProvidesCreditsImportedTriggerReachability {
     ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
 }
 
+-- A qualified emission (ensures: alias/Trigger(...)) reaches the imported
+-- module's listeners the same way a qualified provides does (#109).
+rule QualifiedEmissionCreditsImportedTriggerReachability {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: InputsResolveToMultipleFiles(inputs)
+    requires: FileRuleListensForTrigger(file_a, trigger)
+    requires: FileHasUseDeclarationMappingAliasTo(file_b, file_a)
+    requires: FileRuleEmitsTriggerQualifiedViaAlias(file_b, trigger)
+
+    ensures: FindingNotObserved(code: "allium.rule.unreachableTrigger", trigger: trigger)
+}
+
 -- A qualified reference alias/Name at any site — a when trigger or entity
 -- subject, a provides entry, a surface context, an inline parameter type, a
 -- field type, a .created call, a default, a contract clause — must name a
@@ -512,7 +561,8 @@ rule UndeclaredImportAliasIsDiagnosedAtEveryReferenceSite {
 -- name-existence audit). A target outside the check set is unknowable.
 --
 -- One reference form is exempt: a name in a collection-consuming position
--- (a `for … in` / `in` / `where` iterable, or a `let` value) is an entity
+-- (a `for … in` / `in` / `where` iterable, a `let` value, or the receiver of a
+-- built-in collection method such as `.count` or `.any()`) is an entity
 -- collection, the pluralised form of an entity. The offered set holds declared
 -- singular names, never the derived plural, and the checker has no
 -- pluralisation model, so the membership test can neither confirm nor refute a

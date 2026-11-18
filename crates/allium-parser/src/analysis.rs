@@ -59,6 +59,10 @@ pub struct ReverseContributions {
     /// Trigger names an importer provides via `provides: alias/Trigger(...)`.
     /// Makes the imported module's rules that listen for them reachable (#63).
     pub provided_triggers: HashSet<String>,
+    /// Trigger names an importer's rules emit via `ensures: alias/Trigger(...)`.
+    /// Makes the imported module's rules that listen for them reachable, as a
+    /// local emission would (#109).
+    pub emitted_triggers: HashSet<String>,
     /// Imported entity name → status values an importer assigns, whether via
     /// `alias/Entity.created(status: X)` (#62) or as the target of a witnessed
     /// transition (#64).
@@ -78,6 +82,7 @@ impl ReverseContributions {
     /// True when there is nothing to contribute.
     pub fn is_empty(&self) -> bool {
         self.provided_triggers.is_empty()
+            && self.emitted_triggers.is_empty()
             && self.assigned_statuses.is_empty()
             && self.witnessed_transitions.is_empty()
             && self.referenced_fields.is_empty()
@@ -86,6 +91,7 @@ impl ReverseContributions {
     /// Fold another importer's contributions into this aggregate.
     pub fn merge(&mut self, other: ReverseContributions) {
         self.provided_triggers.extend(other.provided_triggers);
+        self.emitted_triggers.extend(other.emitted_triggers);
         for (entity, statuses) in other.assigned_statuses {
             self.assigned_statuses.entry(entity).or_default().extend(statuses);
         }
@@ -1199,6 +1205,12 @@ impl Ctx<'_> {
         for rule in self.blocks(BlockKind::Rule) {
             for item in &rule.items {
                 collect_emitted_trigger_from_item(&item.kind, &mut emitted_triggers);
+            }
+        }
+        // Triggers an importer emits by qualified name count as emitted here (#109).
+        if let Some(rev) = self.reverse_contributions {
+            for t in &rev.emitted_triggers {
+                emitted_triggers.insert(t.as_str());
             }
         }
 
@@ -2971,6 +2983,14 @@ fn visit_created_calls<'a>(
                 visit_created_calls(body, status_by_entity, has_transitions, on_status, issues);
             }
         }
+        // `for x in xs: E.created(...)` and `let e = E.created(...)` create
+        // the entity just as a bare statement does (#103).
+        Expr::For { body, .. } => {
+            visit_created_calls(body, status_by_entity, has_transitions, on_status, issues);
+        }
+        Expr::LetExpr { value, .. } => {
+            visit_created_calls(value, status_by_entity, has_transitions, on_status, issues);
+        }
         _ => {}
     }
 }
@@ -3482,6 +3502,12 @@ impl Ctx<'_> {
         for rule in self.blocks(BlockKind::Rule) {
             for item in &rule.items {
                 collect_emitted_trigger_from_item(&item.kind, &mut emitted);
+            }
+        }
+        // Triggers an importer emits by qualified name count as emitted here (#109).
+        if let Some(rev) = self.reverse_contributions {
+            for t in &rev.emitted_triggers {
+                emitted.insert(t.as_str());
             }
         }
 
@@ -4317,6 +4343,21 @@ fn collect_accessed_fields_from_expr<'a>(expr: &'a Expr, out: &mut HashSet<&'a s
 // 9. Unused entities
 // ---------------------------------------------------------------------------
 
+/// The regular English plurals an entity collection may take (`Users`,
+/// `Addresses`, `Candidacies`). Irregular plurals (`People`) are not modelled,
+/// so an entity referenced only through one is still reported unused.
+fn entity_collection_names(entity: &str) -> Vec<String> {
+    let mut out = vec![format!("{entity}s"), format!("{entity}es")];
+    let mut chars = entity.chars().rev();
+    if let (Some('y'), Some(prev)) = (chars.next(), chars.next()) {
+        if !"aeiouAEIOU".contains(prev) {
+            out.push(format!("{}ies", &entity[..entity.len() - 1]));
+        }
+    }
+    out
+}
+
+
 impl Ctx<'_> {
     fn check_unused_entities(&mut self) {
         let mut all_idents = self.collect_all_referenced_idents();
@@ -4355,7 +4396,13 @@ impl Ctx<'_> {
                 Some(n) => n,
                 None => continue,
             };
-            if !all_idents.contains(name.name.as_str()) {
+            // An entity iterated only through its collection (`for s in
+            // Sequences`) is referenced by its plural (#111).
+            let referenced = all_idents.contains(name.name.as_str())
+                || entity_collection_names(&name.name)
+                    .iter()
+                    .any(|plural| all_idents.contains(plural.as_str()));
+            if !referenced {
                 findings.push(
                     Diagnostic::warning(
                         name.span,
@@ -4889,7 +4936,7 @@ pub fn collect_reverse_contributions<'a>(
         for item in &b.items {
             if let BlockItemKind::Clause { keyword, value } = &item.kind {
                 if keyword == "provides" {
-                    collect_qualified_provides(value, alias, &mut out.provided_triggers);
+                    collect_qualified_trigger_calls(value, alias, &mut out.provided_triggers);
                 }
             }
         }
@@ -4902,6 +4949,7 @@ pub fn collect_reverse_contributions<'a>(
         for_each_rule_clause(&rule.items, &mut |keyword, value| {
             if keyword == "ensures" {
                 collect_qualified_created(value, alias, &status_by_entity, &mut out.assigned_statuses);
+                collect_qualified_trigger_calls(value, alias, &mut out.emitted_triggers);
             }
         });
         collect_witnessed_transition(
@@ -5010,13 +5058,10 @@ fn module_blocks(module: &Module, kind: BlockKind) -> impl Iterator<Item = &Bloc
     })
 }
 
-/// Collect trigger names provided by qualified `alias/Trigger(...)` calls.
-///
-/// NOTE (known gap): mirrors `collect_call_names` in not walking `for` bodies in
-/// `provides:` (issue #61). A qualified trigger provided only inside a `for`
-/// block is therefore not collected; the general `for`-in-`provides` fix (Group
-/// A) should cover both the local and qualified collectors together.
-fn collect_qualified_provides(expr: &Expr, alias: &str, out: &mut HashSet<String>) {
+/// Collect trigger names named by qualified `alias/Trigger(...)` calls in an
+/// importer's surface `provides:` or rule `ensures:`, descending into blocks,
+/// guards, conditionals and `for` bodies.
+fn collect_qualified_trigger_calls(expr: &Expr, alias: &str, out: &mut HashSet<String>) {
     match expr {
         Expr::Call { function, .. } => {
             if let Expr::QualifiedName(q) = function.as_ref() {
@@ -5027,19 +5072,19 @@ fn collect_qualified_provides(expr: &Expr, alias: &str, out: &mut HashSet<String
         }
         Expr::Block { items, .. } => {
             for item in items {
-                collect_qualified_provides(item, alias, out);
+                collect_qualified_trigger_calls(item, alias, out);
             }
         }
-        Expr::WhenGuard { action, .. } => collect_qualified_provides(action, alias, out),
+        Expr::WhenGuard { action, .. } => collect_qualified_trigger_calls(action, alias, out),
         Expr::Conditional { branches, else_body, .. } => {
             for b in branches {
-                collect_qualified_provides(&b.body, alias, out);
+                collect_qualified_trigger_calls(&b.body, alias, out);
             }
             if let Some(body) = else_body {
-                collect_qualified_provides(body, alias, out);
+                collect_qualified_trigger_calls(body, alias, out);
             }
         }
-        Expr::For { body, .. } => collect_qualified_provides(body, alias, out),
+        Expr::For { body, .. } => collect_qualified_trigger_calls(body, alias, out),
         _ => {}
     }
 }
@@ -5835,6 +5880,11 @@ fn collect_qrefs_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<QRef<'a>>)
     }
 }
 
+/// The built-in dot-methods on collections (language reference, validation
+/// rule 14a).
+const BUILTIN_COLLECTION_METHODS: [&str; 8] =
+    ["count", "any", "all", "first", "last", "unique", "add", "remove"];
+
 fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
     match expr {
         Expr::QualifiedName(q) => {
@@ -5844,6 +5894,17 @@ fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
         }
         Expr::MemberAccess { object, field, .. }
         | Expr::OptionalAccess { object, field, .. } => {
+            // The receiver of a built-in collection method (`alias/Things.count`,
+            // `alias/Things.any(...)`) is an entity collection, exempt from the
+            // membership test like a `for … in` iterable (#108).
+            if let Expr::QualifiedName(QualifiedName { qualifier: Some(qualifier), name, span }) =
+                object.as_ref()
+            {
+                if BUILTIN_COLLECTION_METHODS.contains(&field.name.as_str()) {
+                    out.push(QRef { qualifier, name, span: *span, collection: true });
+                    return;
+                }
+            }
             // Detect alias.TypeName pattern (e.g. core.EntityMap in exposes)
             if let Expr::Ident(id) = object.as_ref() {
                 if starts_uppercase(&field.name) {
@@ -7442,6 +7503,44 @@ mod tests {
 
     // -- Status state machine --
 
+    const SHIP_103: &str = "entity Port {\n  name: String\n}\n\n\
+        entity Fleet {\n  ports: Set<Port>\n  home: Port\n  flagship: Ship?\n}\n\n\
+        entity Ship {\n  port: Port\n  status: afloat | sunk\n\n  \
+        transitions status {\n    afloat -> sunk\n    terminal: sunk\n  }\n}\n\n\
+        rule Sink {\n  when: SinkShip(ship)\n  requires: ship.status = afloat\n  \
+        ensures: ship.status = sunk\n}\n\n";
+
+    #[test]
+    fn created_status_inside_ensures_for_is_an_assignment() {
+        let src = format!(
+            "{SHIP_103}rule Launch {{\n  when: fleet: Fleet.created\n  ensures:\n    \
+             for p in fleet.ports:\n      Ship.created(port: p, status: afloat)\n}}\n"
+        );
+        let ds = analyze_src(&src);
+        assert!(!has_code(&ds, "allium.status.unreachableValue"), "{ds:?}");
+    }
+
+    #[test]
+    fn created_status_bound_by_let_is_an_assignment() {
+        let src = format!(
+            "{SHIP_103}rule Launch {{\n  when: fleet: Fleet.created\n  ensures:\n    \
+             let ship = Ship.created(port: fleet.home, status: afloat)\n    \
+             fleet.flagship = ship\n}}\n"
+        );
+        let ds = analyze_src(&src);
+        assert!(!has_code(&ds, "allium.status.unreachableValue"), "{ds:?}");
+    }
+
+    #[test]
+    fn created_with_undeclared_status_inside_for_is_still_an_error() {
+        let src = format!(
+            "{SHIP_103}rule Launch {{\n  when: fleet: Fleet.created\n  ensures:\n    \
+             for p in fleet.ports:\n      Ship.created(port: p, status: docked)\n}}\n"
+        );
+        let ds = analyze_src(&src);
+        assert!(has_code(&ds, "allium.created.invalidStatus"), "{ds:?}");
+    }
+
     #[test]
     fn variable_status_assignment_suppresses_unreachable() {
         let ds = analyze_src(
@@ -8464,6 +8563,38 @@ rule ShowsError {
     fn unused_entity_reported() {
         let ds = analyze_src("entity Orphan {\n  x: String\n}\n");
         assert!(has_code(&ds, "allium.entity.unused"));
+    }
+
+    #[test]
+    fn entity_referenced_through_its_collection_is_used() {
+        for (entity, collection) in [
+            ("Sequence", "Sequences"),
+            ("Address", "Addresses"),
+            ("Candidacy", "Candidacies"),
+            ("Survey", "Surveys"),
+        ] {
+            let ds = analyze_src(&format!(
+                "entity {entity} {{\n  n: Integer\n}}\n\n\
+                 invariant Positive {{\n  for s in {collection}:\n    s.n > 0\n}}\n"
+            ));
+            assert!(!has_code(&ds, "allium.entity.unused"), "{entity}/{collection}: {ds:?}");
+        }
+    }
+
+    #[test]
+    fn unrelated_plural_does_not_credit_an_entity() {
+        let ds = analyze_src(
+            "entity Sequence {\n  n: Integer\n}\n\n\
+             invariant Positive {\n  for s in Sequencers:\n    s.n > 0\n}\n",
+        );
+        assert!(has_code(&ds, "allium.entity.unused"));
+    }
+
+    #[test]
+    fn entity_collection_names_cover_regular_plurals() {
+        assert_eq!(entity_collection_names("User"), ["Users", "Useres"]);
+        assert!(entity_collection_names("Candidacy").contains(&"Candidacies".to_string()));
+        assert!(!entity_collection_names("Survey").contains(&"Surveies".to_string()));
     }
 
     #[test]
