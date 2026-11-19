@@ -1116,3 +1116,37 @@ fn references_through_a_registry_coordinate_import_stay_unknowable() {
         "a registry coordinate is out-of-set, not broken.\nDiagnostics: {stdout}"
     );
 }
+
+// -----------------------------------------------------------------------
+// Types named only by another module's contract signatures (#106)
+// -----------------------------------------------------------------------
+
+#[test]
+fn qualified_signature_types_credit_the_imported_module() {
+    let dir = TempDir::new("signature-types");
+    dir.write(
+        "core.allium",
+        "-- allium: 3\nvalue Report {\n  path: String\n}\n\nenum Mode { quick | full }\n\nvalue Unrelated {\n  n: Integer\n}\n",
+    );
+    dir.write(
+        "checker.allium",
+        "-- allium: 3\nuse \"./core.allium\" as core\n\ncontract Checker {\n  run_check: (mode: core/Mode) -> core/Report\n}\n",
+    );
+
+    let output = allium()
+        .args(["check", dir.path().to_str().unwrap()])
+        .output()
+        .expect("spawn allium");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let unused: Vec<String> = parse_diagnostics(&stdout)
+        .into_iter()
+        .filter(|d| d.code == "allium.definition.unused")
+        .map(|d| d.message)
+        .collect();
+
+    assert_eq!(
+        unused,
+        ["Value 'Unrelated' is declared but not referenced elsewhere."],
+        "only the type no signature names should be unused"
+    );
+}

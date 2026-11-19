@@ -357,6 +357,26 @@ rule CrossModuleReferenceSuppressesUnusedWarning {
     ensures: FindingNotObserved(code: "allium.definition.unused", definition: entity_or_value)
 }
 
+-- The parameter and return types of a contract signature are type references
+-- (validation rule 42), in every position: bare, optional, or a generic
+-- argument such as List<Kind> (#106).
+rule ContractSignatureTypeCountsAsReference {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: ContractSignatureNamesType(signature, value_or_enum)
+
+    ensures: FindingNotObserved(code: "allium.definition.unused", definition: value_or_enum)
+}
+
+rule UndeclaredContractSignatureTypeIsError {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: ContractSignatureNamesType(signature, type_name)
+    requires: TypeNotDeclaredLocallyOrImported(type_name)
+
+    ensures: FindingObserved(code: "allium.type.undefinedReference", severity: error)
+}
+
 -- An entity iterated only through its collection (for s in Sequences) is used.
 -- Regular English plurals are recognised (Users, Addresses, Candidacies);
 -- irregular ones (People) are not modelled (#111).
@@ -489,6 +509,31 @@ rule ReferenceThroughKnowableOutOfSetImportStaysSilent {
     requires: AliasUsePathIsKnowableButOutOfSet(alias)
 
     ensures: FindingNotObserved(code: "allium.reference.unresolvedImport", name: Name)
+}
+
+-- A receiving trigger may declare a parameter's type with `name: Type`
+-- (`when: Decided(clerk, outcome: Outcome)`). The type is a reference, and an
+-- undeclared one is an error. `name: value` stays an emission-only form (#118).
+rule TypedTriggerParameterIsValidTriggerForm {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: RuleWhenClauseDeclaresParameterType(parameter, value_or_enum)
+
+    ensures: FindingNotObserved(code: "allium.rule.invalidTrigger")
+    ensures: FindingNotObserved(code: "allium.definition.unused", definition: value_or_enum)
+}
+
+-- Where the declared type is a local enum, a bare name emitted for that
+-- parameter, and not bound in the emitting rule, is an enum literal; one the
+-- enum does not declare is an error at the literal (#118).
+rule EmittedLiteralOutsideDeclaredEnumIsError {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: RuleWhenClauseDeclaresParameterType(parameter, enum_type)
+    requires: RuleEmitsLiteralForParameter(parameter, literal)
+    requires: LiteralNotValueOfEnum(literal, enum_type)
+
+    ensures: FindingObserved(code: "allium.rule.emittedValueNotInEnum", severity: error)
 }
 
 rule QualifiedTriggerCallIsValidTriggerForm {

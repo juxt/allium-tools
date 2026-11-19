@@ -160,6 +160,13 @@ export type WasmBlockItemKind =
 	| { PathAssignment: { path: WasmExpr; value: WasmExpr } }
 	| { OpenQuestion: { text: WasmStringLiteral } }
 	| { ContractsClause: { entries: WasmContractBinding[] } }
+	| {
+			Signature: {
+				name: WasmIdent;
+				params: WasmSignatureParam[];
+				return_type: WasmExpr;
+			};
+		}
 	| { Annotation: WasmAnnotation }
 	| { InvariantBlock: { name: WasmIdent; body: WasmExpr } }
 	| { TransitionsBlock: WasmTransitionGraph }
@@ -197,6 +204,13 @@ export interface WasmWhenClause {
 // ---------------------------------------------------------------------------
 // Contracts and annotations
 // ---------------------------------------------------------------------------
+
+/** One `name: Type` parameter of a contract signature. */
+export interface WasmSignatureParam {
+	span: WasmSpan;
+	name: WasmIdent;
+	type_expr: WasmExpr;
+}
 
 export interface WasmContractBinding {
 	direction: "Demands" | "Fulfils";

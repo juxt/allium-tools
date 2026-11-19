@@ -4,6 +4,10 @@ Behaviour changes worth knowing before you upgrade. Releases ship from a single 
 
 ## Unreleased
 
+Contract signatures are checked. The types a signature names, as parameters, return types or generic arguments, count as references, so a value or enum used only as a return type is no longer reported unused (#106). An undeclared type in a signature or contract field is now an error (validation rule 42): a spec that names an imported type there without its alias (`Report` rather than `core/Report`) will start failing `check`, as entity fields already did. `allium parse` gives each signature its own `Signature` node with typed parameters and a return type, where before it was misread as a projection.
+
+A receiving trigger can declare a parameter's type, `when: Decided(clerk, outcome: Outcome)`, which `check` previously rejected as an invalid trigger. The type counts as a reference, so an enum whose values only travel between rules is no longer reported unused, and each rule emitting the trigger is checked: `Decided(clerk, outcome: nonsense)` is an error when `nonsense` is not a value of `Outcome` (#118). The unused message now names an enum as an enum rather than a value.
+
 Open questions are reported at info severity rather than warning. They are written on purpose and stay until answered, so a warning treated a deliberate marker as a defect and failed `check` runs that fail on warnings.
 
 A Nix flake packages the CLI and the language server: `nix profile install github:juxt/allium-tools`.

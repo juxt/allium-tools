@@ -948,6 +948,14 @@ impl<'s> Parser<'s> {
                 return self.parse_legacy_field_list_clause(start);
             }
 
+            // `name: (params) -> ReturnType` — contract signature
+            if block_kind == BlockKind::Contract
+                && self.peek_at(1).kind == TokenKind::Colon
+                && self.peek_at(2).kind == TokenKind::LParen
+            {
+                return self.parse_signature_item(start);
+            }
+
             // Check for `name:` — assignment or clause
             if self.peek_at(1).kind == TokenKind::Colon {
                 return self.parse_assign_or_clause_item(start);
@@ -968,6 +976,38 @@ impl<'s> Parser<'s> {
             ),
         );
         None
+    }
+
+    /// Parse `name: (param: Type, ...) -> ReturnType` inside a contract.
+    fn parse_signature_item(&mut self, start: Span) -> Option<BlockItem> {
+        let name = self.parse_ident_in("signature name")?;
+        self.expect(TokenKind::Colon)?;
+        self.expect(TokenKind::LParen)?;
+        let mut params = Vec::new();
+        while !self.at(TokenKind::RParen) && !self.at_eof() {
+            let param_name = self.parse_ident_in("parameter name")?;
+            self.expect(TokenKind::Colon)?;
+            let type_expr = self.parse_expr(0)?;
+            params.push(SignatureParam {
+                span: param_name.span.merge(type_expr.span()),
+                name: param_name,
+                type_expr,
+            });
+            if self.eat(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        self.expect(TokenKind::ThinArrow)?;
+        let return_type = self.parse_expr(0)?;
+        Some(BlockItem {
+            span: start.merge(return_type.span()),
+            kind: BlockItemKind::Signature {
+                name,
+                params,
+                return_type,
+            },
+        })
     }
 
     /// Parse `transitions field { edges..., terminal: states }`.
@@ -5577,27 +5617,181 @@ entity E {
         ));
     }
 
-    #[test]
-    fn contract_typed_signature() {
-        let src = r#"contract Codec {
-    serialize: (value: Any) -> ByteArray
-}"#;
+    // -----------------------------------------------------------------------
+    // Contract signatures: `name: (param: Type, ...) -> ReturnType`
+    // -----------------------------------------------------------------------
+
+    /// Render a type expression the way it is written, so a test can state
+    /// the parsed signature as one readable string.
+    fn render_type(e: &Expr) -> String {
+        match e {
+            Expr::Ident(id) => id.name.clone(),
+            Expr::QualifiedName(q) => match &q.qualifier {
+                Some(qual) => format!("{qual}/{}", q.name),
+                None => q.name.clone(),
+            },
+            Expr::GenericType { name, args, .. } => format!(
+                "{}<{}>",
+                render_type(name),
+                args.iter().map(render_type).collect::<Vec<_>>().join(", ")
+            ),
+            Expr::TypeOptional { inner, .. } => format!("{}?", render_type(inner)),
+            other => panic!("unexpected type expression {other:?}"),
+        }
+    }
+
+    /// Every item of the first contract, rendered: signatures as
+    /// `name(p: T, ...) -> R`, other items by their kind.
+    fn contract_items(src: &str) -> Vec<String> {
         let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0);
-        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
-        assert_eq!(b.kind, BlockKind::Contract);
-        let BlockItemKind::Assignment { name, value } = &b.items[0].kind else { panic!() };
-        assert_eq!(name.name, "serialize");
-        assert!(matches!(value, Expr::ProjectionMap { .. }));
+        assert!(
+            r.diagnostics.iter().all(|d| d.severity != Severity::Error),
+            "unexpected errors: {:?}",
+            r.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        let contract = r
+            .module
+            .declarations
+            .iter()
+            .find_map(|d| match d {
+                Decl::Block(b) if b.kind == BlockKind::Contract => Some(b),
+                _ => None,
+            })
+            .expect("contract decl");
+        contract
+            .items
+            .iter()
+            .map(|item| match &item.kind {
+                BlockItemKind::Signature {
+                    name,
+                    params,
+                    return_type,
+                } => format!(
+                    "{}({}) -> {}",
+                    name.name,
+                    params
+                        .iter()
+                        .map(|p| format!("{}: {}", p.name.name, render_type(&p.type_expr)))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    render_type(return_type)
+                ),
+                BlockItemKind::Assignment { name, value } => {
+                    format!("field {}: {}", name.name, render_type(value))
+                }
+                BlockItemKind::Annotation(a) => format!("annotation {:?}", a.kind),
+                other => panic!("unexpected contract item {other:?}"),
+            })
+            .collect()
     }
 
     #[test]
-    fn contract_multi_param_signature() {
-        let src = r#"contract Codec {
-    serialize: (value: Any, format: String) -> ByteArray
-}"#;
+    fn signature_with_one_parameter() {
+        assert_eq!(
+            contract_items("contract Codec {\n    serialize: (value: Any) -> ByteArray\n}"),
+            ["serialize(value: Any) -> ByteArray"]
+        );
+    }
+
+    #[test]
+    fn signature_parameters_keep_their_order() {
+        assert_eq!(
+            contract_items(
+                "contract Codec {\n    serialize: (value: Any, format: String, level: Integer) -> ByteArray\n}"
+            ),
+            ["serialize(value: Any, format: String, level: Integer) -> ByteArray"]
+        );
+    }
+
+    #[test]
+    fn signature_with_no_parameters() {
+        assert_eq!(
+            contract_items("contract Demo {\n    list_things: () -> Set<Foo>\n}"),
+            ["list_things() -> Set<Foo>"]
+        );
+    }
+
+    #[test]
+    fn signature_types_can_be_generic_optional_or_qualified() {
+        assert_eq!(
+            contract_items(
+                "use \"./base.allium\" as base\n\
+                 contract Store {\n\
+                 \x20   find: (key: String) -> Report?\n\
+                 \x20   load: (keys: List<String>) -> Map<String, base/Report>\n\
+                 \x20   save: (report: base/Report) -> Set<List<Kind>>\n\
+                 }"
+            ),
+            [
+                "find(key: String) -> Report?",
+                "load(keys: List<String>) -> Map<String, base/Report>",
+                "save(report: base/Report) -> Set<List<Kind>>",
+            ]
+        );
+    }
+
+    #[test]
+    fn signatures_on_consecutive_lines_stay_separate() {
+        // A return type must not run on into the next line's signature.
+        assert_eq!(
+            contract_items(
+                "contract Checker {\n    run_check: (mode: Mode) -> Report\n    list_kinds: () -> List<Kind>\n    health: () -> Status\n}"
+            ),
+            [
+                "run_check(mode: Mode) -> Report",
+                "list_kinds() -> List<Kind>",
+                "health() -> Status",
+            ]
+        );
+    }
+
+    #[test]
+    fn signatures_mix_with_typed_fields_and_annotations() {
+        assert_eq!(
+            contract_items(
+                "contract Versioned {\n    version: Integer\n    bump: (by: Integer) -> Integer\n    @invariant Monotonic\n        -- versions only increase\n}"
+            ),
+            [
+                "field version: Integer",
+                "bump(by: Integer) -> Integer",
+                "annotation Invariant",
+            ]
+        );
+    }
+
+    #[test]
+    fn signature_span_runs_from_name_to_return_type() {
+        let src = "-- allium: 3\ncontract Codec {\n    serialize: (value: Any) -> List<ByteArray>\n}";
         let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0);
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        let item = &b.items[0];
+        assert_eq!(
+            &src[item.span.start..item.span.end],
+            "serialize: (value: Any) -> List<ByteArray>"
+        );
+        let BlockItemKind::Signature { params, .. } = &item.kind else { panic!() };
+        assert_eq!(&src[params[0].span.start..params[0].span.end], "value: Any");
+    }
+
+    #[test]
+    fn signature_without_return_type_is_an_error() {
+        let r = parse_ok("contract Codec {\n    serialize: (value: Any)\n}");
+        assert!(r.diagnostics.iter().any(|d| d.severity == Severity::Error));
+    }
+
+    #[test]
+    fn signature_parameter_without_type_is_an_error() {
+        let r = parse_ok("contract Codec {\n    serialize: (value) -> ByteArray\n}");
+        assert!(r.diagnostics.iter().any(|d| d.severity == Severity::Error));
+    }
+
+    #[test]
+    fn parenthesised_value_outside_a_contract_is_not_a_signature() {
+        // Only contract bodies hold signatures; elsewhere `(...)` keeps its
+        // ordinary expression meaning.
+        let r = parse_ok("entity Order {\n    total: (price + tax)\n}");
+        let Decl::Block(b) = &r.module.declarations[0] else { panic!() };
+        assert!(matches!(&b.items[0].kind, BlockItemKind::Assignment { .. }));
     }
 
     #[test]
@@ -6368,46 +6562,4 @@ rule R {
         );
     }
 
-    #[test]
-    fn zero_arg_contract_signature_parens() {
-        // `op: () -> ReturnType` declares a zero-argument contract operation.
-        let r = parse_ok(
-            "-- allium: 3\nvalue Foo { value: String }\n\
-             contract Demo { list_things: () -> Set<Foo> }",
-        );
-        assert!(
-            r.diagnostics.iter().all(|d| d.severity != Severity::Error),
-            "zero-arg signature should parse without errors, got: {:?}",
-            r.diagnostics
-                .iter()
-                .map(|d| &d.message)
-                .collect::<Vec<_>>(),
-        );
-
-        // The empty parens parse to an empty parameter list: the signature
-        // value is `Set<Foo>` (a GenericType) whose name is a `() -> Set`
-        // projection with an empty block as its source.
-        let contract = r
-            .module
-            .declarations
-            .iter()
-            .find_map(|d| match d {
-                Decl::Block(b) if b.kind == BlockKind::Contract => Some(b),
-                _ => None,
-            })
-            .expect("contract decl");
-        let BlockItemKind::Assignment { value, .. } = &contract.items[0].kind else {
-            panic!("expected signature assignment, got {:?}", contract.items[0].kind);
-        };
-        let Expr::GenericType { name, .. } = value else {
-            panic!("expected GenericType signature value, got {value:?}");
-        };
-        let Expr::ProjectionMap { source, .. } = name.as_ref() else {
-            panic!("expected `params -> Return` projection, got {name:?}");
-        };
-        assert!(
-            matches!(source.as_ref(), Expr::Block { items, .. } if items.is_empty()),
-            "zero-arg params should be an empty block, got {source:?}",
-        );
-    }
 }

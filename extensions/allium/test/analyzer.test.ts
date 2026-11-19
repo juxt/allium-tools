@@ -179,18 +179,33 @@ test("accepts combined external-stimulus triggers joined by or", () => {
   );
 });
 
-test("reports typed external-stimulus trigger param at the trigger, not the body", () => {
-  // allium-tools#42: a `name: Type` param is invalid; the diagnostic must land
-  // on the trigger param and must not double-fire as undefinedBinding.
+test("typed trigger param is a binding", () => {
+  // `name: Type` declares the parameter's type (#118).
   const findings = analyzeAllium(
     `entity Account { name: String }\nentity Greeting { label: String }\n\nrule TypedParam {\n  when: AccountSeen(account: Account)\n  ensures: Greeting.created(label: account.name)\n}`,
   );
-  const invalid = findings.filter(
-    (f) => f.code === "allium.rule.invalidTrigger",
+  assert.equal(
+    findings.some((f) => f.code === "allium.rule.invalidTrigger"),
+    false,
   );
-  assert.equal(invalid.length, 1);
-  assert.ok(invalid[0].message.includes("'account'"));
-  assert.ok(invalid[0].message.includes("bare names"));
+  assert.equal(
+    findings.some((f) => f.code === "allium.rule.undefinedBinding"),
+    false,
+  );
+});
+
+test("reports a name: value trigger param at the trigger, not the body", () => {
+  // allium-tools#42: `name: value` belongs to emissions; the diagnostic lands
+  // on the trigger param and does not double-fire as undefinedBinding.
+  const src = `entity Account { name: String }\nentity Greeting { label: String }\n\nrule ValueParam {\n  when: AccountSeen(account: current)\n  ensures: Greeting.created(label: account.name)\n}`;
+  const findings = analyzeAllium(src);
+  assert.deepEqual(flaggedText(src, findings, "allium.rule.invalidTrigger"), [
+    "account",
+  ]);
+  const message = findings.find(
+    (f) => f.code === "allium.rule.invalidTrigger",
+  )!.message;
+  assert.ok(message.includes("'account'") && message.includes("'name: Type'"));
   assert.equal(
     findings.some((f) => f.code === "allium.rule.undefinedBinding"),
     false,
@@ -1439,5 +1454,190 @@ test("rule 14c: empty list literal must target a List<T> field", () => {
   assert.equal(
     ok.some((f) => f.code === "allium.list.emptyListNoElementType"),
     false,
+  );
+});
+
+// --- Contract signatures (#106) and typed trigger parameters (#118) ---
+
+/** The source text each finding with `code` covers, in source order. */
+function flaggedText(
+  src: string,
+  findings: ReturnType<typeof analyzeAllium>,
+  code: string,
+): string[] {
+  const lines = src.split("\n");
+  return findings
+    .filter((f) => f.code === code)
+    .sort(
+      (a, b) =>
+        a.start.line - b.start.line || a.start.character - b.start.character,
+    )
+    .map((f) =>
+      lines[f.start.line].slice(f.start.character, f.end.character),
+    );
+}
+
+/** Codes these issues are about; other checks are out of scope here. */
+const typeCodes = [
+  "allium.definition.unused",
+  "allium.type.undefinedReference",
+  "allium.rule.invalidTrigger",
+  "allium.rule.emittedValueNotInEnum",
+];
+
+test("contract types from #106 are all referenced", () => {
+  const findings = analyzeAllium(
+    "-- allium: 3\nvalue Report {\n    path: String\n}\n\nenum Mode { quick | full }\n\nenum Kind { a | b }\n\ncontract Checker {\n    run_check: (mode: Mode) -> Report\n    list_kinds: () -> List<Kind>\n}\n",
+  );
+  assert.deepEqual(
+    findings.filter((f) => typeCodes.includes(f.code)),
+    [],
+  );
+});
+
+test("undeclared types in contract signatures are errors at the name", () => {
+  const src =
+    "value Report {\n    path: String\n}\n\ncontract Checker {\n    run_check: (mode: Moed) -> Reprot\n    list_kinds: (filter: Set<Filtre>) -> List<Knid>?\n    save: (report: Report) -> Report\n    raw: (x: Any) -> Void\n}\n";
+  const findings = analyzeAllium(src);
+  assert.deepEqual(
+    flaggedText(src, findings, "allium.type.undefinedReference"),
+    ["Moed", "Reprot", "Filtre", "Knid"],
+  );
+});
+
+function decidedSpec(recordTrigger: string, refusedValue: string): string {
+  return `-- allium: 3
+enum Outcome { accepted | refused }
+
+entity Clerk {
+    name: String
+}
+
+entity Order {
+    placed_by: Clerk
+}
+
+rule Submit {
+    when: SubmitPressed(clerk)
+    ensures: Decided(clerk, outcome: accepted)
+}
+
+rule Refuse {
+    when: RefusePressed(clerk)
+    ensures: Decided(clerk, outcome: ${refusedValue})
+}
+
+rule Record {
+    when: ${recordTrigger}
+    requires: outcome = accepted
+    ensures: Order.created(placed_by: clerk)
+}
+
+surface Desk {
+    facing clerk: Clerk
+
+    exposes:
+        clerk.name
+
+    provides:
+        SubmitPressed(clerk)
+        RefusePressed(clerk)
+}
+`;
+}
+
+test("#118 spec is clean once the parameter is typed", () => {
+  const findings = analyzeAllium(
+    decidedSpec("Decided(clerk, outcome: Outcome)", "refused"),
+  );
+  assert.deepEqual(
+    findings.filter((f) => typeCodes.includes(f.code)),
+    [],
+  );
+});
+
+test("untyped parameter does not reference the enum", () => {
+  const src = decidedSpec("Decided(clerk, outcome)", "refused");
+  assert.deepEqual(
+    flaggedText(src, analyzeAllium(src), "allium.definition.unused"),
+    ["Outcome"],
+  );
+});
+
+test("emitted literal outside the declared enum is an error", () => {
+  const src = decidedSpec("Decided(clerk, outcome: Outcome)", "nonsense");
+  const findings = analyzeAllium(src);
+  assert.deepEqual(
+    flaggedText(src, findings, "allium.rule.emittedValueNotInEnum"),
+    ["nonsense"],
+  );
+  const finding = findings.find(
+    (f) => f.code === "allium.rule.emittedValueNotInEnum",
+  )!;
+  assert.equal(finding.severity, "error");
+  assert.equal(
+    finding.message,
+    "'nonsense' is not a value of enum 'Outcome', the declared type of parameter 'outcome' of trigger 'Decided'.",
+  );
+});
+
+function emitting(ensures: string): string {
+  return `enum Outcome { accepted | refused }
+
+entity Clerk {
+    name: String
+    ok: Boolean
+}
+
+rule Decide {
+    when: Pressed(clerk, choice)
+${ensures}
+}
+
+rule Record {
+    when: Decided(clerk, outcome: Outcome)
+    ensures: clerk.ok = outcome = accepted
+}
+`;
+}
+
+for (const [label, ensures, expected] of [
+  ["positional, by position", "    ensures: Decided(clerk, acepted)", ["acepted"]],
+  [
+    "named, by name in any order",
+    "    ensures: Decided(outcome: acepted, clerk: clerk)",
+    ["acepted"],
+  ],
+  [
+    "in branches and loops",
+    "    ensures:\n        if clerk.ok:\n            Decided(clerk, outcome: accepted)\n        else:\n            Decided(clerk, outcome: refsued)\n        for c in Clerks:\n            Decided(c, outcome: maybe)",
+    ["refsued", "maybe"],
+  ],
+  [
+    "bound names pass through",
+    "    let verdict = choice\n    ensures:\n        Decided(clerk, outcome: choice)\n        Decided(clerk, outcome: verdict)",
+    [],
+  ],
+  [
+    "another trigger with the same parameter name",
+    "    ensures: Noted(clerk, outcome: whatever)",
+    [],
+  ],
+] as Array<[string, string, string[]]>) {
+  test(`emitted enum values: ${label}`, () => {
+    const src = emitting(ensures);
+    assert.deepEqual(
+      flaggedText(src, analyzeAllium(src), "allium.rule.emittedValueNotInEnum"),
+      expected,
+    );
+  });
+}
+
+test("undeclared typed trigger parameter type is an error at the name", () => {
+  const src =
+    "rule Record {\n    when: Decided(clerk, outcome: Outcom, items: List<Itme>)\n    ensures: Noted(clerk)\n}\n";
+  assert.deepEqual(
+    flaggedText(src, analyzeAllium(src), "allium.type.undefinedReference"),
+    ["Outcom", "Itme"],
   );
 });
