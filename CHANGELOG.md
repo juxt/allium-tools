@@ -4,6 +4,8 @@ Behaviour changes worth knowing before you upgrade. Releases ship from a single 
 
 ## Unreleased
 
+Open questions are reported at info severity rather than warning. They are written on purpose and stay until answered, so a warning treated a deliberate marker as a defect and failed `check` runs that fail on warnings.
+
 A Nix flake packages the CLI and the language server: `nix profile install github:juxt/allium-tools`.
 
 ## 3.7.2

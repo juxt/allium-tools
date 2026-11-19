@@ -242,7 +242,7 @@ function findOpenQuestions(text: string, lineStarts: number[]): Finding[] {
         match.index + match[0].length,
         "allium.openQuestion.present",
         "Open question present: specification is likely incomplete.",
-        "warning",
+        "info",
       ),
     );
   }

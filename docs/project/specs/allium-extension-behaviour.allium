@@ -242,12 +242,12 @@ rule UnknownExternalConfigAliasIsError {
     )
 }
 
-rule OpenQuestionEmitsWarningFinding {
+rule OpenQuestionEmitsInfoFinding {
     when: OpenQuestionParsed(open_question)
 
     ensures: Finding.created(
         code: "allium.openQuestion.present",
-        severity: warning
+        severity: info
     )
 }
 
