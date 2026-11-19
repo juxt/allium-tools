@@ -511,31 +511,6 @@ rule ReferenceThroughKnowableOutOfSetImportStaysSilent {
     ensures: FindingNotObserved(code: "allium.reference.unresolvedImport", name: Name)
 }
 
--- A receiving trigger may declare a parameter's type with `name: Type`
--- (`when: Decided(clerk, outcome: Outcome)`). The type is a reference, and an
--- undeclared one is an error. `name: value` stays an emission-only form (#118).
-rule TypedTriggerParameterIsValidTriggerForm {
-    when: CheckCommandInvokedWithInputs(inputs)
-
-    requires: RuleWhenClauseDeclaresParameterType(parameter, value_or_enum)
-
-    ensures: FindingNotObserved(code: "allium.rule.invalidTrigger")
-    ensures: FindingNotObserved(code: "allium.definition.unused", definition: value_or_enum)
-}
-
--- Where the declared type is a local enum, a bare name emitted for that
--- parameter, and not bound in the emitting rule, is an enum literal; one the
--- enum does not declare is an error at the literal (#118).
-rule EmittedLiteralOutsideDeclaredEnumIsError {
-    when: CheckCommandInvokedWithInputs(inputs)
-
-    requires: RuleWhenClauseDeclaresParameterType(parameter, enum_type)
-    requires: RuleEmitsLiteralForParameter(parameter, literal)
-    requires: LiteralNotValueOfEnum(literal, enum_type)
-
-    ensures: FindingObserved(code: "allium.rule.emittedValueNotInEnum", severity: error)
-}
-
 rule QualifiedTriggerCallIsValidTriggerForm {
     when: CheckCommandInvokedWithInputs(inputs)
 

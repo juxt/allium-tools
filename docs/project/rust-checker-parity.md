@@ -197,24 +197,13 @@ param. The name is now also added to the rule's binding scope
 malformed trigger produces exactly one diagnostic, at the trigger, rather than
 double-firing on the body.
 
-Issue #118 reversed part of that: a receiving trigger may declare a
-parameter's type with `name: Type` (`when: Decided(clerk, outcome:
-Outcome)`), as validation rule 6 and the trigger emission section of the
-language reference already assumed. Only `name: value`, where the value is
-not written as a type, is still `rule.invalidTrigger`. A declared type is a
-type reference (`type.undefinedReference` when undeclared), and where it is
-a local enum, each emitted bare literal for that parameter must be one of its
-values (`rule.emittedValueNotInEnum`). Rust: `typed_trigger_params` and
-`check_emitted_enum_values`; TypeScript: `findTypedSignatureAndParameterIssues`,
-which reads the wasm AST.
-
 Issue #106: contract signatures parse into their own AST node
 (`BlockItemKind::Signature`, with typed parameters and a return type) rather
 than as a projection. Their types count as references for the unused checks,
 and an undeclared one is `type.undefinedReference` (validation rule 42). The
 TypeScript analyzer's unused check counts names textually, so it never had
-the false positive; it now shares the undeclared-type check through the same
-AST function.
+the false positive; its undeclared-type check reads the wasm AST
+(`findContractSignatureTypeIssues`).
 
 ## Diagnostic codes implemented
 
@@ -239,7 +228,6 @@ AST function.
 | `allium.definition.unused` | warning | Yes | Yes |
 | `allium.deferred.missingLocationHint` | warning | Yes | Yes |
 | `allium.rule.invalidTrigger` | error | Yes | Yes |
-| `allium.rule.emittedValueNotInEnum` | error | Yes | Yes |
 | `allium.rule.undefinedBinding` | error | Yes | Yes |
 | `allium.let.duplicateBinding` | error | Yes | Yes |
 | `allium.config.undefinedReference` | warning | Yes | Yes |

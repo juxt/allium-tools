@@ -121,7 +121,7 @@ export function analyzeAllium(
     }
   }
   findings.push(...findInvalidTriggerIssues(lineStarts, blocks));
-  findings.push(...findTypedSignatureAndParameterIssues(text, lineStarts));
+  findings.push(...findContractSignatureTypeIssues(text, lineStarts));
   findings.push(...findListLiteralHomogeneityIssues(text, lineStarts));
   findings.push(...findDefaultFieldSchemaIssues(text, lineStarts));
   findings.push(...findCreatedFieldNameIssues(text, lineStarts));
@@ -4589,7 +4589,7 @@ function findInvalidTriggerIssues(
             paramOffset,
             paramOffset + named.name.length,
             "allium.rule.invalidTrigger",
-            `Rule '${rule.name}' trigger parameter '${named.name}' uses a 'name: value' form. A receiving trigger's parameters are bare names (optionally suffixed with '?', or '_' to discard) or 'name: Type' to declare the parameter's type; 'name: value' is only valid in trigger emissions.`,
+            `Rule '${rule.name}' trigger parameter '${named.name}' uses a 'name: value' form. External-stimulus and chained trigger parameters are bare names (optionally suffixed with '?', or '_' to discard); the 'name: value' form is only valid in trigger emissions. Write '${named.name}' without the annotation.`,
             "error",
           ),
         );
@@ -4629,17 +4629,8 @@ function firstNamedTriggerParam(
   ) {
     const argsStr = call[1];
     const argsStart = call.index + call[0].indexOf(argsStr, call[0].indexOf("("));
-    // `name: Type` declares the parameter's type (#118); only `name: value`
-    // is an emission form.
-    const namedArgs = /(?:^|,)\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^,]*)/g;
-    for (
-      let namedArg = namedArgs.exec(argsStr);
-      namedArg;
-      namedArg = namedArgs.exec(argsStr)
-    ) {
-      if (/^(?:[A-Za-z_][A-Za-z0-9_]*\/)?[A-Z]/.test(namedArg[2])) {
-        continue;
-      }
+    const namedArg = /(?:^|,)\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/.exec(argsStr);
+    if (namedArg) {
       return {
         name: namedArg[1],
         index: argsStart + namedArg.index + namedArg[0].indexOf(namedArg[1]),
@@ -4647,25 +4638,6 @@ function firstNamedTriggerParam(
     }
   }
   return null;
-}
-
-/** Whether an AST expression is written as a type (`Report`, `base/Report`,
- * `List<Kind>`, `Report?`). */
-function isTypeExpr(node: unknown): boolean {
-  const variant = nodeVariant(node);
-  const body = (node as AstNode)?.[variant ?? ""] as AstNode | undefined;
-  switch (variant) {
-    case "Ident":
-      return /^[A-Z]/.test(String(body?.name ?? ""));
-    case "QualifiedName":
-      return /^[A-Z]/.test(String(body?.name ?? ""));
-    case "GenericType":
-      return isTypeExpr(body?.name);
-    case "TypeOptional":
-      return isTypeExpr(body?.inner);
-    default:
-      return false;
-  }
 }
 
 /** Every unqualified PascalCase name in a type expression, with its node. */
@@ -4684,166 +4656,12 @@ function typeNamesIn(node: unknown, out: AstNode[]): void {
   }
 }
 
-/** The `name: Type` parameters of a receiving trigger, with their positions. */
-function typedTriggerParams(
-  node: unknown,
-  out: Array<{ trigger: string; position: number; param: AstNode }>,
-): void {
-  const variant = nodeVariant(node);
-  const body = (node as AstNode)?.[variant ?? ""] as AstNode | undefined;
-  if (variant === "Call") {
-    const fn = (body?.function as AstNode | undefined)?.Ident as
-      | AstNode
-      | undefined;
-    if (typeof fn?.name !== "string") {
-      return;
-    }
-    ((body?.args as unknown[]) ?? []).forEach((arg, position) => {
-      const named = (arg as AstNode)?.Named as AstNode | undefined;
-      if (named && isTypeExpr(named.value)) {
-        out.push({ trigger: fn.name as string, position, param: named });
-      }
-    });
-  } else if (variant === "LogicalOp" && body?.op === "Or") {
-    typedTriggerParams(body.left, out);
-    typedTriggerParams(body.right, out);
-  }
-}
-
-/** Emission calls in an ensures value: block statements, conditional
- * branches and `for` bodies, as in the Rust `collect_emission_calls`. */
-function emissionCalls(node: unknown, out: AstNode[]): void {
-  const variant = nodeVariant(node);
-  const body = (node as AstNode)?.[variant ?? ""] as AstNode | undefined;
-  if (variant === "Call") {
-    const fn = (body?.function as AstNode | undefined)?.Ident as
-      | AstNode
-      | undefined;
-    if (/^[A-Z]/.test(String(fn?.name ?? ""))) {
-      out.push(body as AstNode);
-    }
-  } else if (variant === "Block") {
-    for (const item of (body?.items as unknown[]) ?? []) {
-      emissionCalls(item, out);
-    }
-  } else if (variant === "Conditional") {
-    for (const branch of (body?.branches as AstNode[]) ?? []) {
-      emissionCalls(branch.body, out);
-    }
-    if (body?.else_body) {
-      emissionCalls(body.else_body, out);
-    }
-  } else if (variant === "For") {
-    emissionCalls(body?.body, out);
-  }
-}
-
-function forBindingNames(binding: unknown, out: Set<string>): void {
-  const single = (binding as AstNode)?.Single as AstNode | undefined;
-  if (typeof single?.name === "string") {
-    out.add(single.name);
-  }
-  const destructured = (binding as AstNode)?.Destructured as unknown[] | undefined;
-  for (const id of (destructured?.[0] as AstNode[]) ?? []) {
-    if (typeof id?.name === "string") {
-      out.add(id.name);
-    }
-  }
-}
-
-/** Every name a rule binds at any depth, as in the Rust
- * `collect_rule_binding_names`. */
-function ruleBindingNames(items: unknown[], out: Set<string>): void {
-  const fromExpr = (node: unknown): void => {
-    const variant = nodeVariant(node);
-    const body = (node as AstNode)?.[variant ?? ""] as AstNode | undefined;
-    if (variant === "LetExpr") {
-      out.add(String((body?.name as AstNode)?.name));
-      fromExpr(body?.value);
-    } else if (variant === "For") {
-      forBindingNames(body?.binding, out);
-      fromExpr(body?.body);
-    } else if (variant === "Block") {
-      for (const e of (body?.items as unknown[]) ?? []) fromExpr(e);
-    } else if (variant === "Conditional") {
-      for (const b of (body?.branches as AstNode[]) ?? []) fromExpr(b.body);
-      if (body?.else_body) fromExpr(body.else_body);
-    }
-  };
-  const fromTrigger = (node: unknown): void => {
-    const variant = nodeVariant(node);
-    const body = (node as AstNode)?.[variant ?? ""] as AstNode | undefined;
-    if (variant === "Binding") {
-      out.add(String((body?.name as AstNode)?.name));
-    } else if (variant === "Call") {
-      for (const arg of (body?.args as AstNode[]) ?? []) {
-        const pos = (arg?.Positional as AstNode | undefined)?.Ident as
-          | AstNode
-          | undefined;
-        if (typeof pos?.name === "string") out.add(pos.name);
-        const named = arg?.Named as AstNode | undefined;
-        if (named) out.add(String((named.name as AstNode)?.name));
-      }
-    } else if (variant === "LogicalOp") {
-      fromTrigger(body?.left);
-      fromTrigger(body?.right);
-    }
-  };
-  for (const item of items) {
-    const kind = (item as AstNode)?.kind as AstNode | undefined;
-    const clause = kind?.Clause as AstNode | undefined;
-    if (clause) {
-      if (clause.keyword === "when") fromTrigger(clause.value);
-      else fromExpr(clause.value);
-    }
-    const letItem = kind?.Let as AstNode | undefined;
-    if (letItem) out.add(String((letItem.name as AstNode)?.name));
-    const forBlock = kind?.ForBlock as AstNode | undefined;
-    if (forBlock) {
-      forBindingNames(forBlock.binding, out);
-      ruleBindingNames((forBlock.items as unknown[]) ?? [], out);
-    }
-    const ifBlock = kind?.IfBlock as AstNode | undefined;
-    if (ifBlock) {
-      for (const b of (ifBlock.branches as AstNode[]) ?? []) {
-        ruleBindingNames((b.items as unknown[]) ?? [], out);
-      }
-      ruleBindingNames((ifBlock.else_items as unknown[]) ?? [], out);
-    }
-  }
-}
-
-/** The emission calls of a rule's items (ensures clauses, `otherwise:`
- * emissions, and `for`/`if` bodies). */
-function ruleEmissionCalls(items: unknown[], out: AstNode[]): void {
-  for (const item of items) {
-    const kind = (item as AstNode)?.kind as AstNode | undefined;
-    const clause = kind?.Clause as AstNode | undefined;
-    if (clause?.keyword === "ensures") emissionCalls(clause.value, out);
-    const assignment = kind?.Assignment as AstNode | undefined;
-    if ((assignment?.name as AstNode | undefined)?.name === "otherwise") {
-      emissionCalls(assignment!.value, out);
-    }
-    const forBlock = kind?.ForBlock as AstNode | undefined;
-    if (forBlock) ruleEmissionCalls((forBlock.items as unknown[]) ?? [], out);
-    const ifBlock = kind?.IfBlock as AstNode | undefined;
-    if (ifBlock) {
-      for (const b of (ifBlock.branches as AstNode[]) ?? []) {
-        ruleEmissionCalls((b.items as unknown[]) ?? [], out);
-      }
-      ruleEmissionCalls((ifBlock.else_items as unknown[]) ?? [], out);
-    }
-  }
-}
-
 /**
- * Types named by contract signatures (#106) and by typed trigger parameters
- * (#118) must be declared, and where a receiving rule declares a parameter as
- * a local enum (`when: Decided(clerk, outcome: Outcome)`), every emitted
- * literal for that parameter must be one of its values. Mirrors the Rust
- * `check_type_references` and `check_emitted_enum_values`.
+ * Types named by contract signatures must be declared locally or imported
+ * (validation rule 42, #106). Mirrors the Rust `check_type_references`.
+ * Qualified types are left to the cross-module pass.
  */
-function findTypedSignatureAndParameterIssues(
+function findContractSignatureTypeIssues(
   text: string,
   lineStarts: number[],
 ): Finding[] {
@@ -4871,12 +4689,27 @@ function findTypedSignatureAndParameterIssues(
     "Any",
     "Void",
   ]);
-  const undeclared = (typeExpr: unknown): void => {
-    const names: AstNode[] = [];
-    typeNamesIn(typeExpr, names);
-    for (const id of names) {
-      const span = id.span as { start: number; end: number };
-      if (!known.has(id.name as string)) {
+  for (const decl of declarations) {
+    const block = (decl as AstNode)?.Block as AstNode | undefined;
+    if (block?.kind !== "Contract") {
+      continue;
+    }
+    for (const item of (block.items as unknown[]) ?? []) {
+      const signature = ((item as AstNode)?.kind as AstNode | undefined)
+        ?.Signature as AstNode | undefined;
+      if (!signature) {
+        continue;
+      }
+      const names: AstNode[] = [];
+      for (const param of (signature.params as AstNode[]) ?? []) {
+        typeNamesIn(param.type_expr, names);
+      }
+      typeNamesIn(signature.return_type, names);
+      for (const id of names) {
+        if (known.has(id.name as string)) {
+          continue;
+        }
+        const span = id.span as { start: number; end: number };
         findings.push(
           rangeFinding(
             lineStarts,
@@ -4888,117 +4721,6 @@ function findTypedSignatureAndParameterIssues(
           ),
         );
       }
-    }
-  };
-
-  const blocksOf = (kind: string): AstNode[] =>
-    declarations
-      .map((d) => (d as AstNode)?.Block as AstNode | undefined)
-      .filter((b): b is AstNode => b?.kind === kind);
-
-  for (const contract of blocksOf("Contract")) {
-    for (const item of (contract.items as unknown[]) ?? []) {
-      const signature = ((item as AstNode)?.kind as AstNode | undefined)
-        ?.Signature as AstNode | undefined;
-      if (!signature) continue;
-      for (const param of (signature.params as AstNode[]) ?? []) {
-        undeclared(param.type_expr);
-      }
-      undeclared(signature.return_type);
-    }
-  }
-
-  const enums = new Map<string, Set<string>>();
-  for (const block of blocksOf("Enum")) {
-    const values = new Set<string>();
-    for (const item of (block.items as unknown[]) ?? []) {
-      const variant = ((item as AstNode)?.kind as AstNode | undefined)
-        ?.EnumVariant as AstNode | undefined;
-      const name = (variant?.name as AstNode | undefined)?.name;
-      if (typeof name === "string") values.add(name);
-    }
-    const enumName = (block.name as AstNode | undefined)?.name;
-    if (typeof enumName === "string") enums.set(enumName, values);
-  }
-
-  const rules = blocksOf("Rule");
-  const declared: Array<{
-    trigger: string;
-    param: string;
-    position: number;
-    enumName: string;
-  }> = [];
-  for (const rule of rules) {
-    for (const item of (rule.items as unknown[]) ?? []) {
-      const clause = ((item as AstNode)?.kind as AstNode | undefined)?.Clause as
-        | AstNode
-        | undefined;
-      if (clause?.keyword !== "when") continue;
-      const params: Array<{ trigger: string; position: number; param: AstNode }> =
-        [];
-      typedTriggerParams(clause.value, params);
-      for (const { trigger, position, param } of params) {
-        undeclared(param.value);
-        const base = baseTypeName(param.value);
-        if (base && enums.has(base)) {
-          declared.push({
-            trigger,
-            param: String((param.name as AstNode)?.name),
-            position,
-            enumName: base,
-          });
-        }
-      }
-    }
-  }
-  if (declared.length === 0) {
-    return findings;
-  }
-
-  const reported = new Set<string>();
-  for (const rule of rules) {
-    const items = (rule.items as unknown[]) ?? [];
-    const bound = new Set<string>();
-    ruleBindingNames(items, bound);
-    const calls: AstNode[] = [];
-    ruleEmissionCalls(items, calls);
-    for (const call of calls) {
-      const trigger = ((call.function as AstNode)?.Ident as AstNode)?.name;
-      ((call.args as AstNode[]) ?? []).forEach((arg, position) => {
-        const named = arg?.Named as AstNode | undefined;
-        const value = named ? named.value : arg?.Positional;
-        const literal = (value as AstNode | undefined)?.Ident as
-          | AstNode
-          | undefined;
-        const name = literal?.name;
-        if (typeof name !== "string" || /^[A-Z]/.test(name) || bound.has(name)) {
-          return;
-        }
-        const paramName = named
-          ? String((named.name as AstNode)?.name)
-          : undefined;
-        for (const d of declared) {
-          const sameParam =
-            paramName !== undefined ? paramName === d.param : position === d.position;
-          if (d.trigger !== trigger || !sameParam) continue;
-          if (enums.get(d.enumName)?.has(name)) continue;
-          const span = literal!.span as { start: number; end: number };
-          const message = `'${name}' is not a value of enum '${d.enumName}', the declared type of parameter '${d.param}' of trigger '${d.trigger}'.`;
-          const key = `${span.start}:${message}`;
-          if (reported.has(key)) continue;
-          reported.add(key);
-          findings.push(
-            rangeFinding(
-              lineStarts,
-              span.start,
-              span.end,
-              "allium.rule.emittedValueNotInEnum",
-              message,
-              "error",
-            ),
-          );
-        }
-      });
     }
   }
   return findings;

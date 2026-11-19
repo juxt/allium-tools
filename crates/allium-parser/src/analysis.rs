@@ -156,7 +156,6 @@ fn run_checks(mut ctx: Ctx<'_>, source: &str) -> Vec<Diagnostic> {
     ctx.check_ambiguous_imported_names();
     ctx.check_deferred_location_hints(source);
     ctx.check_rule_invalid_triggers();
-    ctx.check_emitted_enum_values();
     ctx.check_rule_undefined_bindings();
     ctx.check_duplicate_let_bindings();
     ctx.check_config_undefined_references();
@@ -3393,19 +3392,6 @@ impl Ctx<'_> {
         // Descend into `if`/`else` and `for` bodies so a type reference nested in
         // a branch is checked, not just top-level clauses.
         let rules: Vec<_> = self.blocks(BlockKind::Rule).collect();
-        for rule in &rules {
-            for item in &rule.items {
-                if let BlockItemKind::Clause { keyword, value } = &item.kind {
-                    if keyword == "when" {
-                        let mut params = Vec::new();
-                        typed_trigger_params(value, &mut params);
-                        for (_, _, param) in params {
-                            self.check_type_refs_in_value(&param.value, &known);
-                        }
-                    }
-                }
-            }
-        }
         for rule in rules {
             let mut refs = Vec::new();
             for_each_rule_clause(&rule.items, &mut |keyword, value| {
@@ -3679,52 +3665,33 @@ impl Ctx<'_> {
 /// emissions attached to requires guards, and for/if blocks recursed for
 /// nested ensures.
 fn collect_emitted_trigger_from_item<'a>(kind: &'a BlockItemKind, out: &mut HashSet<&'a str>) {
-    let mut calls = Vec::new();
-    collect_emission_calls_from_item(kind, &mut calls);
-    out.extend(calls.into_iter().filter_map(emission_name));
-}
-
-/// The emission `Call` expressions of a block item: see
-/// [`collect_emitted_trigger_from_item`] for which items emit.
-fn collect_emission_calls_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<&'a Expr>) {
     match kind {
         BlockItemKind::Clause { keyword, value } if keyword == "ensures" => {
-            collect_emission_calls(value, out);
+            collect_ensures_emission_calls(value, out);
         }
         // `requires: cond otherwise: SomeError(...)` parses as an assignment
         // item named `otherwise`; the failing guard emits its value's trigger.
         BlockItemKind::Assignment { name, value } if name.name == "otherwise" => {
-            collect_emission_calls(value, out);
+            collect_ensures_emission_calls(value, out);
         }
         BlockItemKind::ForBlock { items, .. } => {
             for item in items {
-                collect_emission_calls_from_item(&item.kind, out);
+                collect_emitted_trigger_from_item(&item.kind, out);
             }
         }
         BlockItemKind::IfBlock { branches, else_items, .. } => {
             for b in branches {
                 for item in &b.items {
-                    collect_emission_calls_from_item(&item.kind, out);
+                    collect_emitted_trigger_from_item(&item.kind, out);
                 }
             }
             if let Some(items) = else_items {
                 for item in items {
-                    collect_emission_calls_from_item(&item.kind, out);
+                    collect_emitted_trigger_from_item(&item.kind, out);
                 }
             }
         }
         _ => {}
-    }
-}
-
-/// The trigger name of an emission call (`Decided(...)` → `Decided`).
-fn emission_name(call: &Expr) -> Option<&str> {
-    match call {
-        Expr::Call { function, .. } => match function.as_ref() {
-            Expr::Ident(id) if starts_uppercase(&id.name) => Some(id.name.as_str()),
-            _ => None,
-        },
-        _ => None,
     }
 }
 
@@ -3736,16 +3703,18 @@ fn emission_name(call: &Expr) -> Option<&str> {
 /// body, and a `for` iteration its body — a trigger emitted on any branch is
 /// an emission (issue #19). Value-producing calls nested inside assignments,
 /// `let` bindings or arguments are not emissions and are not collected.
-fn collect_emission_calls<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+fn collect_ensures_emission_calls<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
     match expr {
         Expr::Call { function, .. } => {
-            if matches!(function.as_ref(), Expr::Ident(id) if starts_uppercase(&id.name)) {
-                out.push(expr);
+            if let Expr::Ident(id) = function.as_ref() {
+                if starts_uppercase(&id.name) {
+                    out.insert(&id.name);
+                }
             }
         }
         Expr::Block { items, .. } => {
             for item in items {
-                collect_emission_calls(item, out);
+                collect_ensures_emission_calls(item, out);
             }
         }
         Expr::Conditional {
@@ -3754,14 +3723,14 @@ fn collect_emission_calls<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
             ..
         } => {
             for b in branches {
-                collect_emission_calls(&b.body, out);
+                collect_ensures_emission_calls(&b.body, out);
             }
             if let Some(body) = else_body {
-                collect_emission_calls(body, out);
+                collect_ensures_emission_calls(body, out);
             }
         }
         Expr::For { body, .. } => {
-            collect_emission_calls(body, out);
+            collect_ensures_emission_calls(body, out);
         }
         _ => {}
     }
@@ -6290,7 +6259,7 @@ impl Ctx<'_> {
                         Diagnostic::error(
                             span,
                             format!(
-                                "Rule '{rule_name}' trigger parameter '{param}' uses a 'name: value' form. A receiving trigger's parameters are bare names (optionally suffixed with '?', or '_' to discard) or 'name: Type' to declare the parameter's type; 'name: value' is only valid in trigger emissions.",
+                                "Rule '{rule_name}' trigger parameter '{param}' uses a 'name: value' form. External-stimulus and chained trigger parameters are bare names (optionally suffixed with '?', or '_' to discard); the 'name: value' form is only valid in trigger emissions. Write '{param}' without the annotation.",
                             ),
                         )
                         .with_code("allium.rule.invalidTrigger"),
@@ -6301,19 +6270,15 @@ impl Ctx<'_> {
     }
 }
 
-/// Finds the first `name: value` parameter in an external-stimulus or chained
-/// trigger call whose value is not a type (e.g. `when: Decided(outcome:
-/// accepted)`). The receiving side of a trigger takes bare names, or
-/// `name: Type` to declare a parameter's type (`when: Decided(outcome:
-/// Outcome)`); `name: value` is reserved for trigger *emissions*. Recurses into
-/// `or`-combined triggers, mirroring `is_valid_trigger`. Returns the offending
-/// param name and its span.
+/// Finds the first named/typed parameter in an external-stimulus or chained
+/// trigger call (e.g. `when: AccountSeen(account: Account)`). The receiving
+/// side of such triggers takes bare parameter names; the `name: value` form is
+/// reserved for trigger *emissions*. Recurses into `or`-combined triggers,
+/// mirroring `is_valid_trigger`. Returns the offending param name and its span.
 fn first_named_trigger_param(expr: &Expr) -> Option<(&str, Span)> {
     match expr {
         Expr::Call { args, .. } => args.iter().find_map(|arg| match arg {
-            CallArg::Named(n) if !is_type_expr(&n.value) => {
-                Some((n.name.name.as_str(), n.span))
-            }
+            CallArg::Named(n) => Some((n.name.name.as_str(), n.span)),
             _ => None,
         }),
         Expr::LogicalOp {
@@ -6323,217 +6288,6 @@ fn first_named_trigger_param(expr: &Expr) -> Option<(&str, Span)> {
             ..
         } => first_named_trigger_param(left).or_else(|| first_named_trigger_param(right)),
         _ => None,
-    }
-}
-
-/// Whether an expression is written as a type: a PascalCase name, optionally
-/// qualified (`base/Report`), generic (`List<Kind>`) or optional (`Report?`).
-fn is_type_expr(expr: &Expr) -> bool {
-    match expr {
-        Expr::Ident(id) => starts_uppercase(&id.name),
-        Expr::QualifiedName(q) => starts_uppercase(&q.name),
-        Expr::GenericType { name, .. } => is_type_expr(name),
-        Expr::TypeOptional { inner, .. } => is_type_expr(inner),
-        _ => false,
-    }
-}
-
-/// The `name: Type` parameters of a receiving trigger (`when: Decided(clerk,
-/// outcome: Outcome)`), each with its position in the argument list.
-/// Recurses into `or`-combined triggers.
-fn typed_trigger_params<'a>(expr: &'a Expr, out: &mut Vec<(&'a str, usize, &'a NamedArg)>) {
-    match expr {
-        Expr::Call { function, args, .. } => {
-            let Expr::Ident(trigger) = function.as_ref() else {
-                return;
-            };
-            for (i, arg) in args.iter().enumerate() {
-                if let CallArg::Named(n) = arg {
-                    if is_type_expr(&n.value) {
-                        out.push((trigger.name.as_str(), i, n));
-                    }
-                }
-            }
-        }
-        Expr::LogicalOp {
-            op: LogicalOp::Or,
-            left,
-            right,
-            ..
-        } => {
-            typed_trigger_params(left, out);
-            typed_trigger_params(right, out);
-        }
-        _ => {}
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Emitted values checked against a declared enum parameter type (#118)
-// ---------------------------------------------------------------------------
-
-impl Ctx<'_> {
-    /// A receiving rule may declare a trigger parameter's type
-    /// (`when: Decided(clerk, outcome: Outcome)`). Where that type is a local
-    /// enum, every rule emitting the trigger must pass one of its values: an
-    /// emitted bare name that is not bound in the emitting rule is an enum
-    /// literal, and a literal the enum does not declare is an error.
-    fn check_emitted_enum_values(&mut self) {
-        let enums: HashMap<&str, HashSet<&str>> = self
-            .blocks(BlockKind::Enum)
-            .filter_map(|b| {
-                let values = b
-                    .items
-                    .iter()
-                    .filter_map(|i| match &i.kind {
-                        BlockItemKind::EnumVariant { name, .. } => Some(name.name.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                Some((b.name.as_ref()?.name.as_str(), values))
-            })
-            .collect();
-
-        // (trigger, param name, param position) -> declared enum names
-        let mut declared: Vec<(&str, &str, usize, &str)> = Vec::new();
-        for rule in self.blocks(BlockKind::Rule) {
-            for item in &rule.items {
-                let BlockItemKind::Clause { keyword, value } = &item.kind else {
-                    continue;
-                };
-                if keyword != "when" {
-                    continue;
-                }
-                let mut params = Vec::new();
-                typed_trigger_params(value, &mut params);
-                for (trigger, position, param) in params {
-                    let type_name = match &param.value {
-                        Expr::Ident(id) => id.name.as_str(),
-                        Expr::TypeOptional { inner, .. } => match inner.as_ref() {
-                            Expr::Ident(id) => id.name.as_str(),
-                            _ => continue,
-                        },
-                        _ => continue,
-                    };
-                    if enums.contains_key(type_name) {
-                        declared.push((trigger, param.name.name.as_str(), position, type_name));
-                    }
-                }
-            }
-        }
-        if declared.is_empty() {
-            return;
-        }
-
-        let mut findings = Vec::new();
-        for rule in self.blocks(BlockKind::Rule) {
-            let mut bound: HashSet<&str> = HashSet::new();
-            collect_rule_binding_names(&rule.items, &mut bound);
-            let mut emissions = Vec::new();
-            for item in &rule.items {
-                collect_emission_calls_from_item(&item.kind, &mut emissions);
-            }
-            for call in emissions {
-                let Expr::Call { function, args, .. } = call else { continue };
-                let Expr::Ident(trigger) = function.as_ref() else { continue };
-                for (position, arg) in args.iter().enumerate() {
-                    let (param_name, value) = match arg {
-                        CallArg::Named(n) => (Some(n.name.name.as_str()), &n.value),
-                        CallArg::Positional(e) => (None, e),
-                    };
-                    let Expr::Ident(literal) = value else { continue };
-                    if starts_uppercase(&literal.name) || bound.contains(literal.name.as_str()) {
-                        continue;
-                    }
-                    for &(t, p, pos, enum_name) in &declared {
-                        let same_param = match param_name {
-                            Some(name) => name == p,
-                            None => position == pos,
-                        };
-                        if t != trigger.name || !same_param {
-                            continue;
-                        }
-                        if !enums[enum_name].contains(literal.name.as_str()) {
-                            findings.push(
-                                Diagnostic::error(
-                                    literal.span,
-                                    format!(
-                                        "'{}' is not a value of enum '{enum_name}', the declared type of parameter '{p}' of trigger '{t}'.",
-                                        literal.name
-                                    ),
-                                )
-                                .with_code("allium.rule.emittedValueNotInEnum"),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        findings.sort_by_key(|d| (d.span.start, d.message.clone()));
-        findings.dedup_by(|a, b| a.span == b.span && a.message == b.message);
-        self.diagnostics.extend(findings);
-    }
-}
-
-/// Every name a rule binds, at any depth: trigger parameters, `let` bindings
-/// (clause level and inside ensures blocks), and `for` bindings. An emitted
-/// bare name that is one of these is a value, not an enum literal.
-fn collect_rule_binding_names<'a>(items: &'a [BlockItem], out: &mut HashSet<&'a str>) {
-    fn from_expr<'a>(expr: &'a Expr, out: &mut HashSet<&'a str>) {
-        match expr {
-            Expr::LetExpr { name, value, .. } => {
-                out.insert(&name.name);
-                from_expr(value, out);
-            }
-            Expr::For { binding, body, .. } => {
-                bind_for(binding, out);
-                from_expr(body, out);
-            }
-            Expr::Block { items, .. } => items.iter().for_each(|e| from_expr(e, out)),
-            Expr::Conditional { branches, else_body, .. } => {
-                for b in branches {
-                    from_expr(&b.body, out);
-                }
-                if let Some(body) = else_body {
-                    from_expr(body, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    fn bind_for<'a>(binding: &'a ForBinding, out: &mut HashSet<&'a str>) {
-        match binding {
-            ForBinding::Single(id) => {
-                out.insert(&id.name);
-            }
-            ForBinding::Destructured(ids, _) => {
-                out.extend(ids.iter().map(|id| id.name.as_str()));
-            }
-        }
-    }
-    for item in items {
-        match &item.kind {
-            BlockItemKind::Clause { keyword, value } if keyword == "when" => {
-                collect_bound_names(value, out);
-            }
-            BlockItemKind::Clause { value, .. } => from_expr(value, out),
-            BlockItemKind::Let { name, .. } => {
-                out.insert(&name.name);
-            }
-            BlockItemKind::ForBlock { binding, items, .. } => {
-                bind_for(binding, out);
-                collect_rule_binding_names(items, out);
-            }
-            BlockItemKind::IfBlock { branches, else_items } => {
-                for b in branches {
-                    collect_rule_binding_names(&b.items, out);
-                }
-                if let Some(items) = else_items {
-                    collect_rule_binding_names(items, out);
-                }
-            }
-            _ => {}
-        }
     }
 }
 
@@ -10052,30 +9806,26 @@ rule ShowsError {
     }
 
     #[test]
-    fn typed_trigger_param_is_a_binding() {
-        // `name: Type` declares the parameter's type (#118); the name is bound
-        // in the body like a bare parameter.
+    fn typed_trigger_param_reported_at_trigger() {
+        // `when: AccountSeen(account: Account)` — external-stimulus trigger
+        // params are bare names; the `name: value` form is invalid here
+        // (allium-tools#42). The diagnostic must land on the trigger param, not
+        // produce a misleading `undefinedBinding` on each body reference.
         let ds = analyze_src(
             "entity Account { name: String }\nentity Greeting { label: String }\n\nrule TypedParam {\n  when: AccountSeen(account: Account)\n  ensures: Greeting.created(label: account.name)\n}\n",
         );
-        assert!(!has_code(&ds, "allium.rule.invalidTrigger"), "{ds:?}");
-        assert!(!has_code(&ds, "allium.rule.undefinedBinding"), "{ds:?}");
-    }
-
-    #[test]
-    fn name_value_trigger_param_reported_at_trigger() {
-        // `name: value` belongs to emissions (allium-tools#42). The diagnostic
-        // lands on the trigger param, not on each body reference.
-        let src = "-- allium: 3\nentity Account { name: String }\nentity Greeting { label: String }\n\nrule ValueParam {\n  when: AccountSeen(account: current)\n  ensures: Greeting.created(label: account.name)\n}\n";
-        let ds = analyze(&parse(src).module, src);
-        assert_eq!(flagged_text(src, &ds, "allium.rule.invalidTrigger"), ["account: current"]);
-        let message = &ds
+        let invalid: Vec<&Diagnostic> = ds
             .iter()
-            .find(|d| d.code == Some("allium.rule.invalidTrigger"))
-            .unwrap()
-            .message;
-        assert!(message.contains("'account'") && message.contains("'name: Type'"), "{message}");
-        assert!(!has_code(&ds, "allium.rule.undefinedBinding"), "{ds:?}");
+            .filter(|d| d.code == Some("allium.rule.invalidTrigger"))
+            .collect();
+        assert_eq!(invalid.len(), 1, "exactly one invalidTrigger diagnostic");
+        assert!(invalid[0].message.contains("'account'"));
+        assert!(invalid[0].message.contains("bare names"));
+        // The misplaced body diagnostic must be suppressed.
+        assert!(
+            !has_code(&ds, "allium.rule.undefinedBinding"),
+            "typed trigger param must not also fire undefinedBinding on the body"
+        );
     }
 
     #[test]
@@ -10610,169 +10360,5 @@ rule ShowsError {
              contract Store {\n    load: (key: String) -> base/Report\n}\n",
         );
         assert!(!has_code(&ds, "allium.type.undefinedReference"), "{ds:?}");
-    }
-
-    // -----------------------------------------------------------------------
-    // Typed trigger parameters (#118): a receiving rule can declare a
-    // parameter's type, which references the type and, for an enum, checks
-    // the values emitting rules pass.
-    // -----------------------------------------------------------------------
-
-    /// The spec from #118, with `Record`'s trigger and `Refuse`'s emitted
-    /// value supplied by each test.
-    fn decided_spec(record_trigger: &str, refused_value: &str) -> String {
-        format!(
-            "enum Outcome {{ accepted | refused }}\n\n\
-             entity Clerk {{\n    name: String\n}}\n\n\
-             entity Order {{\n    placed_by: Clerk\n}}\n\n\
-             rule Submit {{\n    when: SubmitPressed(clerk)\n    ensures: Decided(clerk, outcome: accepted)\n}}\n\n\
-             rule Refuse {{\n    when: RefusePressed(clerk)\n    ensures: Decided(clerk, outcome: {refused_value})\n}}\n\n\
-             rule Record {{\n    when: {record_trigger}\n    requires: outcome = accepted\n    ensures: Order.created(placed_by: clerk)\n}}\n\n\
-             surface Desk {{\n    facing clerk: Clerk\n\n    exposes:\n        clerk.name\n\n    provides:\n        SubmitPressed(clerk)\n        RefusePressed(clerk)\n}}\n"
-        )
-    }
-
-    fn problems(ds: &[Diagnostic]) -> Vec<(&str, &str)> {
-        ds.iter()
-            .filter(|d| d.severity != Severity::Info)
-            .map(|d| (d.code.unwrap_or(""), d.message.as_str()))
-            .collect()
-    }
-
-    #[test]
-    fn issue_118_spec_is_clean_once_the_parameter_is_typed() {
-        let (_, ds) = check_full(&decided_spec("Decided(clerk, outcome: Outcome)", "refused"));
-        assert_eq!(problems(&ds), []);
-    }
-
-    #[test]
-    fn untyped_parameter_does_not_reference_the_enum() {
-        // Nothing is inferred from the literals: without a declared type the
-        // enum is still unreferenced.
-        let (src, ds) = check_full(&decided_spec("Decided(clerk, outcome)", "refused"));
-        assert_eq!(flagged_text(&src, &ds, "allium.definition.unused"), ["Outcome"]);
-    }
-
-    #[test]
-    fn emitted_literal_outside_the_declared_enum_is_an_error() {
-        let (src, ds) = check_full(&decided_spec("Decided(clerk, outcome: Outcome)", "nonsense"));
-        assert_eq!(
-            flagged_text(&src, &ds, "allium.rule.emittedValueNotInEnum"),
-            ["nonsense"]
-        );
-        let d = ds
-            .iter()
-            .find(|d| d.code == Some("allium.rule.emittedValueNotInEnum"))
-            .unwrap();
-        assert_eq!(d.severity, Severity::Error);
-        assert_eq!(
-            d.message,
-            "'nonsense' is not a value of enum 'Outcome', the declared type of parameter 'outcome' of trigger 'Decided'."
-        );
-    }
-
-    #[test]
-    fn optional_enum_parameter_checks_emitted_values() {
-        let (src, ds) = check_full(&decided_spec("Decided(clerk, outcome: Outcome?)", "nonsense"));
-        assert_eq!(flagged_text(&src, &ds, "allium.rule.emittedValueNotInEnum"), ["nonsense"]);
-        assert!(!has_code(&ds, "allium.definition.unused"), "{ds:?}");
-    }
-
-    /// A module where `Decide` emits `Decided` with the given ensures, and
-    /// `Record` receives it as `Decided(clerk, outcome: Outcome)`.
-    fn emitting(ensures: &str) -> (String, Vec<Diagnostic>) {
-        check_full(&format!(
-            "enum Outcome {{ accepted | refused }}\n\n\
-             entity Clerk {{\n    name: String\n    ok: Boolean\n}}\n\n\
-             rule Decide {{\n    when: Pressed(clerk, choice)\n{ensures}\n}}\n\n\
-             rule Record {{\n    when: Decided(clerk, outcome: Outcome)\n    ensures: clerk.ok = outcome = accepted\n}}\n"
-        ))
-    }
-
-    #[test]
-    fn positional_emission_is_checked_by_position() {
-        let (src, ds) = emitting("    ensures: Decided(clerk, acepted)");
-        assert_eq!(flagged_text(&src, &ds, "allium.rule.emittedValueNotInEnum"), ["acepted"]);
-    }
-
-    #[test]
-    fn named_emission_is_checked_by_name_in_any_order() {
-        let (src, ds) = emitting("    ensures: Decided(outcome: acepted, clerk: clerk)");
-        assert_eq!(flagged_text(&src, &ds, "allium.rule.emittedValueNotInEnum"), ["acepted"]);
-    }
-
-    #[test]
-    fn emissions_in_branches_loops_and_blocks_are_checked() {
-        let (src, ds) = emitting(
-            "    ensures:\n\
-             \x20       clerk.ok = true\n\
-             \x20       if clerk.ok:\n\
-             \x20           Decided(clerk, outcome: accepted)\n\
-             \x20       else:\n\
-             \x20           Decided(clerk, outcome: refsued)\n\
-             \x20       for c in Clerks:\n\
-             \x20           Decided(c, outcome: maybe)",
-        );
-        assert_eq!(
-            flagged_text(&src, &ds, "allium.rule.emittedValueNotInEnum"),
-            ["refsued", "maybe"]
-        );
-    }
-
-    #[test]
-    fn bound_names_pass_through_unchecked() {
-        // A trigger parameter, a `let` and a loop binding are values, not
-        // enum literals; their types are not known, so they are not checked.
-        let (_, ds) = emitting(
-            "    let verdict = choice\n\
-             \x20   ensures:\n\
-             \x20       Decided(clerk, outcome: choice)\n\
-             \x20       Decided(clerk, outcome: verdict)\n\
-             \x20       for c in Clerks:\n\
-             \x20           Decided(c, outcome: c)",
-        );
-        assert!(!has_code(&ds, "allium.rule.emittedValueNotInEnum"), "{ds:?}");
-    }
-
-    #[test]
-    fn same_parameter_name_on_another_trigger_is_not_checked() {
-        let (_, ds) = emitting("    ensures: Noted(clerk, outcome: whatever)");
-        assert!(!has_code(&ds, "allium.rule.emittedValueNotInEnum"), "{ds:?}");
-    }
-
-    #[test]
-    fn non_enum_parameter_types_check_no_literals() {
-        let (_, ds) = check_full(
-            "entity Clerk {\n    name: String\n}\n\n\
-             rule Decide {\n    when: Pressed(clerk)\n    ensures: Seen(who: clerk)\n}\n\n\
-             rule Record {\n    when: Seen(who: Clerk)\n    ensures: who.name = \"seen\"\n}\n",
-        );
-        assert!(!has_code(&ds, "allium.rule.emittedValueNotInEnum"), "{ds:?}");
-        assert!(!has_code(&ds, "allium.rule.invalidTrigger"), "{ds:?}");
-    }
-
-    #[test]
-    fn undeclared_parameter_type_is_an_error_at_the_name() {
-        let (src, ds) = check_full(
-            "rule Record {\n    when: Decided(clerk, outcome: Outcom, items: List<Itme>)\n    ensures: Noted(clerk)\n}\n",
-        );
-        assert_eq!(
-            flagged_text(&src, &ds, "allium.type.undefinedReference"),
-            ["Outcom", "Itme"]
-        );
-    }
-
-    #[test]
-    fn typed_parameters_in_either_side_of_an_or_trigger() {
-        let (src, ds) = check_full(
-            "enum Outcome { accepted | refused }\n\nenum Reason { late | early }\n\n\
-             rule Emit {\n    when: Pressed(x)\n    ensures:\n        Decided(x, outcome: acepted)\n        Withdrawn(x, reason: never)\n}\n\n\
-             rule Record {\n    when: Decided(x, outcome: Outcome) or Withdrawn(x, reason: Reason)\n    ensures: Noted(x)\n}\n",
-        );
-        assert!(!has_code(&ds, "allium.definition.unused"), "{ds:?}");
-        assert_eq!(
-            flagged_text(&src, &ds, "allium.rule.emittedValueNotInEnum"),
-            ["acepted", "never"]
-        );
     }
 }
