@@ -165,6 +165,14 @@ pub struct BlockItem {
     pub kind: BlockItemKind,
 }
 
+/// One `name: Type` parameter of a contract signature.
+#[derive(Debug, Clone, Serialize)]
+pub struct SignatureParam {
+    pub span: Span,
+    pub name: Ident,
+    pub type_expr: Expr,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub enum BlockItemKind {
     /// `keyword: value` — when:, requires:, ensures:, facing:, etc.
@@ -200,6 +208,13 @@ pub enum BlockItemKind {
     /// `contracts:` clause in a surface body
     ContractsClause {
         entries: Vec<ContractBinding>,
+    },
+    /// `name: (param: Type, ...) -> ReturnType` — typed operation signature
+    /// inside a contract body.
+    Signature {
+        name: Ident,
+        params: Vec<SignatureParam>,
+        return_type: Expr,
     },
     /// `@invariant`, `@guidance`, `@guarantee` prose annotation
     Annotation(Annotation),

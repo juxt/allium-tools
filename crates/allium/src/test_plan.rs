@@ -961,7 +961,9 @@ fn emit_config_obligations(plan: &mut TestPlan, block: &BlockDecl) {
 fn emit_contract_obligations(plan: &mut TestPlan, block: &BlockDecl) {
     let name = block_name(block);
     for item in &block.items {
-        if let BlockItemKind::Assignment { name: sig_name, .. } = &item.kind {
+        if let BlockItemKind::Assignment { name: sig_name, .. }
+        | BlockItemKind::Signature { name: sig_name, .. } = &item.kind
+        {
             plan.obligations.push(Obligation {
                 id: format!("contract-signature.{}.{}", name, sig_name.name),
                 category: ObligationCategory::ContractSignature,
@@ -2063,6 +2065,26 @@ mod tests {
         let ob = find_obligation(&plan, "contract-signature.PaymentGateway.charge");
         assert!(matches!(ob.category, ObligationCategory::ContractSignature));
         assert_eq!(ob.source_construct, "PaymentGateway.charge");
+    }
+
+    #[test]
+    fn each_contract_signature_and_field_is_one_obligation() {
+        let source = "-- allium: 3\ncontract Checker {\n  version: Integer\n  run_check: (mode: Mode) -> Report\n  list_kinds: () -> List<Kind>\n  @guidance\n    -- prefer quick mode\n}";
+        let plan = parse_plan(source);
+        let ids: Vec<&str> = plan
+            .obligations
+            .iter()
+            .filter(|o| matches!(o.category, ObligationCategory::ContractSignature))
+            .map(|o| o.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "contract-signature.Checker.version",
+                "contract-signature.Checker.run_check",
+                "contract-signature.Checker.list_kinds",
+            ]
+        );
     }
 
     // --- Variant obligations ---

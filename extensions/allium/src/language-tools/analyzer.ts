@@ -121,6 +121,7 @@ export function analyzeAllium(
     }
   }
   findings.push(...findInvalidTriggerIssues(lineStarts, blocks));
+  findings.push(...findContractSignatureTypeIssues(text, lineStarts));
   findings.push(...findListLiteralHomogeneityIssues(text, lineStarts));
   findings.push(...findDefaultFieldSchemaIssues(text, lineStarts));
   findings.push(...findCreatedFieldNameIssues(text, lineStarts));
@@ -4637,6 +4638,92 @@ function firstNamedTriggerParam(
     }
   }
   return null;
+}
+
+/** Every unqualified PascalCase name in a type expression, with its node. */
+function typeNamesIn(node: unknown, out: AstNode[]): void {
+  const variant = nodeVariant(node);
+  const body = (node as AstNode)?.[variant ?? ""] as AstNode | undefined;
+  if (variant === "Ident" && /^[A-Z]/.test(String(body?.name ?? ""))) {
+    out.push(body as AstNode);
+  } else if (variant === "GenericType") {
+    typeNamesIn(body?.name, out);
+    for (const arg of (body?.args as unknown[]) ?? []) {
+      typeNamesIn(arg, out);
+    }
+  } else if (variant === "TypeOptional") {
+    typeNamesIn(body?.inner, out);
+  }
+}
+
+/**
+ * Types named by contract signatures must be declared locally or imported
+ * (validation rule 42, #106). Mirrors the Rust `check_type_references`.
+ * Qualified types are left to the cross-module pass.
+ */
+function findContractSignatureTypeIssues(
+  text: string,
+  lineStarts: number[],
+): Finding[] {
+  const findings: Finding[] = [];
+  let declarations: unknown;
+  try {
+    declarations = (parseAllium(text).module as unknown as AstNode).declarations;
+  } catch {
+    return findings;
+  }
+  if (!Array.isArray(declarations)) {
+    return findings;
+  }
+  const known = new Set<string>([
+    ...collectDeclaredTypeNames(text),
+    "String",
+    "Integer",
+    "Decimal",
+    "Boolean",
+    "Timestamp",
+    "Duration",
+    "List",
+    "Set",
+    "Map",
+    "Any",
+    "Void",
+  ]);
+  for (const decl of declarations) {
+    const block = (decl as AstNode)?.Block as AstNode | undefined;
+    if (block?.kind !== "Contract") {
+      continue;
+    }
+    for (const item of (block.items as unknown[]) ?? []) {
+      const signature = ((item as AstNode)?.kind as AstNode | undefined)
+        ?.Signature as AstNode | undefined;
+      if (!signature) {
+        continue;
+      }
+      const names: AstNode[] = [];
+      for (const param of (signature.params as AstNode[]) ?? []) {
+        typeNamesIn(param.type_expr, names);
+      }
+      typeNamesIn(signature.return_type, names);
+      for (const id of names) {
+        if (known.has(id.name as string)) {
+          continue;
+        }
+        const span = id.span as { start: number; end: number };
+        findings.push(
+          rangeFinding(
+            lineStarts,
+            span.start,
+            span.end,
+            "allium.type.undefinedReference",
+            `Type reference '${id.name}' is not declared locally or imported.`,
+            "error",
+          ),
+        );
+      }
+    }
+  }
+  return findings;
 }
 
 function isValidTriggerShape(trigger: string): boolean {

@@ -1441,3 +1441,49 @@ test("rule 14c: empty list literal must target a List<T> field", () => {
     false,
   );
 });
+
+// --- Contract signatures (#106) ---
+
+/** The source text each finding with `code` covers, in source order. */
+function flaggedText(
+  src: string,
+  findings: ReturnType<typeof analyzeAllium>,
+  code: string,
+): string[] {
+  const lines = src.split("\n");
+  return findings
+    .filter((f) => f.code === code)
+    .sort(
+      (a, b) =>
+        a.start.line - b.start.line || a.start.character - b.start.character,
+    )
+    .map((f) =>
+      lines[f.start.line].slice(f.start.character, f.end.character),
+    );
+}
+
+/** Codes this issue is about; other checks are out of scope here. */
+const typeCodes = [
+  "allium.definition.unused",
+  "allium.type.undefinedReference",
+];
+
+test("contract types from #106 are all referenced", () => {
+  const findings = analyzeAllium(
+    "-- allium: 3\nvalue Report {\n    path: String\n}\n\nenum Mode { quick | full }\n\nenum Kind { a | b }\n\ncontract Checker {\n    run_check: (mode: Mode) -> Report\n    list_kinds: () -> List<Kind>\n}\n",
+  );
+  assert.deepEqual(
+    findings.filter((f) => typeCodes.includes(f.code)),
+    [],
+  );
+});
+
+test("undeclared types in contract signatures are errors at the name", () => {
+  const src =
+    "value Report {\n    path: String\n}\n\ncontract Checker {\n    run_check: (mode: Moed) -> Reprot\n    list_kinds: (filter: Set<Filtre>) -> List<Knid>?\n    save: (report: Report) -> Report\n    raw: (x: Any) -> Void\n}\n";
+  const findings = analyzeAllium(src);
+  assert.deepEqual(
+    flaggedText(src, findings, "allium.type.undefinedReference"),
+    ["Moed", "Reprot", "Filtre", "Knid"],
+  );
+});
