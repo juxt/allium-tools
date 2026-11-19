@@ -2,6 +2,10 @@
 
 Behaviour changes worth knowing before you upgrade. Releases ship from a single version tag, see `docs/releasing.md`.
 
+## Unreleased
+
+A Nix flake packages the CLI and the language server: `nix profile install github:juxt/allium-tools`.
+
 ## 3.7.2
 
 3.7.1 also reached crates.io only: the Homebrew bottle job asked for a macOS 14 runner, which GitHub retired in November 2026. Bottles are now built on macOS 15, so macOS 14 installs through Homebrew build from source. 3.7.2 is the same release as 3.7.0.

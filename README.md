@@ -70,6 +70,15 @@ brew tap juxt/allium && brew install allium
 cargo install allium-cli
 ```
 
+**Nix**
+
+```bash
+nix profile install github:juxt/allium-tools          # allium and allium-lsp
+nix run github:juxt/allium-tools#allium -- check spec.allium
+```
+
+The flake also provides `allium` and `allium-lsp` as separate packages, and a dev shell for working on this repository. Pin a release with `github:juxt/allium-tools/v3.7.2`.
+
 Pre-built binaries for Linux, macOS and Windows (not yet signed) are available on the [releases page](https://github.com/juxt/allium-tools/releases).
 
 ### Commands
