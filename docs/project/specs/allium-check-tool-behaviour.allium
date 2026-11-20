@@ -704,18 +704,31 @@ rule QualifiedDeferredReferenceResolves {
     ensures: FindingNotObserved(code: "allium.reference.unknownName", name: Name)
 }
 
--- Field-level resolution of alias/config.field is not yet implemented: the
--- qualified-reference node carries config, not the member chain, so a mistyped
--- config field is silent here rather than flagged. Chosen false negative;
--- config rules 46/47 (field existence, type) are a follow-up (#89).
+-- The field of alias/config.field must be a parameter of the aliased module's
+-- config block (config rule 46 across modules). It is checked by the config
+-- reference pass, not by the name-existence pass, and reported like a local
+-- config.field that no config block declares, in rules, invariants and config
+-- defaults alike (#135). A module without a config block already draws
+-- unknownName on alias/config, so its fields are not reported again. A target
+-- outside the check set is unknowable. Field types (rule 47) are not checked.
 
-rule QualifiedConfigFieldNotCheckedAtThisLayer {
+rule QualifiedConfigFieldMustBeDeclared {
     when: CheckCommandInvokedWithInputs(inputs)
 
     requires: QualifiedConfigFieldReferenceWhereModuleDeclaresConfigBlock(alias, field)
+    requires: QualifiedConfigReferenceBindsAliasToFileInCheckSet(alias)
     requires: ConfigBlockDeclaresNoParameterNamed(field)
 
+    ensures: FindingObserved(code: "allium.config.undefinedReference", severity: warning)
     ensures: FindingNotObserved(code: "allium.reference.unknownName", name: field)
+}
+
+rule QualifiedConfigFieldOutsideCheckSetNotFlagged {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: QualifiedConfigFieldReferenceWhereAliasTargetOutsideCheckSet(alias, field)
+
+    ensures: FindingNotObserved(code: "allium.config.undefinedReference", name: field)
 }
 
 -- Surface names resolve across the boundary. A surface's related: clause is

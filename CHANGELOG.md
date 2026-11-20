@@ -8,6 +8,8 @@ Open questions are reported at info severity rather than warning. They are writt
 
 A Nix flake packages the CLI and the language server: `nix profile install github:juxt/allium-tools`.
 
+A qualified config reference `alias/config.param` whose `param` the aliased module's config block does not declare is now reported as `allium.config.undefinedReference` (warning), as a local `config.param` already was. It is checked in rules, invariants and config defaults, when the aliased module is in the check set. Because `check` exits 1 on warnings, a spec with such a reference now fails the check (#135).
+
 ## 3.7.2
 
 3.7.1 also reached crates.io only: the Homebrew bottle job asked for a macOS 14 runner, which GitHub retired in November 2026. Bottles are now built on macOS 15, so macOS 14 installs through Homebrew build from source. 3.7.2 is the same release as 3.7.0.
