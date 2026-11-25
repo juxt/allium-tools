@@ -77,7 +77,8 @@ allium plan - derive test obligations from a spec
 Usage: allium plan [--format json|tsv] <file.allium>
 
 Prints the test obligations implied by the spec, including invariants,
-rule pre- and post-conditions, and transitions.
+rule pre- and post-conditions, transitions, and the named `@guarantee`
+and `@invariant` annotations on surfaces and contracts.
 
 --format json (the default) prints one JSON document:
   {\"version\": n, \"obligations\": [...], \"diagnostics\": [...]}
