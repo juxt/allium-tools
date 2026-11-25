@@ -3368,6 +3368,7 @@ impl Ctx<'_> {
                         BlockKind::Entity
                             | BlockKind::ExternalEntity
                             | BlockKind::Value
+                            | BlockKind::Contract
                     ) =>
                 {
                     b
@@ -3409,6 +3410,11 @@ impl Ctx<'_> {
             BlockItemKind::Assignment { value, .. }
             | BlockItemKind::FieldWithWhen { value, .. } => {
                 self.check_type_refs_in_value(value, known);
+            }
+            BlockItemKind::Signature { .. } => {
+                for t in signature_types(&item.kind) {
+                    self.check_type_refs_in_value(t, known);
+                }
             }
             _ => {}
         }
@@ -4487,11 +4493,12 @@ impl Ctx<'_> {
                         None => continue,
                     };
                     if !all_idents.contains(name.name.as_str()) {
+                        let kind = if b.kind == BlockKind::Enum { "Enum" } else { "Value" };
                         findings.push(
                             Diagnostic::warning(
                                 name.span,
                                 format!(
-                                    "Value '{}' is declared but not referenced elsewhere.",
+                                    "{kind} '{}' is declared but not referenced elsewhere.",
                                     name.name
                                 ),
                             )
@@ -4557,6 +4564,11 @@ fn collect_uppercase_idents_from_item<'a>(
                 for item in items {
                     collect_uppercase_idents_from_item(&item.kind, out);
                 }
+            }
+        }
+        BlockItemKind::Signature { .. } => {
+            for t in signature_types(kind) {
+                collect_uppercase_idents_from_expr(t, out);
             }
         }
         BlockItemKind::ContractsClause { entries } => {
@@ -5924,6 +5936,11 @@ fn collect_qrefs_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<QRef<'a>>)
                 for item in items {
                     collect_qrefs_from_item(&item.kind, out);
                 }
+            }
+        }
+        BlockItemKind::Signature { .. } => {
+            for t in signature_types(kind) {
+                collect_qrefs_from_expr(t, out);
             }
         }
         BlockItemKind::ContractsClause { entries } => {
@@ -7732,6 +7749,20 @@ impl Ctx<'_> {
 // Shared helpers: AST walking
 // ---------------------------------------------------------------------------
 
+/// The parameter types and return type of a contract signature, in source
+/// order. Empty for any other item.
+fn signature_types(kind: &BlockItemKind) -> impl Iterator<Item = &Expr> {
+    let (params, return_type) = match kind {
+        BlockItemKind::Signature {
+            params,
+            return_type,
+            ..
+        } => (params.as_slice(), Some(return_type)),
+        _ => (&[][..], None),
+    };
+    params.iter().map(|p| &p.type_expr).chain(return_type)
+}
+
 fn item_contains_ident(kind: &BlockItemKind, name: &str) -> bool {
     match kind {
         BlockItemKind::Clause { value, .. } => expr_contains_ident(value, name),
@@ -7764,6 +7795,7 @@ fn item_contains_ident(kind: &BlockItemKind, name: &str) -> bool {
         }
         BlockItemKind::InvariantBlock { body, .. } => expr_contains_ident(body, name),
         BlockItemKind::FieldWithWhen { value, .. } => expr_contains_ident(value, name),
+        BlockItemKind::Signature { .. } => signature_types(kind).any(|t| expr_contains_ident(t, name)),
         BlockItemKind::ContractsClause { .. }
         | BlockItemKind::EnumVariant { .. }
         | BlockItemKind::OpenQuestion { .. }
@@ -10173,5 +10205,160 @@ rule ShowsError {
         );
         let rc = collect_reverse_contributions(&importer, "tickets", &imported);
         assert!(rc.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Contract signatures (#106): the types a signature names are references,
+    // and each must be declared (validation rule 42).
+    // -----------------------------------------------------------------------
+
+    /// The source text each diagnostic with `code` points at, in order.
+    fn flagged_text<'a>(src: &'a str, ds: &[Diagnostic], code: &str) -> Vec<&'a str> {
+        let mut spans: Vec<_> = ds
+            .iter()
+            .filter(|d| d.code == Some(code))
+            .map(|d| (d.span.start, d.span.end))
+            .collect();
+        spans.sort();
+        spans.into_iter().map(|(s, e)| &src[s..e]).collect()
+    }
+
+    fn check_full(src: &str) -> (String, Vec<Diagnostic>) {
+        let input = format!("-- allium: 3\n{src}");
+        let ds = analyze(&parse(&input).module, &input);
+        (input, ds)
+    }
+
+    #[test]
+    fn contract_types_from_issue_106_are_all_referenced() {
+        let (_, ds) = check_full(
+            "value Report {\n    path: String\n}\n\n\
+             enum Mode { quick | full }\n\n\
+             enum Kind { a | b }\n\n\
+             contract Checker {\n\
+             \x20   run_check: (mode: Mode) -> Report\n\
+             \x20   list_kinds: () -> List<Kind>\n\
+             }\n",
+        );
+        assert!(!has_code(&ds, "allium.definition.unused"), "{ds:?}");
+        assert!(!has_code(&ds, "allium.type.undefinedReference"), "{ds:?}");
+    }
+
+    #[test]
+    fn every_position_in_a_signature_references_the_type() {
+        for signature in [
+            "(t: Thing) -> String",
+            "(a: String, t: Thing) -> String",
+            "(ts: Set<Thing>) -> String",
+            "() -> Thing",
+            "() -> Thing?",
+            "() -> List<Thing>",
+            "() -> Map<String, Thing>",
+            "() -> Set<List<Thing>>",
+        ] {
+            let (_, ds) = check_full(&format!(
+                "value Thing {{\n    n: Integer\n}}\n\ncontract C {{\n    op: {signature}\n}}\n"
+            ));
+            assert!(
+                !has_code(&ds, "allium.definition.unused"),
+                "Thing in `{signature}` should count as a reference: {ds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn enum_returned_by_a_signature_is_referenced() {
+        let (_, ds) = check_full(
+            "value Report {\n    path: String\n}\n\n\
+             enum Mode { quick | full }\n\n\
+             contract Checker {\n    run_check: (report: Report) -> Mode\n}\n",
+        );
+        assert!(!has_code(&ds, "allium.definition.unused"), "{ds:?}");
+    }
+
+    #[test]
+    fn type_no_signature_names_is_still_unused() {
+        // Crediting signature types must not credit everything in the module.
+        let (src, ds) = check_full(
+            "value Report {\n    path: String\n}\n\n\
+             value Orphan {\n    path: String\n}\n\n\
+             enum Stray { x | y }\n\n\
+             contract Checker {\n    run_check: () -> Report\n}\n",
+        );
+        assert_eq!(
+            flagged_text(&src, &ds, "allium.definition.unused"),
+            ["Orphan", "Stray"]
+        );
+    }
+
+    #[test]
+    fn unused_message_names_the_kind_of_declaration() {
+        let (_, ds) = check_full("value Orphan {\n    path: String\n}\n\nenum Stray { x | y }\n");
+        let mut messages: Vec<_> = ds
+            .iter()
+            .filter(|d| d.code == Some("allium.definition.unused"))
+            .map(|d| d.message.as_str())
+            .collect();
+        messages.sort();
+        assert_eq!(
+            messages,
+            [
+                "Enum 'Stray' is declared but not referenced elsewhere.",
+                "Value 'Orphan' is declared but not referenced elsewhere.",
+            ]
+        );
+    }
+
+    #[test]
+    fn undeclared_types_in_signatures_are_errors_at_the_name() {
+        let (src, ds) = check_full(
+            "value Report {\n    path: String\n}\n\n\
+             contract Checker {\n\
+             \x20   run_check: (mode: Moed) -> Reprot\n\
+             \x20   list_kinds: (filter: Set<Filtre>) -> List<Knid>?\n\
+             \x20   save: (report: Report) -> Report\n\
+             }\n",
+        );
+        assert_eq!(
+            flagged_text(&src, &ds, "allium.type.undefinedReference"),
+            ["Moed", "Reprot", "Filtre", "Knid"]
+        );
+        assert!(ds
+            .iter()
+            .filter(|d| d.code == Some("allium.type.undefinedReference"))
+            .all(|d| d.severity == Severity::Error));
+    }
+
+    #[test]
+    fn undeclared_type_of_a_contract_field_is_an_error() {
+        let (src, ds) = check_full("contract Auditable {\n    last_modified_by: Uzer\n}\n");
+        assert_eq!(flagged_text(&src, &ds, "allium.type.undefinedReference"), ["Uzer"]);
+    }
+
+    #[test]
+    fn builtin_and_declared_types_in_signatures_are_accepted() {
+        let (_, ds) = check_full(
+            "entity Order {\n    total: Decimal\n}\n\n\
+             value Receipt {\n    ok: Boolean\n}\n\n\
+             enum Outcome { done | failed }\n\n\
+             contract Everything {\n\
+             \x20   a: (x: Any, y: String, z: Integer) -> Void\n\
+             \x20   b: (at: Timestamp, within: Duration, ok: Boolean) -> Decimal\n\
+             \x20   c: (order: Order) -> Receipt?\n\
+             \x20   d: () -> Set<Outcome>\n\
+             }\n",
+        );
+        assert!(!has_code(&ds, "allium.type.undefinedReference"), "{ds:?}");
+    }
+
+    #[test]
+    fn qualified_types_in_signatures_are_left_to_the_imported_module() {
+        // `base/Report` is checked against base's declarations by the
+        // cross-module pass, not reported as an undeclared local type.
+        let (_, ds) = check_full(
+            "use \"./base.allium\" as base\n\n\
+             contract Store {\n    load: (key: String) -> base/Report\n}\n",
+        );
+        assert!(!has_code(&ds, "allium.type.undefinedReference"), "{ds:?}");
     }
 }

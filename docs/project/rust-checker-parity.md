@@ -197,6 +197,14 @@ param. The name is now also added to the rule's binding scope
 malformed trigger produces exactly one diagnostic, at the trigger, rather than
 double-firing on the body.
 
+Issue #106: contract signatures parse into their own AST node
+(`BlockItemKind::Signature`, with typed parameters and a return type) rather
+than as a projection. Their types count as references for the unused checks,
+and an undeclared one is `type.undefinedReference` (validation rule 42). The
+TypeScript analyzer's unused check counts names textually, so it never had
+the false positive; its undeclared-type check reads the wasm AST
+(`findContractSignatureTypeIssues`).
+
 ## Diagnostic codes implemented
 
 | Code | Severity | Rust | TypeScript |
