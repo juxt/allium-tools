@@ -454,3 +454,178 @@ fn six_entity_spec_emits_sorted_reports() {
         fs.iter().map(finding_key).collect::<Vec<_>>()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Adding an import alias never changes how existing names resolve (#137).
+//
+// A `use` alias only names a module for `alias/Name` references. Introducing
+// one must not change what any existing `x.member` means: a field, parameter,
+// `let`, loop variable or lambda parameter named `x` still shadows it. #123
+// keyed the dotted-alias check on spelling, so naming an alias like any local
+// binding turned valid member access into errors. This property runs over
+// every spec in the repository and every example block in the v3 language
+// reference: for each bound name used before a `.`, an alias of that name is
+// added, and the diagnostics must not change. Unbound names are left out: an
+// alias legitimately gives them a meaning.
+// ---------------------------------------------------------------------------
+
+fn corpus() -> Vec<(String, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut out = Vec::new();
+    for dir in ["crates/allium-parser/tests/fixtures", "docs/project/specs"] {
+        let mut paths: Vec<_> = std::fs::read_dir(root.join(dir))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "allium"))
+            .collect();
+        paths.sort();
+        for p in paths {
+            out.push((p.display().to_string(), std::fs::read_to_string(&p).unwrap()));
+        }
+    }
+    let reference = std::fs::read_to_string(root.join("docs/allium-v3-language-reference.md")).unwrap();
+    for (i, block) in reference.split("```").enumerate().filter(|(i, _)| i % 2 == 1) {
+        out.push((format!("language reference block {i}"), format!("-- allium: 3\n{}", block.trim_start_matches('\n'))));
+    }
+    out
+}
+
+/// The tokens of a line outside comments and strings: words, and each
+/// punctuation character on its own (`=>` kept whole).
+fn tokens(line: &str) -> Vec<String> {
+    let code = line.split("--").next().unwrap_or("");
+    let chars: Vec<char> = code.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' {
+            i += 1;
+            while i < chars.len() && chars[i] != '"' {
+                i += 1;
+            }
+            i += 1;
+        } else if c.is_alphanumeric() || c == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            out.push(chars[start..i].iter().collect());
+        } else if c == '=' && chars.get(i + 1) == Some(&'>') {
+            out.push("=>".to_string());
+            i += 2;
+        } else {
+            if !c.is_whitespace() {
+                out.push(c.to_string());
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+fn is_lower_word(t: &str) -> bool {
+    t.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+}
+
+/// Lowercase names the spec binds, read from the tokens of binding
+/// positions independently of the analyser's own scope walk: item names
+/// (`name:`, `name(...)`, `let name`), `for name in`, lambda parameters,
+/// `facing`/`context` bindings, `when: name:` bindings, `default T name`,
+/// and bare arguments of a call (trigger parameters, provides inputs,
+/// derived-value parameters).
+fn bound_names(src: &str) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for line in src.lines() {
+        let t = tokens(line);
+        let at = |i: usize| t.get(i).map(String::as_str).unwrap_or("");
+        let first = if at(0) == "let" { 1 } else { 0 };
+        if is_lower_word(at(first)) && matches!(at(first + 1), ":" | "(" | "=") {
+            names.insert(at(first).to_string());
+        }
+        for i in 0..t.len() {
+            match at(i) {
+                "for" | "facing" | "context" if is_lower_word(at(i + 1)) => {
+                    names.insert(at(i + 1).to_string());
+                }
+                "=>" if i > 0 && is_lower_word(at(i - 1)) => {
+                    names.insert(at(i - 1).to_string());
+                }
+                "when" if at(i + 1) == ":" && is_lower_word(at(i + 2)) && at(i + 3) == ":" => {
+                    names.insert(at(i + 2).to_string());
+                }
+                "default" if is_lower_word(at(i + 2)) => {
+                    names.insert(at(i + 2).to_string());
+                }
+                "(" | "," if is_lower_word(at(i + 1)) && matches!(at(i + 2), "," | ")" | "?") => {
+                    names.insert(at(i + 1).to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    names
+}
+
+/// Names written directly before `.` or `?.` that the spec also binds.
+fn member_access_roots(src: &str) -> std::collections::BTreeSet<String> {
+    let bound = bound_names(src);
+    let mut roots = std::collections::BTreeSet::new();
+    for line in src.lines() {
+        let t = tokens(line);
+        for i in 0..t.len().saturating_sub(1) {
+            let prev = if i > 0 { t[i - 1].as_str() } else { "" };
+            let next = t[i + 1].as_str();
+            if is_lower_word(&t[i])
+                && prev != "."
+                && prev != "/"
+                && (next == "." || (next == "?" && t.get(i + 2).map(String::as_str) == Some(".")))
+                && bound.contains(&t[i])
+            {
+                roots.insert(t[i].clone());
+            }
+        }
+    }
+    roots
+}
+
+/// Diagnostics as (code, message, start offset), with the inserted line's
+/// own diagnostics left out and offsets shifted back past it.
+fn resolved_diagnostics(src: &str, inserted_at: usize, inserted_len: usize) -> Vec<(String, String, usize)> {
+    let mut out: Vec<_> = diagnostics_of(src)
+        .into_iter()
+        .filter(|d| !(d.span.start >= inserted_at && d.span.start < inserted_at + inserted_len))
+        // Whether a module has any import is the subject of this hint, so an
+        // added `use` legitimately changes it; it is not name resolution.
+        .filter(|d| d.code != Some("allium.externalEntity.missingSourceHint"))
+        .map(|d| {
+            let start = if d.span.start >= inserted_at + inserted_len { d.span.start - inserted_len } else { d.span.start };
+            (d.code.unwrap_or("").to_string(), d.message.clone(), start)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn adding_an_import_alias_never_changes_name_resolution() {
+    let mut checked = 0;
+    let mut failures = Vec::new();
+    for (name, src) in corpus() {
+        let header_end = src.find('\n').map_or(src.len(), |i| i + 1);
+        let baseline = resolved_diagnostics(&src, usize::MAX, 0);
+        for alias in member_access_roots(&src) {
+            let line = format!("use \"./elsewhere.allium\" as {alias}\n");
+            let with_alias = format!("{}{}{}", &src[..header_end], line, &src[header_end..]);
+            let after = resolved_diagnostics(&with_alias, header_end, line.len());
+            checked += 1;
+            if after != baseline {
+                let added: Vec<_> = after.iter().filter(|d| !baseline.contains(d)).collect();
+                let removed: Vec<_> = baseline.iter().filter(|d| !after.contains(d)).collect();
+                failures.push(format!("{name}, alias `{alias}`:\n  added {added:?}\n  removed {removed:?}"));
+            }
+        }
+    }
+    assert!(checked > 100, "the corpus should exercise many names, checked {checked}");
+    assert!(failures.is_empty(), "{} of {checked} cases changed:\n{}", failures.len(), failures.join("\n"));
+}

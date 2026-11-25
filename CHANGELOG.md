@@ -4,6 +4,10 @@ Behaviour changes worth knowing before you upgrade. Releases ship from a single 
 
 ## Unreleased
 
+3.7.0 rejected `team.name` whenever a `use` alias was spelled `team`, even where `team` was a field, a `for` variable or a lambda parameter, and suggested a rewrite that changed the meaning (#137). The check now resolves the name by scope: any binding with the alias's name shadows it, and only a dotted reference that can only mean the alias is an error.
+
+A variant's body is now read as its fields. The parser took `variant Leaf : Node { ... }` for a join lookup on `Node`, so every variant had no fields as far as the checks were concerned. Variant fields are now checked like entity fields, so an unused one draws `allium.field.unused`.
+
 Open questions are reported at info severity rather than warning. They are written on purpose and stay until answered, so a warning treated a deliberate marker as a defect and failed `check` runs that fail on warnings.
 
 A Nix flake packages the CLI and the language server: `nix profile install github:juxt/allium-tools`.

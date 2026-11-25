@@ -373,3 +373,25 @@ fn dotted_member_on_a_use_alias_is_rejected() {
         diags.iter().map(|d| (&d.code, &d.message)).collect::<Vec<_>>()
     );
 }
+
+// ===========================================================================
+// A binding spelled like an alias shadows it (#137). The issue's two files.
+// ===========================================================================
+
+#[test]
+fn locally_bound_names_spelled_like_an_alias_are_member_access() {
+    let dir = TempDir::new("alias-shadowed");
+    dir.write("teams.allium", "-- allium: 3\n\nentity Team {\n    name: String\n}\n");
+    dir.write(
+        "roster.allium",
+        "-- allium: 3\n\nuse \"./teams.allium\" as team\n\nentity Member {\n    name: String\n    team: team/Team\n    label: String = team.name\n}\n\nrule RenameTeams {\n    when: RenameRequested(teams, new_name)\n    requires: teams.any(team => team.name != new_name)\n    for team in teams:\n        ensures: team.name = new_name\n}\n",
+    );
+
+    let (_ok, out) = run("check", &[dir.path().to_str().unwrap()]);
+    let diags = parse_diagnostics(&out);
+    assert!(
+        reference_diags(&diags).is_empty(),
+        "the field, lambda parameter and for variable named `team` shadow the alias.\nDiags: {:?}",
+        reference_diags(&diags)
+    );
+}

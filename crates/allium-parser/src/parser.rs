@@ -594,7 +594,21 @@ impl<'s> Parser<'s> {
         let start = self.expect(TokenKind::Variant)?.span;
         let name = self.parse_ident_in("variant name")?;
         self.expect(TokenKind::Colon)?;
-        let base = self.parse_expr(0)?;
+        // The base is a type name, `Node` or `alias/Node`. Reading it as an
+        // expression would take the body that follows for a join lookup
+        // (`Node { ... }`) and leave the variant with no items.
+        let base_name = self.parse_ident_in("variant base type")?;
+        let base = if self.at(TokenKind::Slash) && self.at_qualified_name_after_slash(1) {
+            self.advance(); // consume `/`
+            let name_tok = self.advance();
+            Expr::QualifiedName(QualifiedName {
+                span: base_name.span.merge(name_tok.span),
+                qualifier: Some(base_name.name),
+                name: self.text(name_tok.span).to_string(),
+            })
+        } else {
+            Expr::Ident(base_name)
+        };
 
         let items = if self.eat(TokenKind::LBrace).is_some() {
             let items = self.parse_block_items(BlockKind::Entity);
@@ -3187,13 +3201,69 @@ rule ProcessDigests {
 
     // -- variant with expression base -----------------------------------------
 
-    #[test]
-    fn variant_with_pipe_base() {
-        let src = "variant Mixed : TypeA | TypeB";
+    /// The variant's base, rendered, and the names of its body's items.
+    fn variant_shape(src: &str) -> (String, Vec<String>) {
         let r = parse_ok(src);
-        assert_eq!(r.diagnostics.len(), 0);
-        let Decl::Variant(v) = &r.module.declarations[0] else { panic!() };
-        assert!(matches!(v.base, Expr::Pipe { .. }));
+        assert!(
+            r.diagnostics.iter().all(|d| d.severity != Severity::Error),
+            "unexpected errors: {:?}",
+            r.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        let v = r
+            .module
+            .declarations
+            .iter()
+            .find_map(|d| match d {
+                Decl::Variant(v) => Some(v),
+                _ => None,
+            })
+            .expect("variant decl");
+        let base = match &v.base {
+            Expr::Ident(id) => id.name.clone(),
+            Expr::QualifiedName(q) => format!("{}/{}", q.qualifier.as_deref().unwrap_or(""), q.name),
+            other => panic!("variant base should be a type name, got {other:?}"),
+        };
+        let items = v
+            .items
+            .iter()
+            .map(|i| match &i.kind {
+                BlockItemKind::Assignment { name, .. } | BlockItemKind::FieldWithWhen { name, .. } => {
+                    name.name.clone()
+                }
+                other => format!("{other:?}"),
+            })
+            .collect();
+        (base, items)
+    }
+
+    #[test]
+    fn variant_body_is_its_items_not_a_join_lookup() {
+        // `Node { ... }` after the colon once parsed as a join lookup, which
+        // left every variant with no items.
+        assert_eq!(
+            variant_shape("variant Leaf : Node {\n    data: List<Integer>\n    log: List<Integer>\n}"),
+            ("Node".to_string(), vec!["data".to_string(), "log".to_string()])
+        );
+    }
+
+    #[test]
+    fn variant_base_may_be_qualified() {
+        assert_eq!(
+            variant_shape("use \"./core.allium\" as core\nvariant Lead : core/Member {\n    rank: Integer\n}"),
+            ("core/Member".to_string(), vec!["rank".to_string()])
+        );
+    }
+
+    #[test]
+    fn variant_without_a_body() {
+        assert_eq!(variant_shape("variant Leaf : Node"), ("Node".to_string(), vec![]));
+    }
+
+    #[test]
+    fn variant_base_is_a_single_type() {
+        // No version of the language has a union base.
+        let r = parse_ok("variant Mixed : TypeA | TypeB");
+        assert!(r.diagnostics.iter().any(|d| d.severity == Severity::Error));
     }
 
     // -- for-block with comparison in where filter ----------------------------

@@ -614,15 +614,30 @@ rule UndeclaredImportAliasIsDiagnosedAtEveryReferenceSite {
 -- alias, it is an error that points to the slash form, and it does not count
 -- as a reference to the imported declaration. When the name before the dot is
 -- anything else, such as a field, x.Name is ordinary member access, whatever
--- the case of Name (#97).
+-- the case of Name (#97). Which it is depends on scope, not spelling: a field
+-- of the enclosing type, a trigger parameter, a let, a for variable, a lambda
+-- parameter, a surface binding, a provides input, a given binding or a default
+-- instance with the alias's name shadows the alias where it is in scope
+-- (#137). Inside a where, with or for-where predicate, unqualified names may
+-- be element fields, so nothing there is reported.
 
 rule DottedAliasReferenceIsRejected {
     when: CheckCommandInvokedWithInputs(inputs)
 
     requires: MemberAccessOnUseAlias(alias, name)
+    requires: NoBindingNamedAliasInScope(alias)
 
     ensures: FindingObserved(code: "allium.reference.dottedAlias", severity: error)
     ensures: DeclarationNotCreditedAsReferenced(alias, name)
+}
+
+rule BindingSpelledLikeAliasShadowsIt {
+    when: CheckCommandInvokedWithInputs(inputs)
+
+    requires: MemberAccessOnUseAlias(alias, name)
+    requires: BindingNamedAliasInScope(alias)
+
+    ensures: FindingNotObserved(code: "allium.reference.dottedAlias")
 }
 
 rule UppercaseMemberOfLocalNameIsMemberAccess {
