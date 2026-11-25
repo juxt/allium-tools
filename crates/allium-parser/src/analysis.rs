@@ -4898,7 +4898,8 @@ pub fn collect_trigger_outputs(module: &Module) -> HashSet<String> {
 /// importing module links to them qualified, and any qualified reference to a
 /// surface the module declares resolves), and `config` when it declares a
 /// config block (the language reference's "Config parameter references" makes
-/// `alias/config.param` a documented reference form, checker rule 46).
+/// `alias/config.param` a documented reference form, checker rule 46), with
+/// each of its parameters as `config.<param>`.
 /// Used by multi-file checking to validate a qualified reference `alias/Name`
 /// against the aliased module — a name it never mentions is a resolution error
 /// at the reference (#72, and the name-existence audit).
@@ -4917,8 +4918,16 @@ pub fn collect_referenced_trigger_names(module: &Module) -> HashSet<String> {
                     names.insert(id.name.clone());
                 }
             }
+            // Each parameter is offered as `config.<param>`, so that the field of
+            // a qualified `alias/config.param` can be resolved too. The dot keeps
+            // these entries apart from every declared or referenced name.
             Decl::Block(b) if b.kind == BlockKind::Config => {
                 names.insert("config".to_string());
+                for item in &b.items {
+                    if let BlockItemKind::Assignment { name, .. } = &item.kind {
+                        names.insert(format!("config.{}", name.name));
+                    }
+                }
             }
             // A surface is a navigation target: an importing module's
             // `related:` entry links to it qualified (`alias/Surface(expr)`),
@@ -7600,26 +7609,54 @@ impl Ctx<'_> {
             }
         }
 
-        // Walk all expressions looking for config.field references
+        // Walk all expressions looking for config.field references. In a config
+        // block only qualified `alias/config.param` references are checked: a
+        // config default may read an imported module's parameter.
         for d in &self.module.declarations {
             match d {
                 Decl::Block(b) => {
-                    if b.kind == BlockKind::Config {
-                        continue;
-                    }
+                    let params = (b.kind != BlockKind::Config).then_some(&config_params);
                     for item in &b.items {
-                        self.check_config_refs_in_item(&item.kind, &config_params);
+                        self.check_config_refs_in_item(&item.kind, params);
                     }
                 }
                 Decl::Invariant(inv) => {
-                    self.check_config_refs_in_expr(&inv.body, &config_params);
+                    self.check_config_refs_in_expr(&inv.body, Some(&config_params));
                 }
                 _ => {}
             }
         }
     }
 
-    fn check_config_refs_in_item(&mut self, kind: &BlockItemKind, params: &HashSet<&str>) {
+    /// `alias/config.param` where the aliased module, in the check set, declares
+    /// a config block without `param`. A module without a config block draws
+    /// `allium.reference.unknownName` on `alias/config` instead, and a target
+    /// outside the check set is unknowable.
+    fn check_qualified_config_ref(&mut self, alias: &str, field: &Ident) {
+        let Some(offered) = self.imported_referenced_triggers.and_then(|m| m.get(alias)) else {
+            return;
+        };
+        if offered.contains("config") && !offered.contains(&format!("config.{}", field.name)) {
+            self.push(
+                Diagnostic::warning(
+                    field.span,
+                    format!(
+                        "Config reference '{alias}/config.{}' is not declared in the config block of imported module '{alias}'.",
+                        field.name
+                    ),
+                )
+                .with_code("allium.config.undefinedReference"),
+            );
+        }
+    }
+
+    /// `params` — the local config parameters, or `None` where unqualified
+    /// `config.field` references are not checked.
+    fn check_config_refs_in_item(
+        &mut self,
+        kind: &BlockItemKind,
+        params: Option<&HashSet<&str>>,
+    ) {
         match kind {
             BlockItemKind::Clause { value, .. }
             | BlockItemKind::Assignment { value, .. }
@@ -7654,10 +7691,18 @@ impl Ctx<'_> {
         }
     }
 
-    fn check_config_refs_in_expr(&mut self, expr: &Expr, params: &HashSet<&str>) {
+    fn check_config_refs_in_expr(&mut self, expr: &Expr, params: Option<&HashSet<&str>>) {
         match expr {
             Expr::MemberAccess { object, field, .. } => {
-                if let Expr::Ident(id) = object.as_ref() {
+                if let Expr::QualifiedName(QualifiedName { qualifier: Some(alias), name, .. }) =
+                    object.as_ref()
+                {
+                    if name == "config" {
+                        self.check_qualified_config_ref(alias, field);
+                        return;
+                    }
+                }
+                if let (Expr::Ident(id), Some(params)) = (object.as_ref(), params) {
                     if id.name == "config" && !params.contains(field.name.as_str()) {
                         self.push(
                             Diagnostic::warning(
@@ -7717,7 +7762,9 @@ impl Ctx<'_> {
                 }
                 self.check_config_refs_in_expr(body, params);
             }
-            Expr::LetExpr { value, .. } => {
+            // `Binding` is a `when: name: expr` trigger, e.g. a temporal one
+            // reading `config.timeout`.
+            Expr::Binding { value, .. } | Expr::LetExpr { value, .. } => {
                 self.check_config_refs_in_expr(value, params);
             }
             Expr::Lambda { body, .. } => {
@@ -8878,6 +8925,8 @@ surface AccountManagement {
         let result = parse(input);
         let names = collect_referenced_trigger_names(&result.module);
         assert!(names.contains("config"), "a declared config block is referenceable as alias/config");
+        assert!(names.contains("config.page_size"), "each config parameter is offered as config.<param>");
+        assert!(!names.contains("config.page_count"), "an undeclared parameter is not offered");
         assert!(names.contains("ExternalHelper"), "a deferred declaration is referenceable by name");
         assert!(names.contains("Matching"), "a dotted deferred offers its root name");
     }
@@ -9920,6 +9969,14 @@ rule ShowsError {
     fn config_undefined_reference() {
         let ds = analyze_src(
             "config {\n  max_retries: 3\n}\n\nrule A {\n  when: Ping(x)\n  requires: config.missing_param > 0\n  ensures: Done()\n}\n",
+        );
+        assert!(has_code(&ds, "allium.config.undefinedReference"));
+    }
+
+    #[test]
+    fn config_undefined_reference_in_when_binding() {
+        let ds = analyze_src(
+            "config {\n  ttl: Duration = 5.minutes\n}\n\nentity Session {\n  started_at: Timestamp\n}\n\nrule Expire {\n  when: s: Session.started_at + config.missing_ttl <= now\n  ensures: s.removed()\n}\n",
         );
         assert!(has_code(&ds, "allium.config.undefinedReference"));
     }

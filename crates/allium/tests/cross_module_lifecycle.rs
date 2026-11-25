@@ -1303,6 +1303,90 @@ fn config_reference_against_a_module_without_config_still_warns() {
     );
 }
 
+// The provider declares only `page_size`; the consumer names undeclared
+// parameters in a config default, a `requires` clause and a temporal trigger.
+const CONFIG_TYPO_CONSUMER: &str = r#"-- allium: 3
+use "./provider.allium" as p
+
+config {
+    local_page_size: Integer = p/config.page_sise
+}
+
+entity Session {
+    started_at: Timestamp
+}
+
+rule ExpireSession {
+    when: s: Session.started_at + p/config.session_ttl <= now
+
+    ensures: s.removed()
+}
+
+surface Api {
+    provides:
+        Go(size)
+}
+
+rule ReadsMissingParam {
+    when: Go(size)
+
+    requires: size > p/config.page_count
+
+    ensures: Accepted(size: size)
+}
+"#;
+
+fn undefined_config_refs(stdout: &str) -> Vec<String> {
+    parse_diagnostics(stdout)
+        .into_iter()
+        .filter(|d| d.code == "allium.config.undefinedReference")
+        .map(|d| d.message)
+        .collect()
+}
+
+#[test]
+fn imported_config_parameter_the_provider_does_not_declare_warns() {
+    let dir = TempDir::new("config-param-typo");
+    dir.write("provider.allium", CONFIG_DEFERRED_PROVIDER);
+    dir.write("consumer.allium", CONFIG_TYPO_CONSUMER);
+
+    let (ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    let messages = undefined_config_refs(&stdout);
+    assert_eq!(messages.len(), 3, "every undeclared parameter must warn.\n{stdout}");
+    assert!(messages.iter().any(|m| m.contains("p/config.page_sise")), "{messages:?}");
+    assert!(messages.iter().any(|m| m.contains("p/config.page_count")), "{messages:?}");
+    assert!(messages.iter().any(|m| m.contains("p/config.session_ttl")), "{messages:?}");
+    assert!(!ok, "check should exit non-zero on the warnings.\n{stdout}");
+}
+
+#[test]
+fn imported_config_parameter_is_not_checked_when_the_provider_is_outside_the_check_set() {
+    // Only the consumer is checked: the provider's config block is unknowable.
+    let dir = TempDir::new("config-param-out-of-set");
+    dir.write("provider.allium", CONFIG_DEFERRED_PROVIDER);
+    dir.write("consumer.allium", CONFIG_TYPO_CONSUMER);
+
+    let consumer = dir.path().join("consumer.allium");
+    let (_ok, stdout) = run("check", &[consumer.to_str().unwrap()]);
+    assert!(undefined_config_refs(&stdout).is_empty(), "{stdout}");
+}
+
+#[test]
+fn imported_config_parameter_of_a_module_without_config_warns_only_once() {
+    // A module without a config block draws unknownName on `p/config`; the
+    // parameter is not reported a second time.
+    let dir = TempDir::new("config-param-no-block");
+    dir.write("provider.allium", "-- allium: 3\nentity Thing {\n    id: Integer\n}\n");
+    dir.write("consumer.allium", CONFIG_TYPO_CONSUMER);
+
+    let (_ok, stdout) = run("check", &[dir.path().to_str().unwrap()]);
+    assert!(undefined_config_refs(&stdout).is_empty(), "{stdout}");
+    assert!(
+        parse_diagnostics(&stdout).iter().any(|d| d.code == "allium.reference.unknownName"),
+        "{stdout}"
+    );
+}
+
 // ===========================================================================
 // Emissions after the first ensures statement export to importers
 // ===========================================================================
