@@ -4703,7 +4703,6 @@ fn collect_uppercase_idents_from_expr<'a>(expr: &'a Expr, out: &mut Vec<Referenc
 pub fn collect_qualified_references(module: &Module) -> Vec<(String, String)> {
     collect_qref_nodes(module)
         .into_iter()
-        .filter(|r| !r.dotted)
         .map(|r| (r.qualifier.to_string(), r.name.to_string()))
         .collect()
 }
@@ -5873,11 +5872,6 @@ struct QRef<'a> {
     /// valid collection from a typo. The `unknownName` branch leaves these
     /// alone rather than false-positive on every qualified collection (#82).
     collection: bool,
-    /// True for `x.Member` member access, collected only so that the alias
-    /// check can reject the dotted form when `x` is a `use` alias: the
-    /// language writes cross-module references as `alias/Name`, never
-    /// `alias.Name`. Dotted pairs are never credited as references.
-    dotted: bool,
 }
 
 fn collect_qrefs_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<QRef<'a>>) {
@@ -5929,7 +5923,7 @@ fn collect_qrefs_from_item<'a>(kind: &'a BlockItemKind, out: &mut Vec<QRef<'a>>)
         BlockItemKind::ContractsClause { entries } => {
             for e in entries {
                 if let Some(qualifier) = &e.qualifier {
-                    out.push(QRef { qualifier, name: &e.name.name, span: e.name.span, collection: false, dotted: false });
+                    out.push(QRef { qualifier, name: &e.name.name, span: e.name.span, collection: false });
                 }
             }
         }
@@ -5948,7 +5942,7 @@ fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
     match expr {
         Expr::QualifiedName(q) => {
             if let Some(qualifier) = &q.qualifier {
-                out.push(QRef { qualifier, name: &q.name, span: q.span, collection: false, dotted: false });
+                out.push(QRef { qualifier, name: &q.name, span: q.span, collection: false });
             }
         }
         Expr::MemberAccess { object, field, .. }
@@ -5960,18 +5954,9 @@ fn collect_qrefs_from_expr<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
                 object.as_ref()
             {
                 if BUILTIN_COLLECTION_METHODS.contains(&field.name.as_str()) {
-                    out.push(QRef { qualifier, name, span: *span, collection: true, dotted: false });
+                    out.push(QRef { qualifier, name, span: *span, collection: true });
                     return;
                 }
-            }
-            if let Expr::Ident(id) = object.as_ref() {
-                out.push(QRef {
-                    qualifier: &id.name,
-                    name: &field.name,
-                    span: id.span.merge(field.span),
-                    collection: false,
-                    dotted: true,
-                });
             }
             collect_qrefs_from_expr(object, out);
         }
@@ -6102,7 +6087,7 @@ fn collect_qrefs_from_collection<'a>(expr: &'a Expr, out: &mut Vec<QRef<'a>>) {
     match expr {
         Expr::QualifiedName(q) => {
             if let Some(qualifier) = &q.qualifier {
-                out.push(QRef { qualifier, name: &q.name, span: q.span, collection: true, dotted: false });
+                out.push(QRef { qualifier, name: &q.name, span: q.span, collection: true });
             }
         }
         // A filtered/projected collection still has its collection at `source`;
@@ -6388,6 +6373,8 @@ impl Ctx<'_> {
             None => HashMap::new(),
         };
 
+        self.check_dotted_alias_references(&aliases);
+
         let mut refs = collect_qref_nodes(self.module);
         // A `default alias/Type` reference's qualifier sits on the declaration,
         // not inside its value expression, so add it explicitly.
@@ -6399,30 +6386,12 @@ impl Ctx<'_> {
                         name: &t.name,
                         span: a.span.merge(t.span),
                         collection: false,
-                        dotted: false,
                     });
                 }
             }
         }
 
         for r in refs {
-            if r.dotted {
-                // `x.Member` is member access. It is only wrong when `x` is a
-                // `use` alias, which is not a value (#97).
-                if aliases.contains(r.qualifier) {
-                    self.push(
-                        Diagnostic::error(
-                            r.span,
-                            format!(
-                                "'{}.{}' is not a cross-module reference. Write '{}/{}'.",
-                                r.qualifier, r.name, r.qualifier, r.name
-                            ),
-                        )
-                        .with_code("allium.reference.dottedAlias"),
-                    );
-                }
-                continue;
-            }
             if !aliases.contains(r.qualifier) {
                 self.push(
                     Diagnostic::error(
@@ -7725,6 +7694,382 @@ impl Ctx<'_> {
             }
             _ => {}
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dotted alias references (#97, #137)
+// ---------------------------------------------------------------------------
+
+impl Ctx<'_> {
+    /// `x.Name` where `x` resolves to a `use` alias is an error: the language
+    /// writes cross-module references as `x/Name` (#97). Whether `x` resolves
+    /// to the alias is a question of scope, not spelling. A field of the
+    /// enclosing type, a trigger parameter, a `let`, a `for` variable, a lambda
+    /// parameter, a surface binding, a `given` binding or a default instance
+    /// named `x` shadows the alias, and `x.name` is then member access (#137).
+    ///
+    /// The check reports only what it can prove. Inside a `where`, `with` or
+    /// `for … where` predicate, unqualified names resolve to the fields of the
+    /// element first, and those fields are not known without types, so no
+    /// reference there is reported. A variant whose base is not declared in
+    /// this module is skipped for the same reason.
+    fn check_dotted_alias_references(&mut self, aliases: &HashSet<&str>) {
+        if aliases.is_empty() {
+            return;
+        }
+        let mut globals: Vec<&str> = vec!["config"];
+        for d in &self.module.declarations {
+            match d {
+                Decl::Default(def) => globals.push(&def.name.name),
+                Decl::Block(b) if b.kind == BlockKind::Given => {
+                    globals.extend(item_names(&b.items));
+                }
+                _ => {}
+            }
+        }
+        let fields_of = |name: &str| -> Option<Vec<&str>> {
+            self.module.declarations.iter().find_map(|d| match d {
+                Decl::Block(b)
+                    if matches!(
+                        b.kind,
+                        BlockKind::Entity | BlockKind::ExternalEntity | BlockKind::Value
+                    ) && b.name.as_ref().is_some_and(|n| n.name == name) =>
+                {
+                    Some(item_names(&b.items))
+                }
+                _ => None,
+            })
+        };
+
+        let mut walk = DottedAliasWalk {
+            aliases,
+            found: Vec::new(),
+        };
+        for d in &self.module.declarations {
+            let mut scope = globals.clone();
+            match d {
+                Decl::Block(b) => match b.kind {
+                    BlockKind::Rule | BlockKind::Surface => {
+                        for item in &b.items {
+                            match &item.kind {
+                                BlockItemKind::Clause { keyword, value } if keyword == "when" => {
+                                    let mut bound = HashSet::new();
+                                    collect_bound_names(value, &mut bound);
+                                    scope.extend(bound);
+                                }
+                                BlockItemKind::Clause { value: Expr::Binding { name, .. }, .. } => {
+                                    scope.push(&name.name);
+                                }
+                                // A surface's `name: expr` item binds a value
+                                // its other clauses navigate.
+                                BlockItemKind::Assignment { name, .. } if b.kind == BlockKind::Surface => {
+                                    scope.push(&name.name);
+                                }
+                                _ => {}
+                            }
+                        }
+                        walk.items(&b.items, &scope);
+                    }
+                    BlockKind::Enum | BlockKind::Given | BlockKind::Contract => {}
+                    // Entities, values, config and actors: every item name
+                    // is in scope throughout the block.
+                    _ => {
+                        scope.extend(item_names(&b.items));
+                        walk.items(&b.items, &scope);
+                    }
+                },
+                Decl::Variant(v) => {
+                    let base = match &v.base {
+                        Expr::Ident(id) => Some(id.name.as_str()),
+                        Expr::JoinLookup { entity, .. } => expr_as_ident(entity),
+                        _ => None,
+                    };
+                    let Some(base_fields) = base.and_then(fields_of) else {
+                        continue;
+                    };
+                    scope.extend(base_fields);
+                    scope.extend(item_names(&v.items));
+                    walk.items(&v.items, &scope);
+                }
+                Decl::Invariant(inv) => walk.expr(&inv.body, &scope),
+                Decl::Default(def) => walk.expr(&def.value, &scope),
+                Decl::Use(_) | Decl::Deferred(_) | Decl::OpenQuestion(_) => {}
+            }
+        }
+
+        for (object, field) in walk.found {
+            self.push(
+                Diagnostic::error(
+                    object.span.merge(field.span),
+                    format!(
+                        "'{}.{}' is not a cross-module reference. Write '{}/{}'.",
+                        object.name, field.name, object.name, field.name
+                    ),
+                )
+                .with_code("allium.reference.dottedAlias"),
+            );
+        }
+    }
+}
+
+/// The names a block's items declare: fields, relationships, derived values
+/// and `name: value` items.
+fn item_names(items: &[BlockItem]) -> Vec<&str> {
+    items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            BlockItemKind::Assignment { name, .. }
+            | BlockItemKind::ParamAssignment { name, .. }
+            | BlockItemKind::FieldWithWhen { name, .. } => Some(name.name.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A lexically scoped walk that records `x.member` where `x` is a `use` alias
+/// and no binding named `x` is in scope. `scope` holds every name bound at the
+/// current point; predicate bodies, whose unqualified names may be element
+/// fields, are not entered.
+struct DottedAliasWalk<'a, 's> {
+    aliases: &'s HashSet<&'a str>,
+    found: Vec<(&'a Ident, &'a Ident)>,
+}
+
+impl<'a> DottedAliasWalk<'a, '_> {
+    fn items(&mut self, items: &'a [BlockItem], parent: &[&'a str]) {
+        // A `let` at a block level is visible throughout that level.
+        let mut scope = parent.to_vec();
+        for item in items {
+            if let BlockItemKind::Let { name, .. } = &item.kind {
+                scope.push(&name.name);
+            }
+        }
+        for item in items {
+            match &item.kind {
+                BlockItemKind::Clause { value, .. }
+                | BlockItemKind::Assignment { value, .. }
+                | BlockItemKind::Let { value, .. }
+                | BlockItemKind::PathAssignment { value, .. }
+                | BlockItemKind::InvariantBlock { body: value, .. }
+                | BlockItemKind::FieldWithWhen { value, .. } => self.expr(value, &scope),
+                BlockItemKind::ParamAssignment { params, value, .. } => {
+                    let mut inner = scope.clone();
+                    inner.extend(params.iter().map(|p| p.name.as_str()));
+                    self.expr(value, &inner);
+                }
+                BlockItemKind::ForBlock {
+                    binding,
+                    collection,
+                    items,
+                    ..
+                } => {
+                    // The filter is a predicate over the element; skipped.
+                    self.expr(collection, &scope);
+                    let mut inner = scope.clone();
+                    push_for_binding(binding, &mut inner);
+                    self.items(items, &inner);
+                }
+                BlockItemKind::IfBlock {
+                    branches,
+                    else_items,
+                } => {
+                    for b in branches {
+                        self.expr(&b.condition, &scope);
+                        self.items(&b.items, &scope);
+                    }
+                    if let Some(items) = else_items {
+                        self.items(items, &scope);
+                    }
+                }
+                BlockItemKind::EnumVariant { .. }
+                | BlockItemKind::OpenQuestion { .. }
+                | BlockItemKind::ContractsClause { .. }
+                | BlockItemKind::Annotation(_)
+                | BlockItemKind::TransitionsBlock(_) => {}
+            }
+        }
+    }
+
+    fn expr(&mut self, expr: &'a Expr, scope: &[&'a str]) {
+        match expr {
+            Expr::MemberAccess { object, field, .. } | Expr::OptionalAccess { object, field, .. } => {
+                if let Expr::Ident(id) = object.as_ref() {
+                    if self.aliases.contains(id.name.as_str()) && !scope.contains(&id.name.as_str()) {
+                        self.found.push((id, field));
+                    }
+                }
+                self.expr(object, scope);
+            }
+            // Predicates whose unqualified names resolve to element fields.
+            Expr::Where { source, .. } | Expr::With { source, .. } => self.expr(source, scope),
+            Expr::Lambda { param, body, .. } => {
+                let mut inner = scope.to_vec();
+                let mut params = HashSet::new();
+                collect_pattern_names(param, &mut params);
+                inner.extend(params);
+                self.expr(body, &inner);
+            }
+            Expr::For {
+                binding,
+                collection,
+                body,
+                ..
+            } => {
+                self.expr(collection, scope);
+                let mut inner = scope.to_vec();
+                push_for_binding(binding, &mut inner);
+                self.expr(body, &inner);
+            }
+            Expr::Block { items, .. } => {
+                // A `let` inside a block is visible to the statements after it.
+                let mut inner = scope.to_vec();
+                for item in items {
+                    self.expr(item, &inner);
+                    if let Expr::LetExpr { name, .. } = item {
+                        inner.push(&name.name);
+                    }
+                }
+            }
+            Expr::LetExpr { value, .. } => self.expr(value, scope),
+            Expr::Binding { value, .. } => self.expr(value, scope),
+            Expr::Call { function, args, .. } => {
+                self.expr(function, scope);
+                for a in args {
+                    match a {
+                        CallArg::Positional(e) => self.expr(e, scope),
+                        CallArg::Named(n) => self.expr(&n.value, scope),
+                    }
+                }
+            }
+            Expr::JoinLookup { entity, fields, .. } => {
+                self.expr(entity, scope);
+                for f in fields {
+                    if let Some(v) = &f.value {
+                        self.expr(v, scope);
+                    }
+                }
+            }
+            Expr::ObjectLiteral { fields, .. } => {
+                for f in fields {
+                    self.expr(&f.value, scope);
+                }
+            }
+            Expr::SetLiteral { elements, .. } | Expr::ListLiteral { elements, .. } => {
+                for e in elements {
+                    self.expr(e, scope);
+                }
+            }
+            Expr::Conditional {
+                branches,
+                else_body,
+                ..
+            } => {
+                for b in branches {
+                    self.expr(&b.condition, scope);
+                    self.expr(&b.body, scope);
+                }
+                if let Some(body) = else_body {
+                    self.expr(body, scope);
+                }
+            }
+            Expr::BinaryOp { left, right, .. }
+            | Expr::Comparison { left, right, .. }
+            | Expr::LogicalOp { left, right, .. }
+            | Expr::NullCoalesce { left, right, .. }
+            | Expr::Pipe { left, right, .. } => {
+                self.expr(left, scope);
+                self.expr(right, scope);
+            }
+            Expr::In {
+                element,
+                collection,
+                ..
+            }
+            | Expr::NotIn {
+                element,
+                collection,
+                ..
+            } => {
+                self.expr(element, scope);
+                self.expr(collection, scope);
+            }
+            Expr::TransitionsTo {
+                subject, new_state, ..
+            }
+            | Expr::Becomes {
+                subject, new_state, ..
+            } => {
+                self.expr(subject, scope);
+                self.expr(new_state, scope);
+            }
+            Expr::WhenGuard {
+                action, condition, ..
+            } => {
+                // In `provides: Act(viewer, task) when task.status = open`,
+                // the entry's arguments are in scope in its guard: those
+                // matching no surface binding are inputs from the party.
+                self.expr(action, scope);
+                let mut inner = scope.to_vec();
+                if let Expr::Call { args, .. } = action.as_ref() {
+                    for a in args {
+                        if let CallArg::Positional(Expr::Ident(id)) = a {
+                            inner.push(&id.name);
+                        }
+                    }
+                }
+                self.expr(condition, &inner);
+            }
+            Expr::Not { operand, .. }
+            | Expr::Exists { operand, .. }
+            | Expr::NotExists { operand, .. }
+            | Expr::TypeOptional { inner: operand, .. } => self.expr(operand, scope),
+            Expr::ProjectionMap { source, .. } => self.expr(source, scope),
+            Expr::GenericType { name, args, .. } => {
+                self.expr(name, scope);
+                for a in args {
+                    self.expr(a, scope);
+                }
+            }
+            Expr::Ident(_)
+            | Expr::QualifiedName(_)
+            | Expr::StringLiteral(_)
+            | Expr::BacktickLiteral { .. }
+            | Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::Null { .. }
+            | Expr::Now { .. }
+            | Expr::This { .. }
+            | Expr::Within { .. }
+            | Expr::DurationLiteral { .. } => {}
+        }
+    }
+}
+
+fn push_for_binding<'a>(binding: &'a ForBinding, scope: &mut Vec<&'a str>) {
+    match binding {
+        ForBinding::Single(id) => scope.push(&id.name),
+        ForBinding::Destructured(ids, _) => scope.extend(ids.iter().map(|id| id.name.as_str())),
+    }
+}
+
+/// The names a lambda parameter pattern binds (`x`, `(a, b)`).
+fn collect_pattern_names<'a>(pattern: &'a Expr, out: &mut HashSet<&'a str>) {
+    match pattern {
+        Expr::Ident(id) => {
+            out.insert(&id.name);
+        }
+        Expr::SetLiteral { elements, .. } | Expr::ListLiteral { elements, .. } => {
+            for e in elements {
+                collect_pattern_names(e, out);
+            }
+        }
+        Expr::Block { items, .. } => {
+            for e in items {
+                collect_pattern_names(e, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -10173,5 +10518,213 @@ rule ShowsError {
         );
         let rc = collect_reverse_contributions(&importer, "tickets", &imported);
         assert!(rc.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Dotted alias references resolve by scope, not spelling (#137).
+    //
+    // Each case is a pair over the same spec. `{b}` is the name a binding
+    // form introduces and `{u}` the name used as `{u}.name`. With both `team`,
+    // the binding shadows the alias `team` and `team.name` is member access.
+    // With the binding renamed to `other`, `team.name` can only mean the
+    // alias, and must be reported exactly once, at `team.name`. The pair
+    // proves each binding form is what silences the check.
+    // -----------------------------------------------------------------------
+
+    const ALIAS_HEADER: &str = "-- allium: 3\nuse \"./teams.allium\" as team\n\n";
+
+    fn dotted_alias_text(body: &str) -> Vec<String> {
+        let src = format!("{ALIAS_HEADER}{body}");
+        let ds = analyze(&parse(&src).module, &src);
+        ds.iter()
+            .filter(|d| d.code == Some("allium.reference.dottedAlias"))
+            .map(|d| src[d.span.start..d.span.end].to_string())
+            .collect()
+    }
+
+    const BINDING_FORMS: &[(&str, &str)] = &[
+        ("entity field", "entity Member {\n    {b}: String\n    label: String = {u}.name\n}\n"),
+        ("value field", "value Badge {\n    {b}: String\n    label: String = {u}.name\n}\n"),
+        (
+            "base entity field seen from a variant",
+            "entity Member {\n    {b}: String\n    kind: Lead\n}\n\nvariant Lead : Member {\n    label: String = {u}.name\n}\n",
+        ),
+        (
+            "variant's own field",
+            "entity Member {\n    kind: Lead\n}\n\nvariant Lead : Member {\n    {b}: String\n    label: String = {u}.name\n}\n",
+        ),
+        (
+            "derived value parameter",
+            "entity Member {\n    label({b}): String = {u}.name\n}\n",
+        ),
+        (
+            "trigger parameter",
+            "rule Rename {\n    when: Renamed({b}, new_name)\n    ensures: {u}.name = new_name\n}\n",
+        ),
+        (
+            "trigger binding",
+            "entity Squad {\n    name: String\n}\n\nrule Created {\n    when: {b}: Squad.created\n    ensures: {u}.name = \"new\"\n}\n",
+        ),
+        (
+            "rule let",
+            "rule Rename {\n    when: Renamed(squad, new_name)\n    let {b} = squad\n    ensures: {u}.name = new_name\n}\n",
+        ),
+        (
+            "let inside an ensures block",
+            "rule Rename {\n    when: Renamed(squad, new_name)\n    ensures:\n        let {b} = squad\n        {u}.name = new_name\n}\n",
+        ),
+        (
+            "for block variable",
+            "rule Rename {\n    when: Renamed(squads, new_name)\n    for {b} in squads:\n        ensures: {u}.name = new_name\n}\n",
+        ),
+        (
+            "for expression variable",
+            "rule Rename {\n    when: Renamed(squads, new_name)\n    ensures:\n        for {b} in squads:\n            {u}.name = new_name\n}\n",
+        ),
+        (
+            "lambda parameter",
+            "rule Rename {\n    when: Renamed(squads, new_name)\n    requires: squads.any({b} => {u}.name != new_name)\n    ensures: Renamed2(squads)\n}\n",
+        ),
+        (
+            "surface facing binding",
+            "surface Desk {\n    facing {b}: Squad\n    exposes:\n        {u}.name\n}\n",
+        ),
+        (
+            "surface context binding",
+            "surface Desk {\n    facing viewer: Admin\n    context {b}: Squad\n    exposes:\n        {u}.name\n}\n",
+        ),
+        (
+            "surface assignment",
+            "surface Desk {\n    facing viewer: Admin\n    {b}: viewer.squad\n    exposes:\n        {u}.name\n}\n",
+        ),
+        (
+            "given binding",
+            "given {\n    {b}: Squad\n}\n\nrule Rename {\n    when: Renamed(new_name)\n    ensures: {u}.name = new_name\n}\n",
+        ),
+        (
+            "default instance",
+            "entity Squad {\n    name: String\n}\n\ndefault Squad {b} = { name: \"core\" }\n\nrule Rename {\n    when: Renamed(new_name)\n    ensures: {u}.name = new_name\n}\n",
+        ),
+        (
+            "provides input in its when guard",
+            "surface Desk {\n    facing viewer: Admin\n    provides:\n        Rename(viewer, {b}) when {u}.name != \"\"\n}\n",
+        ),
+        (
+            "top-level invariant for variable",
+            "entity Squad {\n    name: String\n}\n\ninvariant Named {\n    for {b} in Squads:\n        {u}.name != \"\"\n}\n",
+        ),
+    ];
+
+    fn binding_case(template: &str, bound: &str, used: &str) -> String {
+        template.replace("{b}", bound).replace("{u}", used)
+    }
+
+    #[test]
+    fn a_binding_spelled_like_an_alias_shadows_it() {
+        for (form, template) in BINDING_FORMS {
+            assert_eq!(
+                dotted_alias_text(&binding_case(template, "team", "team")),
+                Vec::<String>::new(),
+                "{form}: `team.name` is member access on the bound `team`"
+            );
+        }
+    }
+
+    #[test]
+    fn without_the_binding_the_dotted_alias_is_reported() {
+        for (form, template) in BINDING_FORMS {
+            assert_eq!(
+                dotted_alias_text(&binding_case(template, "other", "team")),
+                ["team.name"],
+                "{form}: with the binding renamed, `team.name` means the alias"
+            );
+        }
+    }
+
+    // A binding shadows the alias only within its scope.
+
+    #[test]
+    fn for_variable_does_not_shadow_after_the_loop() {
+        assert_eq!(
+            dotted_alias_text(
+                "rule Rename {\n    when: Renamed(squads, new_name)\n    for team in squads:\n        ensures: team.name = new_name\n    ensures: team.Team = new_name\n}\n"
+            ),
+            ["team.Team"]
+        );
+    }
+
+    #[test]
+    fn lambda_parameter_does_not_shadow_outside_the_lambda() {
+        assert_eq!(
+            dotted_alias_text(
+                "rule Rename {\n    when: Renamed(squads, new_name)\n    requires: squads.any(team => team.name = new_name) and team.Active\n    ensures: Done(squads)\n}\n"
+            ),
+            ["team.Active"]
+        );
+    }
+
+    #[test]
+    fn trigger_parameter_does_not_shadow_in_another_rule() {
+        assert_eq!(
+            dotted_alias_text(
+                "rule A {\n    when: Renamed(team)\n    ensures: team.name = \"a\"\n}\n\n\
+                 rule B {\n    when: Pinged(squad)\n    ensures: team.Name = \"b\"\n}\n"
+            ),
+            ["team.Name"]
+        );
+    }
+
+    #[test]
+    fn let_in_one_branch_does_not_shadow_in_its_sibling() {
+        assert_eq!(
+            dotted_alias_text(
+                "rule Rename {\n    when: Renamed(squad, flag)\n    if flag:\n        let team = squad\n        ensures: team.name = \"x\"\n    else:\n        ensures: team.Name = \"y\"\n}\n"
+            ),
+            ["team.Name"]
+        );
+    }
+
+    #[test]
+    fn let_inside_an_ensures_block_shadows_only_what_follows_it() {
+        assert_eq!(
+            dotted_alias_text(
+                "rule Rename {\n    when: Renamed(squad)\n    ensures:\n        team.Before = 1\n        let team = squad\n        team.name = \"x\"\n}\n"
+            ),
+            ["team.Before"]
+        );
+    }
+
+    #[test]
+    fn field_of_one_entity_does_not_shadow_in_another() {
+        assert_eq!(
+            dotted_alias_text(
+                "entity Member {\n    team: String\n    label: String = team.name\n}\n\n\
+                 entity Badge {\n    title: String\n    label: String = team.Name\n}\n"
+            ),
+            ["team.Name"]
+        );
+    }
+
+    #[test]
+    fn predicate_bodies_are_not_reported() {
+        // Inside `where`, `with` and `for … where`, an unqualified name may be
+        // a field of the element; without its type the check cannot prove
+        // `team` is the alias, so it reports nothing there.
+        assert_eq!(
+            dotted_alias_text(
+                "entity Member {\n    squads: Squad with team.owner = this\n    active: squads where team.active\n}\n\n\
+                 rule Sweep {\n    when: Swept(squads)\n    for s in squads where team.stale:\n        ensures: s.removed()\n}\n"
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn variant_of_an_unknown_base_is_not_reported() {
+        // The base's fields are unknown, so `team` may be one of them.
+        assert_eq!(
+            dotted_alias_text("variant Lead : team/Member {\n    label: String = team.name\n}\n"),
+            Vec::<String>::new()
+        );
     }
 }

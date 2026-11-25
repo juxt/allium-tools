@@ -32,6 +32,9 @@
               ./packages
               ./extensions/allium/package.json
               ./extensions/allium/src
+              # Read by the CLI's property tests, which run during the build.
+              ./docs/project/specs
+              ./docs/allium-v3-language-reference.md
             ];
           };
 
