@@ -8,6 +8,8 @@ Open questions are reported at info severity rather than warning. They are writt
 
 A Nix flake packages the CLI and the language server: `nix profile install github:juxt/allium-tools`.
 
+`allium plan` now emits obligations for named prose annotations. Each `@guarantee` in a surface gives `surface-guarantee.<Surface>.<Guarantee>` (category `surface_guarantee`), and each `@invariant` in a contract gives `contract-invariant.<Contract>.<Invariant>` (category `contract_invariant`). The annotation's prose, whitespace collapsed, is the obligation's `expression`. `@guidance` still gives no obligation. Tools that check plan coverage can now see these annotations.
+
 ## 3.7.2
 
 3.7.1 also reached crates.io only: the Homebrew bottle job asked for a macOS 14 runner, which GitHub retired in November 2026. Bottles are now built on macOS 15, so macOS 14 installs through Homebrew build from source. 3.7.2 is the same release as 3.7.0.

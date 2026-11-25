@@ -67,7 +67,9 @@ pub enum ObligationCategory {
     SurfaceExposure,
     SurfaceProvides,
     SurfaceActor,
+    SurfaceGuarantee,
     ContractSignature,
+    ContractInvariant,
 }
 
 #[derive(Debug, Serialize)]
@@ -936,9 +938,39 @@ fn emit_surface_obligations(plan: &mut TestPlan, block: &BlockDecl) {
                     dependencies: None,
                 });
             }
+            BlockItemKind::Annotation(Annotation {
+                kind: AnnotationKind::Guarantee,
+                name: Some(guarantee),
+                body,
+                ..
+            }) => {
+                plan.obligations.push(Obligation {
+                    id: format!("surface-guarantee.{}.{}", name, guarantee.name),
+                    category: ObligationCategory::SurfaceGuarantee,
+                    description: format!(
+                        "Verify surface {} upholds guarantee {}",
+                        name, guarantee.name
+                    ),
+                    source_construct: format!("{}.{}", name, guarantee.name),
+                    expression: annotation_text(body),
+                    source_span: SourceSpan { start: item.span.start, end: item.span.end },
+                    detail: None,
+                    dependencies: None,
+                });
+            }
             _ => {}
         }
     }
+}
+
+/// The prose of an annotation as one line, whitespace collapsed.
+fn annotation_text(body: &[String]) -> Option<String> {
+    let text = body
+        .iter()
+        .flat_map(|line| line.split_whitespace())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn emit_config_obligations(plan: &mut TestPlan, block: &BlockDecl) {
@@ -961,20 +993,43 @@ fn emit_config_obligations(plan: &mut TestPlan, block: &BlockDecl) {
 fn emit_contract_obligations(plan: &mut TestPlan, block: &BlockDecl) {
     let name = block_name(block);
     for item in &block.items {
-        if let BlockItemKind::Assignment { name: sig_name, .. } = &item.kind {
-            plan.obligations.push(Obligation {
-                id: format!("contract-signature.{}.{}", name, sig_name.name),
-                category: ObligationCategory::ContractSignature,
-                description: format!(
-                    "Verify implementation satisfies contract {}.{}",
-                    name, sig_name.name
-                ),
-                source_construct: format!("{}.{}", name, sig_name.name),
-                expression: None,
-                source_span: SourceSpan { start: item.span.start, end: item.span.end },
-                detail: None,
-                dependencies: None,
-            });
+        match &item.kind {
+            BlockItemKind::Assignment { name: sig_name, .. } => {
+                plan.obligations.push(Obligation {
+                    id: format!("contract-signature.{}.{}", name, sig_name.name),
+                    category: ObligationCategory::ContractSignature,
+                    description: format!(
+                        "Verify implementation satisfies contract {}.{}",
+                        name, sig_name.name
+                    ),
+                    source_construct: format!("{}.{}", name, sig_name.name),
+                    expression: None,
+                    source_span: SourceSpan { start: item.span.start, end: item.span.end },
+                    detail: None,
+                    dependencies: None,
+                });
+            }
+            BlockItemKind::Annotation(Annotation {
+                kind: AnnotationKind::Invariant,
+                name: Some(invariant),
+                body,
+                ..
+            }) => {
+                plan.obligations.push(Obligation {
+                    id: format!("contract-invariant.{}.{}", name, invariant.name),
+                    category: ObligationCategory::ContractInvariant,
+                    description: format!(
+                        "Verify implementations of contract {} uphold invariant {}",
+                        name, invariant.name
+                    ),
+                    source_construct: format!("{}.{}", name, invariant.name),
+                    expression: annotation_text(body),
+                    source_span: SourceSpan { start: item.span.start, end: item.span.end },
+                    detail: None,
+                    dependencies: None,
+                });
+            }
+            _ => {}
         }
     }
 }
@@ -2035,6 +2090,37 @@ mod tests {
         assert!(matches!(ob.category, ObligationCategory::SurfaceProvides));
     }
 
+    #[test]
+    fn surface_guarantee_obligations() {
+        let source = "-- allium: 3\nsurface Dashboard {\n  facing: admin\n  exposes: Order.status\n\n  @guarantee FreshStatus\n    -- Status is at most one minute old.\n\n  @guarantee NoPii\n    -- No personal data is shown.\n\n  @guidance\n    -- Prefer a table layout.\n}";
+        let plan = parse_plan(source);
+        let guarantees: Vec<&Obligation> = plan.obligations.iter()
+            .filter(|o| matches!(o.category, ObligationCategory::SurfaceGuarantee))
+            .collect();
+        let ids: Vec<&str> = guarantees.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, vec!["surface-guarantee.Dashboard.FreshStatus", "surface-guarantee.Dashboard.NoPii"]);
+        assert_eq!(guarantees[0].source_construct, "Dashboard.FreshStatus");
+        assert_eq!(guarantees[0].description, "Verify surface Dashboard upholds guarantee FreshStatus");
+        assert_eq!(guarantees[0].expression.as_deref(), Some("Status is at most one minute old."));
+        assert_eq!(guarantees[1].expression.as_deref(), Some("No personal data is shown."));
+    }
+
+    #[test]
+    fn surface_guidance_annotation_no_obligation() {
+        let source = "-- allium: 3\nsurface Dashboard {\n  facing: admin\n\n  @guidance\n    -- Prefer a table layout.\n}";
+        let plan = parse_plan(source);
+        let ids: Vec<&str> = plan.obligations.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, vec!["surface-actor.Dashboard"]);
+    }
+
+    #[test]
+    fn surface_guarantee_category_serialises_snake_case() {
+        let json = serde_json::to_string(&ObligationCategory::SurfaceGuarantee).unwrap();
+        assert_eq!(json, "\"surface_guarantee\"");
+        let json = serde_json::to_string(&ObligationCategory::ContractInvariant).unwrap();
+        assert_eq!(json, "\"contract_invariant\"");
+    }
+
     // --- Config obligations ---
 
     #[test]
@@ -2063,6 +2149,31 @@ mod tests {
         let ob = find_obligation(&plan, "contract-signature.PaymentGateway.charge");
         assert!(matches!(ob.category, ObligationCategory::ContractSignature));
         assert_eq!(ob.source_construct, "PaymentGateway.charge");
+    }
+
+    #[test]
+    fn contract_invariant_obligation() {
+        let source = "-- allium: 3\ncontract PaymentGateway {\n  charge: Amount -> Result\n\n  @invariant Idempotent\n    -- Charging twice with the same key\n    -- charges once.\n}";
+        let plan = parse_plan(source);
+        let ob = plan.obligations.iter()
+            .find(|o| o.id == "contract-invariant.PaymentGateway.Idempotent")
+            .expect("contract invariant obligation");
+        assert!(matches!(ob.category, ObligationCategory::ContractInvariant));
+        assert_eq!(ob.source_construct, "PaymentGateway.Idempotent");
+        assert_eq!(
+            ob.description,
+            "Verify implementations of contract PaymentGateway uphold invariant Idempotent"
+        );
+        assert_eq!(ob.expression.as_deref(), Some("Charging twice with the same key charges once."));
+        find_obligation(&plan, "contract-signature.PaymentGateway.charge");
+    }
+
+    #[test]
+    fn contract_guidance_annotation_no_obligation() {
+        let source = "-- allium: 3\ncontract PaymentGateway {\n  charge: Amount -> Result\n\n  @guidance\n    -- Prefer retries with backoff.\n}";
+        let plan = parse_plan(source);
+        let ids: Vec<&str> = plan.obligations.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, vec!["contract-signature.PaymentGateway.charge"]);
     }
 
     // --- Variant obligations ---
